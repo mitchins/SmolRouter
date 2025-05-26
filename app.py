@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 # Basic logging setup
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("model-rerouter")
 
 app = FastAPI(
@@ -47,15 +47,8 @@ def rewrite_model(model: str) -> str:
 
 
 def strip_think_chain_from_text(text: str) -> str:
-    lines = text.splitlines()
-    filtered = []
-    for line in lines:
-        # remove bullets containing only think tags or blank bullets
-        if re.match(r"\*\s*<think>", line): continue
-        if re.match(r"\*\s*</think>", line): continue
-        if re.match(r"\*\s*$", line): continue
-        filtered.append(line)
-    return "\n".join(filtered)
+    # Remove any <think>...</think> blocks (including tags) and trailing whitespace/newlines
+    return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
 
 
 async def proxy_request(path: str, request: Request) -> StreamingResponse:
@@ -93,6 +86,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                     choice["message"]["content"] = strip_think_chain_from_text(choice["message"]["content"])
                 elif isinstance(choice.get("text"), str):
                     choice["text"] = strip_think_chain_from_text(choice["text"])
+            logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
             return JSONResponse(
                 content=data,
                 status_code=resp.status_code,
@@ -107,6 +101,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                         if DISABLE_THINKING:
                             # strip any inline <think>...</think> spans
                             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+                            logger.debug(f"Filtered stream chunk to: {text!r}")
                         yield text.encode('utf-8')
 
                 response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
