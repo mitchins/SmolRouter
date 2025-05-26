@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 # Basic logging setup
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-rerouter")
 
 app = FastAPI(
