@@ -100,15 +100,18 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             )
         else:
             async with client.stream("POST", url, json=payload, headers=headers) as upstream:
-                # Proxy the byte stream directly
-                response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
-                # Wrap the downstream stream to log chunks
-                async def log_stream() -> AsyncIterator[bytes]:
+                # Filter think tags in streaming responses if DISABLE_THINKING
+                async def filtered_stream() -> AsyncIterator[bytes]:
                     async for chunk in upstream.aiter_bytes():
-                        logger.debug(f"Downstream stream chunk: {chunk!r}")
-                        yield chunk
+                        text = chunk.decode('utf-8')
+                        if DISABLE_THINKING:
+                            # strip any inline <think>...</think> spans
+                            text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+                        yield text.encode('utf-8')
+
+                response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
                 return StreamingResponse(
-                    log_stream(),
+                    filtered_stream(),
                     status_code=upstream.status_code,
                     headers=response_headers,
                 )
