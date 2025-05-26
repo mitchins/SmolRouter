@@ -1,7 +1,4 @@
 # openai-model-rerouter
-Allows software with hard-coded model IDs to use whatever you desire
-
-# openai-model-rerouter
 
 A lightweight proxy service that lets you remap OpenAI-compatible model names on the fly.
 
