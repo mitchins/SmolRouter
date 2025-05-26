@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 # Basic logging setup
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-rerouter")
 
 app = FastAPI(
@@ -47,8 +47,15 @@ def rewrite_model(model: str) -> str:
 
 
 def strip_think_chain_from_text(text: str) -> str:
-    # Remove any <think>...</think> blocks (including tags) and trailing whitespace/newlines
-    return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL)
+    lines = text.splitlines()
+    filtered = []
+    for line in lines:
+        # remove bullets containing only think tags or blank bullets
+        if re.match(r"\*\s*<think>", line): continue
+        if re.match(r"\*\s*</think>", line): continue
+        if re.match(r"\*\s*$", line): continue
+        filtered.append(line)
+    return "\n".join(filtered)
 
 
 async def proxy_request(path: str, request: Request) -> StreamingResponse:
