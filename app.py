@@ -26,6 +26,9 @@ RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
 # Optionally disable internal thinking tags by using a no-think model variant
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
 
+# Optionally strip <think>...</think> tokens from responses
+STRIP_THINKING = os.getenv("STRIP_THINKING", "true").lower() in ("1", "true", "yes")
+
 # Load model mapping (simple exact or regex patterns)
 try:
     MODEL_MAP = json.loads(RAW_MODEL_MAP)
@@ -80,13 +83,14 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-length", "transfer-encoding"]}
             data = resp.json()
             logger.debug(f"Downstream non-stream response data: {json.dumps(data)}")
-            # Strip empty think chains from each choice
-            for choice in data.get("choices", []):
-                if "message" in choice and isinstance(choice["message"].get("content"), str):
-                    choice["message"]["content"] = strip_think_chain_from_text(choice["message"]["content"])
-                elif isinstance(choice.get("text"), str):
-                    choice["text"] = strip_think_chain_from_text(choice["text"])
-            logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
+            if STRIP_THINKING:
+                # Strip empty think chains from each choice
+                for choice in data.get("choices", []):
+                    if "message" in choice and isinstance(choice["message"].get("content"), str):
+                        choice["message"]["content"] = strip_think_chain_from_text(choice["message"]["content"])
+                    elif isinstance(choice.get("text"), str):
+                        choice["text"] = strip_think_chain_from_text(choice["text"])
+                logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
             return JSONResponse(
                 content=data,
                 status_code=resp.status_code,
@@ -94,11 +98,11 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             )
         else:
             async with client.stream("POST", url, json=payload, headers=headers) as upstream:
-                # Filter think tags in streaming responses if DISABLE_THINKING
+                # Filter think tags in streaming responses if STRIP_THINKING
                 async def filtered_stream() -> AsyncIterator[bytes]:
                     async for chunk in upstream.aiter_bytes():
                         text = chunk.decode('utf-8')
-                        if DISABLE_THINKING:
+                        if STRIP_THINKING:
                             # strip any inline <think>...</think> spans
                             text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
                             logger.debug(f"Filtered stream chunk to: {text!r}")

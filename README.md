@@ -11,7 +11,8 @@ Many tools and libraries hard-code specific model IDs (e.g., `gpt-3.5-turbo-16k`
 - **Model Mapping**: Redirect any incoming model ID to one of your choice.
 - **Flexible Configuration**: Define exact or regex-based mappings via environment variables or Docker settings.
 - **Streaming & Non-Streaming**: Fully compatible with both chat streaming (SSE) and standard JSON completions.
-- **Disable Internal Thinking**: Optionally append a `/no_think` flag to prompts to suppress internal `<think>...</think>` tokens.
+- **Strip Thinking Tokens**: Remove `<think>...</think>` blocks from responses when `STRIP_THINKING` is enabled (default `true`).
+- **Disable Internal Thinking**: Append `/no_think` marker to prompts when `DISABLE_THINKING` is enabled (default `false`).
 - **OpenAI API Interface**: List models, create completions, chat completions—just like the official API.
 
 ## How
@@ -40,6 +41,7 @@ Many tools and libraries hard-code specific model IDs (e.g., `gpt-3.5-turbo-16k`
 
 4. **Customize**  
    - **MODEL_MAP**: JSON object mapping source IDs (or `/regex/`) to target model IDs.  
+   - **STRIP_THINKING**: Set to `true` (default) to remove `<think>...</think>` tokens from responses.  
    - **DISABLE_THINKING**: Set to `true` to append `/no_think` to prompts.  
    - **LISTEN_HOST, LISTEN_PORT, UPSTREAM_URL**: Configure networking via environment variables.
 
