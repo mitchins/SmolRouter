@@ -181,12 +181,12 @@ def strip_json_markdown_from_text(text: str) -> str:
     Returns:
         Text with JSON markdown blocks replaced by pure JSON content
     """
-    # Pattern to match ```json\n...content...\n``` blocks
-    pattern = r'```json\s*\n(.*?)\n```'
+    # Pattern to match ```json...content...``` blocks (with or without newlines)
+    pattern = r'```json\s*(.*?)\s*```'
     
     def extract_json_content(match):
-        json_content = match.group(1)
-        # Clean up the JSON content - remove extra whitespace but preserve structure
+        json_content = match.group(1).strip()
+        # Clean up the JSON content - remove extra whitespace but preserve structure  
         lines = json_content.split('\n')
         cleaned_lines = []
         for line in lines:
@@ -514,7 +514,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                 if STRIP_THINKING:
                     ollama_response_content = strip_think_chain_from_text(ollama_response_content)
                 if STRIP_JSON_MARKDOWN:
+                    logger.debug(f"Original content before JSON markdown stripping: {repr(ollama_response_content)}")
                     ollama_response_content = strip_json_markdown_from_text(ollama_response_content)
+                    logger.debug(f"Content after JSON markdown stripping: {repr(ollama_response_content)}")
 
                 # Transform to Ollama response format
                 ollama_response = {
@@ -525,9 +527,13 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     "done_reason": "stop",
                 }
                 logger.debug(f"Transformed non-stream Ollama response: {json.dumps(ollama_response)}")
+                logger.info(f"Final Ollama response content: {repr(ollama_response.get('response', ''))}")
                 
                 # Complete logging for successful response
-                complete_request_log(log_entry, start_time, {"status_code": resp.status_code})
+                request_body_bytes = json.dumps(ollama_payload).encode('utf-8')
+                response_body_bytes = json.dumps(ollama_response).encode('utf-8')
+                complete_request_log(log_entry, start_time, {"status_code": resp.status_code}, 
+                                   request_body=request_body_bytes, response_body=response_body_bytes)
                 
                 return JSONResponse(
                     content=ollama_response,
@@ -576,7 +582,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                                             if STRIP_THINKING:
                                                 content = strip_think_chain_from_text(content)
                                             if STRIP_JSON_MARKDOWN:
+                                                logger.debug(f"Streaming: Original content before JSON markdown stripping: {repr(content)}")
                                                 content = strip_json_markdown_from_text(content)
+                                                logger.debug(f"Streaming: Content after JSON markdown stripping: {repr(content)}")
 
                                             # Transform to Ollama streaming format
                                             ollama_chunk = {
