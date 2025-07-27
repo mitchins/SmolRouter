@@ -3,7 +3,8 @@ import json
 import logging
 import re
 import time
-from typing import AsyncIterator
+import yaml
+from typing import AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -29,11 +30,11 @@ app = FastAPI(
 templates = Jinja2Templates(directory="templates")
 
 # Configuration via environment variables
-UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://localhost:8000")
-OLLAMA_UPSTREAM_URL = os.getenv("OLLAMA_UPSTREAM_URL", "http://localhost:11434")
+DEFAULT_UPSTREAM = os.getenv("DEFAULT_UPSTREAM", "http://localhost:8000")
 LISTEN_HOST = os.getenv("LISTEN_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "1234"))
 RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
+ROUTES_CONFIG = os.getenv("ROUTES_CONFIG", "routes.yaml")
 
 # Feature flags
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
@@ -87,20 +88,110 @@ except json.JSONDecodeError as e:
     logger.error(f"Failed to parse MODEL_MAP: {e}")
     MODEL_MAP = {}
 
+# Load routing configuration
+def load_routes_config() -> Dict:
+    """Load routing configuration from YAML or JSON file.
+    
+    Expected format:
+    routes:
+      - match:
+          source_host: "10.0.1.5"  # Optional: match by source IP/host
+          model: "gpt-4"           # Optional: match by model name (supports regex)
+        route:
+          upstream: "http://gpu-server:8000"  # Required: target upstream
+          model: "llama3-70b"                 # Optional: override model name
+    """
+    try:
+        if not os.path.exists(ROUTES_CONFIG):
+            logger.info(f"No routes config file found at {ROUTES_CONFIG}, using default routing")
+            return {"routes": []}
+            
+        with open(ROUTES_CONFIG, 'r') as f:
+            if ROUTES_CONFIG.endswith('.json'):
+                config = json.load(f)
+            else:  # Assume YAML
+                config = yaml.safe_load(f)
+                
+        # Validate config structure
+        if not isinstance(config, dict) or 'routes' not in config:
+            logger.error(f"Invalid routes config: missing 'routes' key")
+            return {"routes": []}
+            
+        if not isinstance(config['routes'], list):
+            logger.error(f"Invalid routes config: 'routes' must be a list")
+            return {"routes": []}
+            
+        logger.info(f"Loaded {len(config['routes'])} routing rules from {ROUTES_CONFIG}")
+        return config
+        
+    except Exception as e:
+        logger.error(f"Failed to load routes config from {ROUTES_CONFIG}: {e}")
+        return {"routes": []}
+
+ROUTES_CONFIG_DATA = load_routes_config()
+
+def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
+    """Find the best matching route for a request.
+    
+    Args:
+        source_host: Source IP address of the request
+        model: Original model name from the request
+        
+    Returns:
+        Tuple of (upstream_url, model_override) where model_override is None if no override
+    """
+    for route in ROUTES_CONFIG_DATA.get('routes', []):
+        match_criteria = route.get('match', {})
+        route_config = route.get('route', {})
+        
+        # Check if this route matches
+        matches = True
+        
+        # Check source host match (if specified)
+        if 'source_host' in match_criteria:
+            expected_host = match_criteria['source_host']
+            if source_host != expected_host:
+                matches = False
+                
+        # Check model match (if specified) - supports regex
+        if matches and 'model' in match_criteria:
+            model_pattern = match_criteria['model']
+            if model_pattern.startswith('/') and model_pattern.endswith('/'):
+                # Regex pattern
+                pattern = model_pattern[1:-1]  # Remove slashes
+                if not re.search(pattern, model):
+                    matches = False
+            else:
+                # Exact match
+                if model != model_pattern:
+                    matches = False
+        
+        if matches:
+            upstream = route_config.get('upstream')
+            model_override = route_config.get('model')
+            
+            if upstream:
+                logger.debug(f"Route matched: {source_host}/{model} -> {upstream}" +
+                           (f" (model: {model_override})" if model_override else ""))
+                return upstream, model_override
+    
+    # No specific route found, use default
+    logger.debug(f"No specific route found for {source_host}/{model}, using default upstream")
+    return DEFAULT_UPSTREAM, None
+
 # Validate URLs on startup
 try:
-    UPSTREAM_URL = validate_url(UPSTREAM_URL, "UPSTREAM_URL")
-    OLLAMA_UPSTREAM_URL = validate_url(OLLAMA_UPSTREAM_URL, "OLLAMA_UPSTREAM_URL")
+    DEFAULT_UPSTREAM = validate_url(DEFAULT_UPSTREAM, "DEFAULT_UPSTREAM")
 except ValueError as e:
     logger.error(f"Configuration error: {e}")
     logger.error("Please check your environment variables and restart")
     exit(1)
 
 # Log configuration at startup
-logger.info(f"OpenAI Model Rerouter starting...")
-logger.info(f"UPSTREAM_URL: {UPSTREAM_URL}")
-logger.info(f"OLLAMA_UPSTREAM_URL: {OLLAMA_UPSTREAM_URL}")
+logger.info(f"SmolRouter starting...")
+logger.info(f"DEFAULT_UPSTREAM: {DEFAULT_UPSTREAM}")
 logger.info(f"MODEL_MAP: {MODEL_MAP}")
+logger.info(f"ROUTES_CONFIG: {ROUTES_CONFIG} ({len(ROUTES_CONFIG_DATA.get('routes', []))} rules)")
 logger.info(f"STRIP_THINKING: {STRIP_THINKING}")
 logger.info(f"STRIP_JSON_MARKDOWN: {STRIP_JSON_MARKDOWN}")
 logger.info(f"DISABLE_THINKING: {DISABLE_THINKING}")
@@ -204,7 +295,7 @@ def strip_json_markdown_from_text(text: str) -> str:
     return result.strip()
 
 
-def start_request_log(request: Request, service_type: str, original_model: str = None, mapped_model: str = None):
+def start_request_log(request: Request, service_type: str, upstream_url: str, original_model: str = None, mapped_model: str = None):
     """Create initial log entry for inflight tracking"""
     if not ENABLE_LOGGING:
         return None
@@ -219,7 +310,7 @@ def start_request_log(request: Request, service_type: str, original_model: str =
             method=request.method,
             path=request.url.path,
             service_type=service_type,
-            upstream_url=UPSTREAM_URL,
+            upstream_url=upstream_url,
             original_model=original_model,
             mapped_model=mapped_model
         )
@@ -312,35 +403,50 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     original_model = None
     mapped_model = None
     
-    # Start logging immediately (creates inflight entry)
-    log_entry = start_request_log(request, "openai", original_model, mapped_model)
+    # Get source IP for routing
+    source_ip = request.client.host if request.client else "unknown"
     
     # Read and mutate JSON body
     try:
         payload = await request.json()
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
+        # Use default upstream for error logging
+        log_entry = start_request_log(request, "openai", DEFAULT_UPSTREAM, original_model, mapped_model)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"})
         return JSONResponse(
             content={"error": "Invalid JSON in request body"},
             status_code=400
         )
     
+    # Extract model for routing
     if "model" in payload:
         original_model = payload["model"]
         mapped_model = rewrite_model(original_model)
         if mapped_model != original_model:
             logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
         payload["model"] = mapped_model
+    
+    # Find the best route for this request
+    upstream_url, route_model_override = find_route(source_ip, original_model or "unknown")
+    
+    # Apply route-specific model override if specified
+    final_model = route_model_override or mapped_model
+    if route_model_override and route_model_override != mapped_model:
+        logger.info(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
+        payload["model"] = route_model_override
+    
+    # Start logging with the determined upstream URL
+    log_entry = start_request_log(request, "openai", upstream_url, original_model, final_model)
 
-        # Update log entry with model info
-        if log_entry:
-            try:
-                log_entry.original_model = original_model
-                log_entry.mapped_model = mapped_model
-                log_entry.save()
-            except Exception as e:
-                logger.error(f"Failed to update log entry: {e}")
+    # Update log entry with model info
+    if log_entry:
+        try:
+            log_entry.original_model = original_model
+            log_entry.mapped_model = final_model
+            log_entry.save()
+        except Exception as e:
+            logger.error(f"Failed to update log entry: {e}")
 
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
@@ -353,7 +459,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     # Forward headers (keep Authorization)
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
 
-    url = f"{UPSTREAM_URL}{path}"
+    url = f"{upstream_url}{path}"
     logger.debug(f"Proxying request to: {url}")
     
     try:
@@ -461,7 +567,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
-                "message": f"Could not connect to upstream server at {UPSTREAM_URL}",
+                "message": f"Could not connect to upstream server at {upstream_url}",
                 "details": str(e)
             },
             status_code=502
@@ -472,7 +578,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         return JSONResponse(
             content={
                 "error": "upstream_timeout",
-                "message": f"Upstream server at {UPSTREAM_URL} did not respond in time",
+                "message": f"Upstream server at {upstream_url} did not respond in time",
                 "details": str(e)
             },
             status_code=504
@@ -495,14 +601,16 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     original_model = None
     mapped_model = None
     
-    # Start logging immediately (creates inflight entry)
-    log_entry = start_request_log(request, "ollama", original_model, mapped_model)
+    # Get source IP for routing
+    source_ip = request.client.host if request.client else "unknown"
     
     # Read and mutate JSON body
     try:
         ollama_payload = await request.json()
     except Exception as e:
         logger.error(f"Failed to parse Ollama request JSON: {e}")
+        # Use default upstream for error logging
+        log_entry = start_request_log(request, "ollama", DEFAULT_UPSTREAM, original_model, mapped_model)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"})
         return JSONResponse(
             content={"error": "Invalid JSON in request body"},
@@ -518,15 +626,26 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     original_model = ollama_payload["model"]
     mapped_model = rewrite_model(original_model)
     
+    # Find the best route for this request
+    upstream_url, route_model_override = find_route(source_ip, original_model)
+    
+    # Apply route-specific model override if specified
+    final_model = route_model_override or mapped_model
+    if route_model_override and route_model_override != mapped_model:
+        logger.info(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
+    
     openai_payload = {}
-    openai_payload["model"] = mapped_model
+    openai_payload["model"] = final_model
     openai_payload["stream"] = ollama_payload.get("stream", False)
+    
+    # Start logging with the determined upstream URL
+    log_entry = start_request_log(request, "ollama", upstream_url, original_model, final_model)
     
     # Update log entry with model info
     if log_entry:
         try:
             log_entry.original_model = original_model
-            log_entry.mapped_model = mapped_model
+            log_entry.mapped_model = final_model
             log_entry.save()
         except Exception as e:
             logger.error(f"Failed to update Ollama log entry: {e}")
@@ -544,7 +663,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     # Forward headers (keep Authorization)
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
 
-    url = f"{UPSTREAM_URL}/v1/chat/completions"
+    url = f"{upstream_url}/v1/chat/completions"
     logger.debug(f"Proxying Ollama request to OpenAI endpoint: {url}")
     
     try:
@@ -679,7 +798,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
-                "message": f"Could not connect to upstream server at {UPSTREAM_URL}",
+                "message": f"Could not connect to upstream server at {upstream_url}",
                 "details": str(e)
             },
             status_code=502
@@ -690,7 +809,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         return JSONResponse(
             content={
                 "error": "upstream_timeout", 
-                "message": f"Upstream server at {UPSTREAM_URL} did not respond in time",
+                "message": f"Upstream server at {upstream_url} did not respond in time",
                 "details": str(e)
             },
             status_code=504
@@ -722,7 +841,7 @@ async def completions(request: Request):
 async def list_models(request: Request):
     # Simply proxy model listing
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization"]}
-    url = f"{UPSTREAM_URL}/v1/models"
+    url = f"{DEFAULT_UPSTREAM}/v1/models"
     logger.debug(f"Proxying models request to: {url}")
     
     try:
@@ -736,7 +855,7 @@ async def list_models(request: Request):
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
-                "message": f"Could not connect to upstream server at {UPSTREAM_URL}"
+                "message": f"Could not connect to upstream server at {DEFAULT_UPSTREAM}"
             },
             status_code=502
         )
@@ -761,33 +880,43 @@ async def ollama_chat(request: Request):
 
 @app.get("/api/tags")
 async def ollama_list_models(request: Request):
+    """Convert OpenAI /v1/models to Ollama /api/tags format"""
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization"]}
-    url = f"{OLLAMA_UPSTREAM_URL}/api/tags"
-    logger.debug(f"Proxying Ollama tags request to: {url}")
+    url = f"{DEFAULT_UPSTREAM}/v1/models"
+    logger.debug(f"Converting OpenAI models from {url} to Ollama tags format")
     
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             upstream = await client.get(url, headers=headers)
-            data = upstream.json()
-        return JSONResponse(content=data, status_code=upstream.status_code)
+            openai_data = upstream.json()
+            
+            # Convert OpenAI format to Ollama format
+            ollama_models = []
+            for model in openai_data.get("data", []):
+                ollama_models.append({
+                    "name": model.get("id", "unknown"),
+                    "modified_at": "2024-01-01T00:00:00Z",  # Mock timestamp
+                    "size": 4000000000,  # Mock size (4GB)
+                    "digest": "sha256:mock_digest"  # Mock digest
+                })
+            
+            ollama_response = {"models": ollama_models}
+            logger.debug(f"Converted {len(ollama_models)} models to Ollama format")
+            
+            return JSONResponse(content=ollama_response, status_code=upstream.status_code)
+            
     except httpx.ConnectError as e:
-        logger.error(f"Connection error to Ollama upstream {url}: {e}")
+        logger.error(f"Connection error to upstream {url}: {e}")
         return JSONResponse(
             content={
-                "error": "ollama_connection_failed",
-                "message": f"Could not connect to Ollama server at {OLLAMA_UPSTREAM_URL}"
+                "error": "upstream_connection_failed", 
+                "message": f"Could not connect to upstream server at {DEFAULT_UPSTREAM}"
             },
             status_code=502
         )
     except Exception as e:
-        logger.error(f"Error listing Ollama models from {url}: {e}")
-        return JSONResponse(
-            content={
-                "error": "ollama_tags_error",
-                "message": "Failed to retrieve models from Ollama upstream"
-            },
-            status_code=500
-        )
+        logger.error(f"Error converting models to Ollama format: {e}")
+        return JSONResponse(content={"error": "conversion_error"}, status_code=500)
 
 
 # Web UI Routes

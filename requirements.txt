@@ -7,3 +7,4 @@ pytest-mock
 respx
 peewee
 jinja2
+pyyaml
