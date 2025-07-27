@@ -114,13 +114,13 @@ flowchart TD
     MM[routes.yaml] --> G
     NN[Environment Variables] --> G
     
-    %% Styling
-    classDef client fill:#e1f5fe
-    classDef router fill:#f3e5f5
-    classDef routing fill:#fff3e0
-    classDef server fill:#e8f5e8
-    classDef monitoring fill:#fce4ec
-    classDef config fill:#f1f8e9
+    %% Styling for better dark theme accessibility
+    classDef client fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
+    classDef router fill:#f3e5f5,stroke:#4a148c,stroke-width:2px,color:#000
+    classDef routing fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    classDef server fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px,color:#000
+    classDef monitoring fill:#fce4ec,stroke:#880e4f,stroke-width:2px,color:#000
+    classDef config fill:#f1f8e9,stroke:#33691e,stroke-width:2px,color:#000
     
     class A client
     class B,D,E router
