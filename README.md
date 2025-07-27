@@ -15,6 +15,11 @@ This service acts as a transparent proxy between your applications and AI model 
 - **🧠 Think Chain Processing**: 
   - Strip `<think>...</think>` blocks from responses (enabled by default)
   - Disable internal thinking by appending `/no_think` to prompts
+- **📊 Request Logging & Web UI**: 
+  - SQLite database logging of all requests and responses
+  - Clean web dashboard showing request logs with filtering
+  - Performance metrics (duration, size, status codes)
+  - Automatic cleanup of old logs
 - **🔌 Drop-in Replacement**: Works as a direct OpenAI API replacement
 
 ## Quick Start
@@ -81,6 +86,9 @@ All configuration is done via environment variables:
 | `MODEL_MAP` | `{}` | JSON mapping of model names (see examples below) |
 | `STRIP_THINKING` | `true` | Remove `<think>...</think>` blocks from responses |
 | `DISABLE_THINKING` | `false` | Append `/no_think` to prompts |
+| `ENABLE_LOGGING` | `true` | Enable request logging and web UI |
+| `DB_PATH` | `requests.db` | SQLite database file path |
+| `MAX_LOG_AGE_DAYS` | `7` | Auto-delete logs older than this many days |
 | `LISTEN_HOST` | `127.0.0.1` | Host to bind to |
 | `LISTEN_PORT` | `1234` | Port to listen on |
 
@@ -114,6 +122,17 @@ All configuration is done via environment variables:
 - `POST /api/generate` - Generate completions (streaming and non-streaming)
 - `POST /api/chat` - Chat completions (streaming and non-streaming)
 - `GET /api/tags` - List available models
+
+### Web UI & Monitoring
+- `GET /` - Web dashboard showing request logs and statistics
+- `GET /api/logs` - JSON API for retrieving request logs
+- `GET /api/stats` - JSON API for getting usage statistics
+
+The web UI provides a clean interface showing:
+- Real-time request logs with source, destination, service type, and performance metrics
+- Statistics overview (total requests, by service type, recent activity)
+- Model mapping indicators when models are rewritten
+- Error tracking and status codes
 
 ## Development
 
