@@ -25,16 +25,16 @@ A smart, lightweight proxy for routing AI model requests with performance analyt
 
 ### Using Python
 
-1.  **Install dependencies:**
+1.  **Install SmolRouter:**
     ```bash
-    pip install -r requirements.txt
+    pip install smolrouter
     ```
 
 2.  **Run the application:**
     ```bash
     export DEFAULT_UPSTREAM="http://localhost:8000"
     export MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}'
-    python app.py
+    smolrouter
     ```
 
 ### Usage
@@ -137,7 +137,6 @@ The web UI provides insights into your model usage and performance.
 To run the test suite, use `pytest`:
 
 ```bash
-pip install -r requirements.txt
 pytest
 ```
 
