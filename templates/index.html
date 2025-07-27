@@ -210,6 +210,10 @@
             <div class="number">{{ stats.recent_requests }}</div>
             <div class="label">Last 24 Hours</div>
         </div>
+        <div class="stat-card">
+            <div class="number" style="color: #ff9800;">{{ stats.inflight_requests }}</div>
+            <div class="label">🔄 Inflight</div>
+        </div>
     </div>
     
     <div class="container">
@@ -284,12 +288,16 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if log.status_code %}
-                            <span class="status {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
-                                {{ log.status_code }}
-                            </span>
+                            {% if log.completed_at %}
+                                {% if log.status_code %}
+                                <span class="status {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                                    {{ log.status_code }}
+                                </span>
+                                {% else %}
+                                <span class="status status-success">✓</span>
+                                {% endif %}
                             {% else %}
-                            <span class="status status-error">ERR</span>
+                            <span class="status" style="background: #ff9800; color: white;">🔄 Inflight</span>
                             {% endif %}
                         </td>
                     </tr>

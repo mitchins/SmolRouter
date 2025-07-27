@@ -233,3 +233,23 @@ def test_url_validation():
     
     with pytest.raises(ValueError, match="must use http or https"):
         validate_url("ftp://example.com", "TEST")
+
+
+def test_timeout_configuration():
+    """Test that timeout configuration works with environment variables"""
+    import os
+    from unittest.mock import patch
+    
+    # Test default timeout
+    with patch.dict(os.environ, {}, clear=True):
+        # Reimport to get fresh config
+        import importlib
+        import app
+        importlib.reload(app)
+        assert app.REQUEST_TIMEOUT == 60.0
+    
+    # Test custom timeout
+    with patch.dict(os.environ, {"REQUEST_TIMEOUT": "45.5"}, clear=True):
+        importlib.reload(app)
+        assert app.REQUEST_TIMEOUT == 45.5
+        assert isinstance(app.REQUEST_TIMEOUT, float)
