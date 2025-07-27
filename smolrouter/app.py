@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 import httpx
 
 # Import database functionality
-from database import (init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests,
+from smolrouter.database import (init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests,
                      estimate_tokens_from_request, extract_tokens_from_openai_response, estimate_token_count)
 
 # Basic logging setup
@@ -27,7 +27,9 @@ app = FastAPI(
 )
 
 # Templates for web UI
-templates = Jinja2Templates(directory="templates")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+templates_dir = os.path.join(script_dir, "..", "templates")
+templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration via environment variables
 DEFAULT_UPSTREAM = os.getenv("DEFAULT_UPSTREAM", "http://localhost:8000")
