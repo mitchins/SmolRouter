@@ -1,0 +1,15 @@
+{
+    "id": "cmpl-123",
+    "object": "text_completion",
+    "created": 1678884844,
+    "model": "text-davinci-003",
+    "choices": [
+        {
+            "text": "This is a <think>internal thought</think> test.",
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "length"
+        }
+    ],
+    "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+}

@@ -1,3 +1,7 @@
 fastapi
 httpx
 uvicorn[standard]
+pytest
+pytest-asyncio
+pytest-mock
+respx
