@@ -1,0 +1,44 @@
+# SmolRouter Configuration File
+# This file defines routing rules to intelligently direct requests
+# to different upstream servers based on source host and model.
+
+routes:
+  # Route fast/lightweight models to GPU server
+  - match:
+      model: "/.*-1.5b/"  # Any model ending in -1.5b (regex)
+    route:
+      upstream: "http://gpu-server:8000"
+      # model: "custom-model"  # Optional: override model name
+  
+  # Route specific host to dedicated server
+  - match:
+      source_host: "10.0.1.100"  # Development machine
+    route:
+      upstream: "http://dev-server:8000"
+  
+  # Route large models to high-memory server
+  - match:
+      model: "/.*-70b|.*-405b/"  # Large models (regex)
+    route:
+      upstream: "http://bigmem-server:8000"
+  
+  # Route specific models with model override
+  - match:
+      model: "gpt-4"
+    route:
+      upstream: "http://claude-server:8000"
+      model: "claude-3-opus"  # Override model name
+  
+  # Catch-all for coding models
+  - match:
+      model: "/code.*/"  # Any model starting with "code"
+    route:
+      upstream: "http://code-server:8000"
+
+# Notes:
+# - Routes are evaluated in order - first match wins
+# - If no route matches, DEFAULT_ROUTE environment variable is used
+# - source_host matches the client IP address
+# - model patterns support exact match or regex (surrounded by /)
+# - Both match criteria are optional - you can match on either or both
+# - model override in route is optional - if not specified, original model is preserved

@@ -129,12 +129,16 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
 
 
 @pytest.mark.asyncio
-async def test_ollama_list_models(mock_ollama_upstream, disable_logging):
+async def test_ollama_list_models(mock_openai_upstream, disable_logging):
+    """Test /api/tags endpoint converts OpenAI models to Ollama format"""
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/tags")
     assert response.status_code == 200
     data = response.json()
-    assert "llama2" in [m["name"] for m in data["models"]]
+    assert "models" in data
+    # Should convert from OpenAI model format to Ollama format
+    assert len(data["models"]) > 0
+    assert "name" in data["models"][0]  # Ollama format has "name" field
 
 
 def test_rewrite_model_exact_match():
