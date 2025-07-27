@@ -1,7 +1,7 @@
 import pytest
 import httpx
 from httpx import AsyncClient
-from app import app, rewrite_model, strip_think_chain_from_text, MODEL_MAP
+from app import app, rewrite_model, strip_think_chain_from_text, MODEL_MAP, validate_url
 import json
 import respx
 
@@ -212,3 +212,24 @@ def test_think_chain_stripping_edge_cases():
     # Test malformed tags
     malformed = "Text <think>unclosed tag"
     assert strip_think_chain_from_text(malformed) == "Text <think>unclosed tag"
+
+
+def test_url_validation():
+    """Test URL validation and normalization"""
+    # Test normal URLs
+    assert validate_url("http://localhost:8000", "TEST") == "http://localhost:8000"
+    assert validate_url("https://api.openai.com", "TEST") == "https://api.openai.com"
+    
+    # Test URLs without protocol
+    assert validate_url("localhost:8000", "TEST") == "http://localhost:8000"
+    
+    # Test double protocol (the original issue that caused the user's problem)
+    assert validate_url("http://http://localhost:8000", "TEST") == "http://localhost:8000"
+    assert validate_url("https://https://api.openai.com", "TEST") == "https://api.openai.com"
+    
+    # Test invalid URLs
+    with pytest.raises(ValueError, match="cannot be empty"):
+        validate_url("", "TEST")
+    
+    with pytest.raises(ValueError, match="must use http or https"):
+        validate_url("ftp://example.com", "TEST")
