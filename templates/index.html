@@ -130,6 +130,15 @@
             background: #f8f9fa;
         }
         
+        .clickable-row {
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+        
+        .clickable-row:hover {
+            background: #e3f2fd !important;
+        }
+        
         .service-icon {
             display: inline-flex;
             align-items: center;
@@ -242,7 +251,7 @@
                 </thead>
                 <tbody>
                     {% for log in logs %}
-                    <tr>
+                    <tr class="clickable-row" onclick="viewRequest({{ log.id }})" title="Click to view full request details">
                         <td class="timestamp">
                             {{ log.timestamp.strftime('%H:%M:%S') }}<br>
                             <small>{{ log.timestamp.strftime('%m/%d') }}</small>
@@ -319,6 +328,11 @@
         setTimeout(() => {
             window.location.reload();
         }, 30000);
+        
+        // Navigate to request detail view
+        function viewRequest(requestId) {
+            window.open('/request/' + requestId, '_blank');
+        }
     </script>
 </body>
 </html>

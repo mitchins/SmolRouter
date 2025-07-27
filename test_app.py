@@ -1,7 +1,7 @@
 import pytest
 import httpx
 from httpx import AsyncClient
-from app import app, rewrite_model, strip_think_chain_from_text, MODEL_MAP, validate_url
+from app import app, rewrite_model, strip_think_chain_from_text, strip_json_markdown_from_text, MODEL_MAP, validate_url
 import json
 import respx
 
@@ -246,10 +246,95 @@ def test_timeout_configuration():
         import importlib
         import app
         importlib.reload(app)
-        assert app.REQUEST_TIMEOUT == 60.0
+        assert app.REQUEST_TIMEOUT == 3000.0
     
     # Test custom timeout
     with patch.dict(os.environ, {"REQUEST_TIMEOUT": "45.5"}, clear=True):
         importlib.reload(app)
         assert app.REQUEST_TIMEOUT == 45.5
         assert isinstance(app.REQUEST_TIMEOUT, float)
+
+
+def test_strip_json_markdown_from_text():
+    """Test JSON markdown scrubbing functionality"""
+    # Basic JSON block
+    text_with_json = '''Here is the response:
+```json
+{
+  "commit_type": "refactor",
+  "description": "Updated code"
+}
+```
+That's the result.'''
+    
+    expected = '''Here is the response:
+{ "commit_type": "refactor", "description": "Updated code" }
+That's the result.'''
+    
+    assert strip_json_markdown_from_text(text_with_json) == expected
+    
+    # Multiple JSON blocks
+    multiple_json = '''First:
+```json
+{"status": "success"}
+```
+Second:
+```json
+{"error": null}
+```
+Done.'''
+    
+    expected_multiple = '''First:
+{"status": "success"}
+Second:
+{"error": null}
+Done.'''
+    
+    assert strip_json_markdown_from_text(multiple_json) == expected_multiple
+    
+    # No JSON blocks
+    no_json = "Just regular text with no JSON blocks here."
+    assert strip_json_markdown_from_text(no_json) == no_json
+    
+    # Complex nested JSON
+    complex_json = '''Result:
+```json
+{
+  "items": [
+    {"id": 1, "name": "test"},
+    {"id": 2, "name": "demo"}
+  ],
+  "count": 2
+}
+```
+Finished.'''
+    
+    expected_complex = '''Result:
+{ "items": [ {"id": 1, "name": "test"}, {"id": 2, "name": "demo"} ], "count": 2 }
+Finished.'''
+    
+    assert strip_json_markdown_from_text(complex_json) == expected_complex
+
+
+def test_json_markdown_environment_variable():
+    """Test that JSON markdown scrubbing can be controlled via environment variable"""
+    import os
+    from unittest.mock import patch
+    
+    # Test disabled by default
+    with patch.dict(os.environ, {}, clear=True):
+        import importlib
+        import app
+        importlib.reload(app)
+        assert app.STRIP_JSON_MARKDOWN == False
+    
+    # Test enabled
+    with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": "true"}, clear=True):
+        importlib.reload(app)
+        assert app.STRIP_JSON_MARKDOWN == True
+    
+    # Test various true values
+    for true_value in ["1", "TRUE", "yes", "Yes"]:
+        with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": true_value}, clear=True):
+            importlib.reload(app)
+            assert app.STRIP_JSON_MARKDOWN == True

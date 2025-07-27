@@ -220,6 +220,75 @@ async def test_api_inflight_endpoint(isolated_db, disable_logging):
         assert isinstance(inflight[0]["elapsed_ms"], int)
 
 
+@pytest.mark.asyncio
+async def test_request_detail_view(isolated_db, disable_logging):
+    """Test the request detail view endpoint"""
+    # Create a completed request with full data
+    log_entry = RequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        duration_ms=1500,
+        request_size=512,
+        response_size=1024,
+        status_code=200,
+        request_body=b'{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}',
+        response_body=b'{"choices": [{"message": {"content": "Hello!"}}]}',
+        completed_at=datetime.now()
+    )
+    
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/request/{log_entry.id}")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        
+        content = response.text
+        assert f"Request #{log_entry.id}" in content
+        assert "Request Information" in content
+        assert "Response Information" in content
+        assert "192.168.1.100" in content
+        assert "gpt-4" in content
+        assert "llama3-70b" in content
+        assert "Request Body" in content
+        assert "Response Body" in content
+
+
+@pytest.mark.asyncio
+async def test_request_detail_view_404(isolated_db, disable_logging):
+    """Test the request detail view with non-existent request"""
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/request/999999")
+        assert response.status_code == 404
+        assert "Request Not Found" in response.text
+
+
+@pytest.mark.asyncio
+async def test_request_detail_view_inflight(isolated_db, disable_logging):
+    """Test the request detail view for inflight requests"""
+    # Create an inflight request (no completed_at)
+    log_entry = RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-3.5-turbo",
+        mapped_model="llama3-8b"
+    )
+    
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/request/{log_entry.id}")
+        assert response.status_code == 200
+        
+        content = response.text
+        assert "Inflight" in content
+        assert "Still processing" in content
+
+
 def test_request_log_model_fields(isolated_db):
     """Test that the RequestLog model has all required fields"""
     # Create a comprehensive log entry

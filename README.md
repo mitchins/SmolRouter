@@ -15,6 +15,9 @@ This service acts as a transparent proxy between your applications and AI model 
 - **🧠 Think Chain Processing**: 
   - Strip `<think>...</think>` blocks from responses (enabled by default)
   - Disable internal thinking by appending `/no_think` to prompts
+- **📝 JSON Markdown Scrubbing**: 
+  - Convert markdown-fenced JSON blocks to pure JSON (configurable)
+  - Ideal for models that output JSON in markdown format
 - **📊 Request Logging & Web UI**: 
   - SQLite database logging of all requests and responses
   - Clean web dashboard showing request logs with filtering
@@ -22,6 +25,73 @@ This service acts as a transparent proxy between your applications and AI model 
   - **🔄 Real-time inflight tracking**: See active requests in progress
   - Automatic cleanup of old logs with database optimization
 - **🔌 Drop-in Replacement**: Works as a direct OpenAI API replacement
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[Client Application] -->|HTTP Request| B[OpenAI Model Rerouter]
+    B --> C{Request Type?}
+    
+    C -->|OpenAI API| D[OpenAI Handler]
+    C -->|Ollama API| E[Ollama Handler]
+    
+    D --> F[Start Request Logging]
+    E --> F
+    
+    F --> G[Parse & Validate JSON]
+    G --> H{Model Mapping?}
+    H -->|Yes| I[Rewrite Model ID]
+    H -->|No| J[Keep Original Model]
+    I --> K[Apply Processing Options]
+    J --> K
+    
+    K --> L{Disable Thinking?}
+    L -->|Yes| M[Add /no_think to Content]
+    L -->|No| N[Continue]
+    M --> N
+    
+    N --> O[Forward to Upstream]
+    O --> P{Upstream Response}
+    
+    P -->|Success| Q[Process Response]
+    P -->|Error| R[Handle Error]
+    
+    Q --> S{Strip Thinking?}
+    S -->|Yes| T[Remove think blocks]
+    S -->|No| U[Continue]
+    T --> U
+    
+    U --> V{Strip JSON Markdown?}
+    V -->|Yes| W[Convert markdown JSON to pure JSON]
+    V -->|No| X[Continue]
+    W --> X
+    
+    X --> Y[Complete Request Logging]
+    R --> Y
+    
+    Y --> Z[Return Response to Client]
+    
+    %% Logging & Monitoring
+    F --> AA[(SQLite Database)]
+    Y --> AA
+    AA --> BB[Web Dashboard]
+    AA --> CC[Request Detail View]
+    AA --> DD[API Endpoints]
+    
+    %% Styling
+    classDef client fill:#e1f5fe
+    classDef proxy fill:#f3e5f5
+    classDef processing fill:#fff3e0
+    classDef storage fill:#e8f5e8
+    classDef ui fill:#fce4ec
+    
+    class A client
+    class B,D,E proxy
+    class F,G,H,I,J,K,L,M,N,O,Q,S,T,U,V,W,X,Y processing
+    class AA storage
+    class BB,CC,DD ui
+```
 
 ## Quick Start
 
@@ -87,6 +157,7 @@ All configuration is done via environment variables:
 | `OLLAMA_UPSTREAM_URL` | `http://localhost:11434` | Ollama API endpoint for `/api/tags` |
 | `MODEL_MAP` | `{}` | JSON mapping of model names (see examples below) |
 | `STRIP_THINKING` | `true` | Remove `<think>...</think>` blocks from responses |
+| `STRIP_JSON_MARKDOWN` | `false` | Convert markdown-fenced JSON blocks to pure JSON |
 | `DISABLE_THINKING` | `false` | Append `/no_think` to prompts |
 | `ENABLE_LOGGING` | `true` | Enable request logging and web UI |
 | `REQUEST_TIMEOUT` | `60.0` | Timeout for upstream requests in seconds |
@@ -116,24 +187,70 @@ All configuration is done via environment variables:
 
 ## API Compatibility
 
-### Supported OpenAI Endpoints
-- `POST /v1/chat/completions` - Chat completions (streaming and non-streaming)
-- `POST /v1/completions` - Text completions (streaming and non-streaming)  
-- `GET /v1/models` - List available models
+### Supported Inbound Protocols
 
-### Supported Ollama Endpoints
-- `POST /api/generate` - Generate completions (streaming and non-streaming)
-- `POST /api/chat` - Chat completions (streaming and non-streaming)
-- `GET /api/tags` - List available models
+#### OpenAI API Format
+The service fully supports the OpenAI API specification with the following endpoints:
+
+| Endpoint | Method | Streaming | Description |
+|----------|--------|-----------|-------------|
+| `/v1/chat/completions` | POST | ✅ Yes | Chat-based completions with message history |
+| `/v1/completions` | POST | ✅ Yes | Text completions with prompt input |
+| `/v1/models` | GET | ❌ No | List available models from upstream |
+
+**Features:**
+- ✅ Request/response body preservation
+- ✅ Model ID mapping and rewriting
+- ✅ Think chain processing and removal
+- ✅ JSON markdown conversion
+- ✅ Authorization header passthrough
+- ✅ Error handling and upstream status codes
+
+#### Ollama API Format
+The service converts Ollama API calls to OpenAI format before forwarding:
+
+| Endpoint | Method | Streaming | Description |
+|----------|--------|-----------|-------------|
+| `/api/generate` | POST | ✅ Yes | Generate text from prompt (converted to chat format) |
+| `/api/chat` | POST | ✅ Yes | Chat completions (mapped to OpenAI format) |
+| `/api/tags` | GET | ❌ No | List available models (proxied to Ollama upstream) |
+
+**Conversion Details:**
+- `/api/generate` → `/v1/chat/completions` (prompt converted to user message)
+- `/api/chat` → `/v1/chat/completions` (messages array passed through)
+- Response format converted back to Ollama JSON structure
+- Model names preserved in Ollama response format
+
+### Processing Features
+
+#### Model Mapping
+- **Exact Match**: `"gpt-4" → "claude-3-opus"`
+- **Regex Patterns**: `"/gpt-(.*)/" → "claude-3-\\1"`
+- Applied before forwarding to upstream
+- Original and mapped models logged for tracking
+
+#### Content Processing
+- **Think Chain Removal**: Strips `<think>...</think>` blocks from responses
+- **JSON Markdown Conversion**: Converts \`\`\`json blocks to pure JSON
+- **Thinking Disable**: Appends `/no_think` to prompts when enabled
+- Applied to both streaming and non-streaming responses
+
+#### Error Handling
+- **Connection Errors**: 502 Bad Gateway with detailed error message
+- **Timeout Errors**: 504 Gateway Timeout with configurable timeout
+- **Malformed JSON**: 400 Bad Request for invalid request bodies
+- **Upstream Errors**: Status codes and error messages passed through
 
 ### Web UI & Monitoring
 - `GET /` - Web dashboard showing request logs and statistics
+- `GET /request/{id}` - Detailed view of a specific request with full transcript
 - `GET /api/logs` - JSON API for retrieving request logs
 - `GET /api/stats` - JSON API for getting usage statistics
 - `GET /api/inflight` - JSON API for getting currently active requests
 
 The web UI provides a clean interface showing:
 - **🔄 Real-time inflight tracking**: See requests currently being processed
+- **🔍 Detailed request view**: Click any request to see full transcript with collapsible sections
 - Request logs with source, destination, service type, and performance metrics
 - Statistics overview (total requests, by service type, recent activity, inflight count)
 - Model mapping indicators when models are rewritten

@@ -37,6 +37,7 @@ RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
 # Feature flags
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
 STRIP_THINKING = os.getenv("STRIP_THINKING", "true").lower() in ("1", "true", "yes")
+STRIP_JSON_MARKDOWN = os.getenv("STRIP_JSON_MARKDOWN", "false").lower() in ("1", "true", "yes")
 ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "yes")
 
 # Timeout configuration
@@ -100,6 +101,7 @@ logger.info(f"UPSTREAM_URL: {UPSTREAM_URL}")
 logger.info(f"OLLAMA_UPSTREAM_URL: {OLLAMA_UPSTREAM_URL}")
 logger.info(f"MODEL_MAP: {MODEL_MAP}")
 logger.info(f"STRIP_THINKING: {STRIP_THINKING}")
+logger.info(f"STRIP_JSON_MARKDOWN: {STRIP_JSON_MARKDOWN}")
 logger.info(f"DISABLE_THINKING: {DISABLE_THINKING}")
 logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
 logger.info(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
@@ -157,6 +159,46 @@ def strip_think_chain_from_text(text: str) -> str:
     
     # Remove space before punctuation
     result = re.sub(r'\s+([.!?,:;])', r'\1', result)
+    
+    return result.strip()
+
+
+def strip_json_markdown_from_text(text: str) -> str:
+    """Extract JSON from markdown code blocks, converting markdown-fenced JSON to pure JSON.
+    
+    This function finds JSON code blocks like:
+    ```json
+    {
+      "key": "value"
+    }
+    ```
+    
+    And extracts just the JSON content, removing the markdown formatting.
+    
+    Args:
+        text: Input text that may contain JSON markdown blocks
+        
+    Returns:
+        Text with JSON markdown blocks replaced by pure JSON content
+    """
+    # Pattern to match ```json\n...content...\n``` blocks
+    pattern = r'```json\s*\n(.*?)\n```'
+    
+    def extract_json_content(match):
+        json_content = match.group(1)
+        # Clean up the JSON content - remove extra whitespace but preserve structure
+        lines = json_content.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped:  # Only keep non-empty lines
+                cleaned_lines.append(stripped)
+        
+        # Join with single spaces to create compact JSON
+        return ' '.join(cleaned_lines)
+    
+    # Replace all JSON markdown blocks with their content
+    result = re.sub(pattern, extract_json_content, text, flags=re.DOTALL)
     
     return result.strip()
 
@@ -269,13 +311,23 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                 data = resp.json()
                 logger.debug(f"Downstream non-stream response data: {json.dumps(data)}")
                 
-                # Strip thinking chains if enabled
-                if STRIP_THINKING:
+                # Strip thinking chains and JSON markdown if enabled
+                if STRIP_THINKING or STRIP_JSON_MARKDOWN:
                     for choice in data.get("choices", []):
                         if "message" in choice and isinstance(choice["message"].get("content"), str):
-                            choice["message"]["content"] = strip_think_chain_from_text(choice["message"]["content"])
+                            content = choice["message"]["content"]
+                            if STRIP_THINKING:
+                                content = strip_think_chain_from_text(content)
+                            if STRIP_JSON_MARKDOWN:
+                                content = strip_json_markdown_from_text(content)
+                            choice["message"]["content"] = content
                         elif isinstance(choice.get("text"), str):
-                            choice["text"] = strip_think_chain_from_text(choice["text"])
+                            text = choice["text"]
+                            if STRIP_THINKING:
+                                text = strip_think_chain_from_text(text)
+                            if STRIP_JSON_MARKDOWN:
+                                text = strip_json_markdown_from_text(text)
+                            choice["text"] = text
                     logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
                 
                 response = JSONResponse(
@@ -311,12 +363,22 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
 
                                         try:
                                             data = json.loads(json_data)
-                                            if STRIP_THINKING:
+                                            if STRIP_THINKING or STRIP_JSON_MARKDOWN:
                                                 if data.get("choices"):
                                                     if "delta" in data["choices"][0] and isinstance(data["choices"][0]["delta"].get("content"), str):
-                                                        data["choices"][0]["delta"]["content"] = strip_think_chain_from_text(data["choices"][0]["delta"]["content"])
+                                                        content = data["choices"][0]["delta"]["content"]
+                                                        if STRIP_THINKING:
+                                                            content = strip_think_chain_from_text(content)
+                                                        if STRIP_JSON_MARKDOWN:
+                                                            content = strip_json_markdown_from_text(content)
+                                                        data["choices"][0]["delta"]["content"] = content
                                                     elif isinstance(data["choices"][0].get("text"), str):
-                                                        data["choices"][0]["text"] = strip_think_chain_from_text(data["choices"][0]["text"])
+                                                        text = data["choices"][0]["text"]
+                                                        if STRIP_THINKING:
+                                                            text = strip_think_chain_from_text(text)
+                                                        if STRIP_JSON_MARKDOWN:
+                                                            text = strip_json_markdown_from_text(text)
+                                                        data["choices"][0]["text"] = text
                                             yield f"data: {json.dumps(data)}\n\n".encode('utf-8')
                                         except json.JSONDecodeError:
                                             logger.warning(f"Could not decode JSON from SSE: {json_data!r}")
@@ -448,9 +510,11 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     elif isinstance(choice.get("text"), str):
                         ollama_response_content = choice["text"]
 
-                # Strip thinking chains if enabled
+                # Strip thinking chains and JSON markdown if enabled
                 if STRIP_THINKING:
                     ollama_response_content = strip_think_chain_from_text(ollama_response_content)
+                if STRIP_JSON_MARKDOWN:
+                    ollama_response_content = strip_json_markdown_from_text(ollama_response_content)
 
                 # Transform to Ollama response format
                 ollama_response = {
@@ -510,7 +574,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                                                     content = data["choices"][0]["text"]
 
                                             if STRIP_THINKING:
-                                                content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+                                                content = strip_think_chain_from_text(content)
+                                            if STRIP_JSON_MARKDOWN:
+                                                content = strip_json_markdown_from_text(content)
 
                                             # Transform to Ollama streaming format
                                             ollama_chunk = {
@@ -534,6 +600,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                                 break
 
                     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
+                    # Complete logging for streaming response
+                    complete_request_log(log_entry, start_time, {"status_code": upstream.status_code})
+                    
                     return StreamingResponse(
                         ollama_streaming_response_generator(),
                         status_code=upstream.status_code,
@@ -542,6 +611,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     )
     except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream {url}: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": str(e)})
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
@@ -552,6 +622,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         )
     except httpx.TimeoutException as e:
         logger.error(f"Timeout error to upstream {url}: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 504, "error_message": str(e)})
         return JSONResponse(
             content={
                 "error": "upstream_timeout", 
@@ -562,6 +633,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         )
     except Exception as e:
         logger.error(f"Unexpected error proxying Ollama request to {url}: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)})
         return JSONResponse(
             content={
                 "error": "proxy_error",
@@ -739,6 +811,30 @@ async def api_inflight():
         logger.error(f"Error getting inflight requests: {e}")
         return JSONResponse(
             content={"error": "Failed to get inflight requests"},
+            status_code=500
+        )
+
+
+@app.get("/request/{request_id}", response_class=HTMLResponse)
+async def request_detail(request_id: int, request: Request):
+    """Detailed view of a specific request"""
+    try:
+        log_entry = RequestLog.get_by_id(request_id)
+        
+        return templates.TemplateResponse(request, "request_detail.html", {
+            "log": log_entry,
+            "request_body_str": log_entry.request_body.decode('utf-8') if log_entry.request_body else None,
+            "response_body_str": log_entry.response_body.decode('utf-8') if log_entry.response_body else None,
+        })
+    except RequestLog.DoesNotExist:
+        return HTMLResponse(
+            content="<h1>Request Not Found</h1><p>The requested log entry does not exist.</p>",
+            status_code=404
+        )
+    except Exception as e:
+        logger.error(f"Error rendering request detail: {e}")
+        return HTMLResponse(
+            content=f"<h1>Error</h1><p>Failed to load request details: {e}</p>",
             status_code=500
         )
 
