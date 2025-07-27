@@ -182,11 +182,42 @@ async def test_api_stats_endpoint(isolated_db, sample_logs, disable_logging):
         assert "openai_requests" in stats
         assert "ollama_requests" in stats
         assert "recent_requests" in stats
+        assert "inflight_requests" in stats
         
         assert isinstance(stats["total_requests"], int)
         assert isinstance(stats["openai_requests"], int)
         assert isinstance(stats["ollama_requests"], int)
         assert isinstance(stats["recent_requests"], int)
+        assert isinstance(stats["inflight_requests"], int)
+
+
+@pytest.mark.asyncio
+async def test_api_inflight_endpoint(isolated_db, disable_logging):
+    """Test the inflight requests API endpoint"""
+    # Create an inflight request
+    inflight_log = RequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b"
+    )
+    
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/inflight")
+        assert response.status_code == 200
+        
+        inflight = response.json()
+        assert len(inflight) == 1
+        assert inflight[0]["id"] == inflight_log.id
+        assert inflight[0]["source_ip"] == "192.168.1.100"
+        assert inflight[0]["service_type"] == "openai"
+        assert inflight[0]["original_model"] == "gpt-4"
+        assert inflight[0]["mapped_model"] == "llama3-70b"
+        assert "elapsed_ms" in inflight[0]
+        assert isinstance(inflight[0]["elapsed_ms"], int)
 
 
 def test_request_log_model_fields(isolated_db):
@@ -284,3 +315,79 @@ def test_error_logging(isolated_db):
     assert error_log.status_code == 502
     assert error_log.error_message == "Connection refused"
     assert error_log.duration_ms is None  # No duration for failed requests
+
+
+def test_inflight_tracking(isolated_db):
+    """Test inflight request tracking"""
+    from database import get_inflight_requests
+    
+    # Create an inflight request (no completed_at)
+    inflight_log = RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b"
+    )
+    
+    # Create a completed request
+    completed_log = RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST", 
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-3.5-turbo",
+        mapped_model="llama3-8b",
+        duration_ms=1500,
+        status_code=200,
+        completed_at=datetime.now()
+    )
+    
+    # Test inflight retrieval
+    inflight_requests = get_inflight_requests()
+    assert len(inflight_requests) == 1
+    assert inflight_requests[0].id == inflight_log.id
+    assert inflight_requests[0].completed_at is None
+    
+    # Test stats include inflight count
+    stats = get_log_stats()
+    assert stats['inflight_requests'] == 1
+    assert stats['total_requests'] == 2
+    
+    # Complete the inflight request
+    inflight_log.completed_at = datetime.now()
+    inflight_log.duration_ms = 2000
+    inflight_log.status_code = 200
+    inflight_log.save()
+    
+    # Should no longer be inflight
+    inflight_requests = get_inflight_requests()
+    assert len(inflight_requests) == 0
+    
+    stats = get_log_stats()
+    assert stats['inflight_requests'] == 0
+    assert stats['total_requests'] == 2
+
+
+def test_vacuum_database(isolated_db):
+    """Test database vacuum functionality"""
+    from database import vacuum_database
+    
+    # Create some test data
+    RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        completed_at=datetime.now()
+    )
+    
+    # Test vacuum doesn't raise errors
+    vacuum_database()
+    
+    # Data should still be there
+    assert RequestLog.select().count() == 1

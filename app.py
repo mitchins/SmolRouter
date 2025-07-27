@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 import httpx
 
 # Import database functionality
-from database import init_database, RequestLog, get_recent_logs, get_log_stats
+from database import init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +38,9 @@ RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
 STRIP_THINKING = os.getenv("STRIP_THINKING", "true").lower() in ("1", "true", "yes")
 ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "yes")
+
+# Timeout configuration
+REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "3000.0"))
 
 def validate_url(url: str, name: str) -> str:
     """Validate and normalize a URL, providing helpful error messages."""
@@ -99,6 +102,7 @@ logger.info(f"MODEL_MAP: {MODEL_MAP}")
 logger.info(f"STRIP_THINKING: {STRIP_THINKING}")
 logger.info(f"DISABLE_THINKING: {DISABLE_THINKING}")
 logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
+logger.info(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
 logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
 
 # Initialize database if logging is enabled
@@ -157,47 +161,61 @@ def strip_think_chain_from_text(text: str) -> str:
     return result.strip()
 
 
-def log_request(request: Request, response_data: dict, start_time: float, service_type: str, 
-                original_model: str = None, mapped_model: str = None, 
-                request_body: bytes = None, response_body: bytes = None):
-    """Log request details to database"""
+def start_request_log(request: Request, service_type: str, original_model: str = None, mapped_model: str = None):
+    """Create initial log entry for inflight tracking"""
     if not ENABLE_LOGGING:
-        return
+        return None
     
     try:
         # Get client IP
         source_ip = request.client.host if request.client else "unknown"
         
-        # Calculate metrics
-        duration_ms = int((time.time() - start_time) * 1000)
-        request_size = len(request_body) if request_body else 0
-        response_size = len(response_body) if response_body else 0
-        
-        # Create log entry
-        RequestLog.create(
+        # Create initial log entry (inflight - no completed_at)
+        log_entry = RequestLog.create(
             source_ip=source_ip,
             method=request.method,
             path=request.url.path,
             service_type=service_type,
             upstream_url=UPSTREAM_URL,
             original_model=original_model,
-            mapped_model=mapped_model,
-            duration_ms=duration_ms,
-            request_size=request_size,
-            response_size=response_size,
-            status_code=response_data.get('status_code'),
-            request_body=request_body,
-            response_body=response_body,
-            error_message=response_data.get('error_message')
+            mapped_model=mapped_model
         )
+        return log_entry
     except Exception as e:
-        logger.error(f"Failed to log request: {e}")
+        logger.error(f"Failed to start request log: {e}")
+        return None
+
+def complete_request_log(log_entry, start_time: float, response_data: dict, 
+                        request_body: bytes = None, response_body: bytes = None):
+    """Complete the log entry when request finishes"""
+    if not ENABLE_LOGGING or not log_entry:
+        return
+    
+    try:
+        # Calculate metrics
+        duration_ms = int((time.time() - start_time) * 1000)
+        request_size = len(request_body) if request_body else 0
+        response_size = len(response_body) if response_body else 0
+        
+        # Update log entry with completion data
+        log_entry.duration_ms = duration_ms
+        log_entry.request_size = request_size
+        log_entry.response_size = response_size
+        log_entry.status_code = response_data.get('status_code')
+        log_entry.request_body = request_body
+        log_entry.response_body = response_body
+        log_entry.error_message = response_data.get('error_message')
+        log_entry.completed_at = datetime.now()
+        log_entry.save()
+    except Exception as e:
+        logger.error(f"Failed to complete request log: {e}")
 
 
 async def proxy_request(path: str, request: Request) -> StreamingResponse:
     start_time = time.time()
     original_model = None
     mapped_model = None
+    log_entry = None
     
     # Read and mutate JSON body
     try:
@@ -216,6 +234,9 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
         payload["model"] = mapped_model
 
+    # Start logging (creates inflight entry)
+    log_entry = start_request_log(request, "openai", original_model, mapped_model)
+
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
         logger.info("Disabling thinking by appending '/no_think' marker to content")
@@ -231,7 +252,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     logger.debug(f"Proxying request to: {url}")
     
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             # Non-streaming case: forward and return JSON directly
             if not payload.get("stream"):
                 resp = await client.post(url, json=payload, headers=headers)
@@ -254,10 +275,8 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                     headers=response_headers,
                 )
                 
-                # Log the request
-                if ENABLE_LOGGING:
-                    log_request(request, {"status_code": resp.status_code}, 
-                               start_time, "openai", original_model, mapped_model)
+                # Complete the logging
+                complete_request_log(log_entry, start_time, {"status_code": resp.status_code})
                 
                 return response
             else:
@@ -299,10 +318,8 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
 
                     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
                     
-                    # Log streaming request
-                    if ENABLE_LOGGING:
-                        log_request(request, {"status_code": upstream.status_code}, 
-                                   start_time, "openai", original_model, mapped_model)
+                    # Complete streaming request logging
+                    complete_request_log(log_entry, start_time, {"status_code": upstream.status_code})
                     
                     return StreamingResponse(
                         openai_streaming_response_generator(),
@@ -313,10 +330,8 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream {url}: {e}")
         
-        # Log the error
-        if ENABLE_LOGGING:
-            log_request(request, {"status_code": 502, "error_message": str(e)}, 
-                       start_time, "openai", original_model, mapped_model)
+        # Complete logging with error
+        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": str(e)})
         
         return JSONResponse(
             content={
@@ -328,6 +343,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         )
     except httpx.TimeoutException as e:
         logger.error(f"Timeout error to upstream {url}: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 504, "error_message": str(e)})
         return JSONResponse(
             content={
                 "error": "upstream_timeout",
@@ -338,6 +354,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         )
     except Exception as e:
         logger.error(f"Unexpected error proxying to {url}: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)})
         return JSONResponse(
             content={
                 "error": "proxy_error",
@@ -386,7 +403,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     logger.debug(f"Proxying Ollama request to OpenAI endpoint: {url}")
     
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             if not openai_payload.get("stream"):
                 resp = await client.post(url, json=openai_payload, headers=headers)
                 response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-length", "transfer-encoding"]}
@@ -540,7 +557,7 @@ async def list_models(request: Request):
     logger.debug(f"Proxying models request to: {url}")
     
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             upstream = await client.get(url, headers=headers)
             data = upstream.json()
         # (Optional) rewrite IDs in data.get("data", []) here
@@ -580,7 +597,7 @@ async def ollama_list_models(request: Request):
     logger.debug(f"Proxying Ollama tags request to: {url}")
     
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             upstream = await client.get(url, headers=headers)
             data = upstream.json()
         return JSONResponse(content=data, status_code=upstream.status_code)
@@ -641,7 +658,9 @@ async def api_logs(limit: int = 100, service_type: str = None):
                 "request_size": log.request_size,
                 "response_size": log.response_size,
                 "status_code": log.status_code,
-                "error_message": log.error_message
+                "error_message": log.error_message,
+                "completed_at": log.completed_at.isoformat() if log.completed_at else None,
+                "is_inflight": log.completed_at is None
             }
             for log in logs
         ]
@@ -661,6 +680,32 @@ async def api_stats():
         logger.error(f"Error getting stats: {e}")
         return JSONResponse(
             content={"error": "Failed to get stats"},
+            status_code=500
+        )
+
+@app.get("/api/inflight")
+async def api_inflight():
+    """API endpoint for getting currently inflight requests"""
+    try:
+        inflight = get_inflight_requests()
+        return [
+            {
+                "id": log.id,
+                "timestamp": log.timestamp.isoformat(),
+                "source_ip": log.source_ip,
+                "method": log.method,
+                "path": log.path,
+                "service_type": log.service_type,
+                "original_model": log.original_model,
+                "mapped_model": log.mapped_model,
+                "elapsed_ms": int((datetime.now() - log.timestamp).total_seconds() * 1000)
+            }
+            for log in inflight
+        ]
+    except Exception as e:
+        logger.error(f"Error getting inflight requests: {e}")
+        return JSONResponse(
+            content={"error": "Failed to get inflight requests"},
             status_code=500
         )
 

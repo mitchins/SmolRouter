@@ -40,6 +40,9 @@ class RequestLog(BaseModel):
     response_size = IntegerField(default=0)
     status_code = IntegerField(null=True)
     
+    # Request status tracking
+    completed_at = DateTimeField(null=True)  # NULL = inflight, NOT NULL = completed
+    
     # Payload storage (large blobs)
     request_body = BlobField(null=True)
     response_body = BlobField(null=True)
@@ -53,6 +56,7 @@ class RequestLog(BaseModel):
             (('timestamp',), False),
             (('service_type', 'timestamp'), False),
             (('status_code', 'timestamp'), False),
+            (('completed_at',), False),  # For inflight queries
         )
 
 def init_database():
@@ -65,6 +69,7 @@ def init_database():
         
         # Run cleanup on startup
         cleanup_old_logs()
+        vacuum_database()
         
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
@@ -82,6 +87,14 @@ def cleanup_old_logs():
     except Exception as e:
         logger.error(f"Failed to cleanup old logs: {e}")
 
+def vacuum_database():
+    """Run VACUUM to reclaim space after cleanup"""
+    try:
+        db.execute_sql("VACUUM")
+        logger.info("Database vacuum completed")
+    except Exception as e:
+        logger.error(f"Failed to vacuum database: {e}")
+
 def get_recent_logs(limit=100, service_type=None):
     """Get recent request logs"""
     query = RequestLog.select().order_by(RequestLog.timestamp.desc()).limit(limit)
@@ -90,6 +103,14 @@ def get_recent_logs(limit=100, service_type=None):
         query = query.where(RequestLog.service_type == service_type)
     
     return list(query)
+
+def get_inflight_requests():
+    """Get currently inflight (incomplete) requests"""
+    try:
+        return list(RequestLog.select().where(RequestLog.completed_at.is_null()).order_by(RequestLog.timestamp.desc()))
+    except Exception as e:
+        logger.error(f"Failed to get inflight requests: {e}")
+        return []
 
 def get_log_stats():
     """Get basic statistics about the logs"""
@@ -104,11 +125,15 @@ def get_log_stats():
         yesterday = datetime.now() - timedelta(days=1)
         recent_count = RequestLog.select().where(RequestLog.timestamp > yesterday).count()
         
+        # Inflight requests
+        inflight_count = RequestLog.select().where(RequestLog.completed_at.is_null()).count()
+        
         return {
             'total_requests': total_requests,
             'openai_requests': openai_count,
             'ollama_requests': ollama_count,
-            'recent_requests': recent_count
+            'recent_requests': recent_count,
+            'inflight_requests': inflight_count
         }
     except Exception as e:
         logger.error(f"Failed to get log stats: {e}")
@@ -116,5 +141,6 @@ def get_log_stats():
             'total_requests': 0,
             'openai_requests': 0,
             'ollama_requests': 0,
-            'recent_requests': 0
+            'recent_requests': 0,
+            'inflight_requests': 0
         }
