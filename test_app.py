@@ -48,7 +48,7 @@ def mock_ollama_upstream():
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_non_streaming(mock_openai_upstream):
+async def test_openai_chat_completions_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/v1/chat/completions",
@@ -65,7 +65,7 @@ async def test_openai_chat_completions_non_streaming(mock_openai_upstream):
 
 
 @pytest.mark.asyncio
-async def test_openai_completions_non_streaming(mock_openai_upstream):
+async def test_openai_completions_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/v1/completions",
@@ -82,7 +82,7 @@ async def test_openai_completions_non_streaming(mock_openai_upstream):
 
 
 @pytest.mark.asyncio
-async def test_openai_list_models(mock_openai_upstream):
+async def test_openai_list_models(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/v1/models")
     assert response.status_code == 200
@@ -91,7 +91,7 @@ async def test_openai_list_models(mock_openai_upstream):
 
 
 @pytest.mark.asyncio
-async def test_ollama_generate_non_streaming(mock_openai_upstream):
+async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/generate",
@@ -110,7 +110,7 @@ async def test_ollama_generate_non_streaming(mock_openai_upstream):
 
 
 @pytest.mark.asyncio
-async def test_ollama_chat_non_streaming(mock_openai_upstream):
+async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/chat",
@@ -129,7 +129,7 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream):
 
 
 @pytest.mark.asyncio
-async def test_ollama_list_models(mock_ollama_upstream):
+async def test_ollama_list_models(mock_ollama_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/api/tags")
     assert response.status_code == 200

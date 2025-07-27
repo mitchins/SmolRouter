@@ -2,13 +2,18 @@ import os
 import json
 import logging
 import re
+import time
 from typing import AsyncIterator
 from datetime import datetime
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 import httpx
+
+# Import database functionality
+from database import init_database, RequestLog, get_recent_logs, get_log_stats
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +23,9 @@ app = FastAPI(
     title="OpenAI Model Rerouter",
     description="Allows software with hard-coded model IDs to use whatever you desire",
 )
+
+# Templates for web UI
+templates = Jinja2Templates(directory="templates")
 
 # Configuration via environment variables
 UPSTREAM_URL = os.getenv("UPSTREAM_URL", "http://localhost:8000")
@@ -29,6 +37,7 @@ RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
 # Feature flags
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
 STRIP_THINKING = os.getenv("STRIP_THINKING", "true").lower() in ("1", "true", "yes")
+ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "yes")
 
 def validate_url(url: str, name: str) -> str:
     """Validate and normalize a URL, providing helpful error messages."""
@@ -89,7 +98,17 @@ logger.info(f"OLLAMA_UPSTREAM_URL: {OLLAMA_UPSTREAM_URL}")
 logger.info(f"MODEL_MAP: {MODEL_MAP}")
 logger.info(f"STRIP_THINKING: {STRIP_THINKING}")
 logger.info(f"DISABLE_THINKING: {DISABLE_THINKING}")
+logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
 logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
+
+# Initialize database if logging is enabled
+if ENABLE_LOGGING:
+    try:
+        init_database()
+    except Exception as e:
+        logger.error(f"Failed to initialize logging database: {e}")
+        logger.warning("Request logging will be disabled")
+        ENABLE_LOGGING = False
 
 
 def rewrite_model(model: str) -> str:
@@ -138,7 +157,48 @@ def strip_think_chain_from_text(text: str) -> str:
     return result.strip()
 
 
+def log_request(request: Request, response_data: dict, start_time: float, service_type: str, 
+                original_model: str = None, mapped_model: str = None, 
+                request_body: bytes = None, response_body: bytes = None):
+    """Log request details to database"""
+    if not ENABLE_LOGGING:
+        return
+    
+    try:
+        # Get client IP
+        source_ip = request.client.host if request.client else "unknown"
+        
+        # Calculate metrics
+        duration_ms = int((time.time() - start_time) * 1000)
+        request_size = len(request_body) if request_body else 0
+        response_size = len(response_body) if response_body else 0
+        
+        # Create log entry
+        RequestLog.create(
+            source_ip=source_ip,
+            method=request.method,
+            path=request.url.path,
+            service_type=service_type,
+            upstream_url=UPSTREAM_URL,
+            original_model=original_model,
+            mapped_model=mapped_model,
+            duration_ms=duration_ms,
+            request_size=request_size,
+            response_size=response_size,
+            status_code=response_data.get('status_code'),
+            request_body=request_body,
+            response_body=response_body,
+            error_message=response_data.get('error_message')
+        )
+    except Exception as e:
+        logger.error(f"Failed to log request: {e}")
+
+
 async def proxy_request(path: str, request: Request) -> StreamingResponse:
+    start_time = time.time()
+    original_model = None
+    mapped_model = None
+    
     # Read and mutate JSON body
     try:
         payload = await request.json()
@@ -150,11 +210,11 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         )
     
     if "model" in payload:
-        original = payload["model"]
-        new_model = rewrite_model(original)
-        if new_model != original:
-            logger.info(f"Rewriting model '{original}' -> '{new_model}'")
-        payload["model"] = new_model
+        original_model = payload["model"]
+        mapped_model = rewrite_model(original_model)
+        if mapped_model != original_model:
+            logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
+        payload["model"] = mapped_model
 
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
@@ -188,11 +248,18 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                             choice["text"] = strip_think_chain_from_text(choice["text"])
                     logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
                 
-                return JSONResponse(
+                response = JSONResponse(
                     content=data,
                     status_code=resp.status_code,
                     headers=response_headers,
                 )
+                
+                # Log the request
+                if ENABLE_LOGGING:
+                    log_request(request, {"status_code": resp.status_code}, 
+                               start_time, "openai", original_model, mapped_model)
+                
+                return response
             else:
                 async with client.stream("POST", url, json=payload, headers=headers) as upstream:
                     async def openai_streaming_response_generator() -> AsyncIterator[bytes]:
@@ -231,6 +298,12 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                                 break
 
                     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
+                    
+                    # Log streaming request
+                    if ENABLE_LOGGING:
+                        log_request(request, {"status_code": upstream.status_code}, 
+                                   start_time, "openai", original_model, mapped_model)
+                    
                     return StreamingResponse(
                         openai_streaming_response_generator(),
                         status_code=upstream.status_code,
@@ -239,6 +312,12 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                     )
     except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream {url}: {e}")
+        
+        # Log the error
+        if ENABLE_LOGGING:
+            log_request(request, {"status_code": 502, "error_message": str(e)}, 
+                       start_time, "openai", original_model, mapped_model)
+        
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
@@ -521,6 +600,67 @@ async def ollama_list_models(request: Request):
                 "error": "ollama_tags_error",
                 "message": "Failed to retrieve models from Ollama upstream"
             },
+            status_code=500
+        )
+
+
+# Web UI Routes
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Main dashboard showing request logs"""
+    try:
+        logs = get_recent_logs(limit=100)
+        stats = get_log_stats()
+        return templates.TemplateResponse(request, "index.html", {
+            "logs": logs,
+            "stats": stats
+        })
+    except Exception as e:
+        logger.error(f"Error rendering dashboard: {e}")
+        return HTMLResponse(
+            content=f"<h1>Error</h1><p>Failed to load dashboard: {e}</p>",
+            status_code=500
+        )
+
+@app.get("/api/logs")
+async def api_logs(limit: int = 100, service_type: str = None):
+    """API endpoint for getting logs as JSON"""
+    try:
+        logs = get_recent_logs(limit=limit, service_type=service_type)
+        return [
+            {
+                "id": log.id,
+                "timestamp": log.timestamp.isoformat(),
+                "source_ip": log.source_ip,
+                "method": log.method,
+                "path": log.path,
+                "service_type": log.service_type,
+                "original_model": log.original_model,
+                "mapped_model": log.mapped_model,
+                "duration_ms": log.duration_ms,
+                "request_size": log.request_size,
+                "response_size": log.response_size,
+                "status_code": log.status_code,
+                "error_message": log.error_message
+            }
+            for log in logs
+        ]
+    except Exception as e:
+        logger.error(f"Error getting logs: {e}")
+        return JSONResponse(
+            content={"error": "Failed to get logs"},
+            status_code=500
+        )
+
+@app.get("/api/stats")
+async def api_stats():
+    """API endpoint for getting statistics"""
+    try:
+        return get_log_stats()
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        return JSONResponse(
+            content={"error": "Failed to get stats"},
             status_code=500
         )
 
