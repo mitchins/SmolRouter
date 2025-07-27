@@ -1,48 +1,130 @@
-# openai-model-rerouter
+# OpenAI Model Rerouter
 
-A lightweight proxy service that lets you remap OpenAI-compatible model names on the fly.
+A lightweight proxy service that allows you to remap OpenAI-compatible model names on the fly, enabling seamless integration with alternative models and services.
 
-## Why
+## Overview
 
-Many tools and libraries hard-code specific model IDs (e.g., `gpt-3.5-turbo-16k`), making it difficult to switch to locally hosted or alternative models without changing source code. This service sits between your client and the model endpoint, rewriting model names according to your configuration.
+This service acts as a transparent proxy between your applications and AI model endpoints, solving the common problem of hard-coded model IDs in applications that don't support custom model configurations.
 
-## What
+## Features
 
-- **Model Mapping**: Redirect any incoming model ID to one of your choice.
-- **Flexible Configuration**: Define exact or regex-based mappings via environment variables or Docker settings.
-- **Streaming & Non-Streaming**: Fully compatible with both chat streaming (SSE) and standard JSON completions.
-- **Strip Thinking Tokens**: Remove `<think>...</think>` blocks from responses when `STRIP_THINKING` is enabled (default `true`).
-- **Disable Internal Thinking**: Append `/no_think` marker to prompts when `DISABLE_THINKING` is enabled (default `false`).
-- **OpenAI API Interface**: List models, create completions, chat completions—just like the official API.
+- **🔄 Model Mapping**: Redirect any incoming model ID to your preferred model
+- **🎯 Flexible Configuration**: Support for exact matches and regex-based patterns
+- **📡 Multiple API Support**: Compatible with both OpenAI and Ollama API formats
+- **⚡ Streaming Support**: Full support for both streaming and non-streaming responses
+- **🧠 Think Chain Processing**: 
+  - Strip `<think>...</think>` blocks from responses (enabled by default)
+  - Disable internal thinking by appending `/no_think` to prompts
+- **🔌 Drop-in Replacement**: Works as a direct OpenAI API replacement
 
-## How
+## Quick Start
 
-1. **Build or pull the Docker image**  
+### Using Docker
+
+1. **Build the image**
    ```bash
    docker build -t openai-model-rerouter .
-   # or
-   docker pull your-registry/openai-model-rerouter:latest
    ```
 
-2. **Run the service**  
+2. **Run the service**
    ```bash
    docker run -d \
      --name openai-model-rerouter \
      --restart unless-stopped \
      -p 1234:1234 \
      -e UPSTREAM_URL="http://localhost:8000" \
-     -e MODEL_MAP='{"gpt-3.5-turbo-16k":"qwen3-4b"}' \
-     -e DISABLE_THINKING="true" \
+     -e MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b","gpt-4":"llama3-70b"}' \
      openai-model-rerouter
    ```
 
-3. **Point your client at the proxy**  
-   Use `http://<host>:1234/v1/...` exactly as you would the OpenAI API. The service will rewrite the `model` field in the payload according to your mappings.
+### Using Python directly
 
-4. **Customize**  
-   - **MODEL_MAP**: JSON object mapping source IDs (or `/regex/`) to target model IDs.  
-   - **STRIP_THINKING**: Set to `true` (default) to remove `<think>...</think>` tokens from responses.  
-   - **DISABLE_THINKING**: Set to `true` to append `/no_think` to prompts.  
-   - **LISTEN_HOST, LISTEN_PORT, UPSTREAM_URL**: Configure networking via environment variables.
+1. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-Enjoy seamless model swapping without changing your code!  
+2. **Run the service**
+   ```bash
+   export MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}'
+   export UPSTREAM_URL="http://localhost:8000"
+   python app.py
+   ```
+
+### Usage
+
+Point your applications to `http://localhost:1234` instead of the OpenAI API:
+
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://localhost:1234/v1",
+    api_key="your-api-key"  # Pass through to upstream
+)
+
+# This will be automatically mapped according to your MODEL_MAP
+response = client.chat.completions.create(
+    model="gpt-3.5-turbo",  # Gets rewritten to "llama3-8b"
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+## Configuration
+
+All configuration is done via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UPSTREAM_URL` | `http://localhost:8000` | Target API endpoint |
+| `OLLAMA_UPSTREAM_URL` | `http://localhost:11434` | Ollama API endpoint for `/api/tags` |
+| `MODEL_MAP` | `{}` | JSON mapping of model names (see examples below) |
+| `STRIP_THINKING` | `true` | Remove `<think>...</think>` blocks from responses |
+| `DISABLE_THINKING` | `false` | Append `/no_think` to prompts |
+| `LISTEN_HOST` | `127.0.0.1` | Host to bind to |
+| `LISTEN_PORT` | `1234` | Port to listen on |
+
+### Model Mapping Examples
+
+**Exact matches:**
+```json
+{
+  "gpt-3.5-turbo": "llama3-8b",
+  "gpt-4": "llama3-70b",
+  "text-davinci-003": "codellama-34b"
+}
+```
+
+**Regex patterns:**
+```json
+{
+  "/gpt-(.*)turbo/": "llama3-\\1-instruct",
+  "/gpt-4(.*)$/": "claude-3-opus\\1"
+}
+```
+
+## API Compatibility
+
+### Supported OpenAI Endpoints
+- `POST /v1/chat/completions` - Chat completions (streaming and non-streaming)
+- `POST /v1/completions` - Text completions (streaming and non-streaming)  
+- `GET /v1/models` - List available models
+
+### Supported Ollama Endpoints
+- `POST /api/generate` - Generate completions (streaming and non-streaming)
+- `POST /api/chat` - Chat completions (streaming and non-streaming)
+- `GET /api/tags` - List available models
+
+## Development
+
+### Running Tests
+```bash
+pip install -r requirements.txt
+pytest test_app.py -v
+```
+
+### Contributing
+This project is open source. Feel free to submit issues and pull requests!
+
+## License
+MIT License - see LICENSE file for details.  

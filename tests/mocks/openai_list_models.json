@@ -1,0 +1,6 @@
+{
+    "data": [
+        {"id": "gpt-3.5-turbo", "object": "model"},
+        {"id": "text-davinci-003", "object": "model"}
+    ]
+}

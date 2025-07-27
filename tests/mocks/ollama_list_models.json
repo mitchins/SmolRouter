@@ -1,0 +1,6 @@
+{
+    "models": [
+        {"name": "llama2", "model": "llama2", "digest": "abc"},
+        {"name": "mistral", "model": "mistral", "digest": "def"}
+    ]
+}
