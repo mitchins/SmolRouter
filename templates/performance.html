@@ -15,25 +15,22 @@
         }
         
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            line-height: 1.6;
+            font-family: 'Inter', sans-serif;
+            background-color: #fafafa;
             color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
         }
         
         .header {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
             padding: 1rem 2rem;
-            border-bottom: 1px solid rgba(0,0,0,0.1);
-            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         
         .header h1 {
-            color: #1976d2;
-            font-weight: 600;
             font-size: 1.5rem;
+            font-weight: 600;
+            color: #1976d2;
             display: flex;
             align-items: center;
             gap: 0.5rem;
@@ -56,15 +53,15 @@
         }
         
         .container {
-            max-width: 1400px;
+            max-width: 1200px;
             margin: 0 auto;
-            padding: 0 2rem;
+            padding: 2rem;
         }
         
         .controls {
             background: white;
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 1.5rem;
             margin-bottom: 2rem;
             display: flex;
@@ -113,8 +110,8 @@
         
         .chart-container {
             background: white;
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 2rem;
             margin-bottom: 2rem;
         }
@@ -145,8 +142,8 @@
         .stat-card {
             background: white;
             padding: 1.5rem;
-            border-radius: 12px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             text-align: center;
         }
         
@@ -212,8 +209,7 @@
             {{ title }}
         </h1>
         <div class="nav-links">
-            <a href="/" class="nav-link">← Dashboard</a>
-            <a href="/performance" class="nav-link">Performance</a>
+            <a href="/" class="nav-link">← Back to Dashboard</a>
         </div>
     </div>
 
