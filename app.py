@@ -13,7 +13,8 @@ from fastapi.templating import Jinja2Templates
 import httpx
 
 # Import database functionality
-from database import init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests
+from database import (init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests,
+                     estimate_tokens_from_request, extract_tokens_from_openai_response, estimate_token_count)
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -239,6 +240,52 @@ def complete_request_log(log_entry, start_time: float, response_data: dict,
         request_size = len(request_body) if request_body else 0
         response_size = len(response_body) if response_body else 0
         
+        # Calculate token counts for performance analytics
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        
+        try:
+            # Try to extract accurate token counts from OpenAI usage data first
+            if response_data.get('usage'):
+                prompt_tokens, completion_tokens, total_tokens = extract_tokens_from_openai_response(response_data)
+            else:
+                # Fall back to estimation if usage data not available
+                if request_body:
+                    try:
+                        request_data = json.loads(request_body.decode('utf-8'))
+                        prompt_tokens = estimate_tokens_from_request(request_data)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        prompt_tokens = estimate_token_count(str(request_body.decode('utf-8', errors='ignore')))
+                
+                if response_body:
+                    try:
+                        response_text = response_body.decode('utf-8')
+                        # Try to parse as JSON and extract content
+                        try:
+                            response_json = json.loads(response_text)
+                            if response_json.get('response'):  # Ollama format
+                                completion_tokens = estimate_token_count(response_json['response'])
+                            elif response_json.get('choices'):  # OpenAI format
+                                content = ""
+                                for choice in response_json['choices']:
+                                    if choice.get('message', {}).get('content'):
+                                        content += choice['message']['content']
+                                    elif choice.get('text'):
+                                        content += choice['text']
+                                completion_tokens = estimate_token_count(content)
+                        except json.JSONDecodeError:
+                            # If not JSON, estimate from raw text
+                            completion_tokens = estimate_token_count(response_text)
+                    except UnicodeDecodeError:
+                        completion_tokens = 0
+                
+                total_tokens = prompt_tokens + completion_tokens
+        
+        except Exception as e:
+            logger.debug(f"Failed to calculate token counts: {e}")
+            # Keep defaults of 0 if calculation fails
+        
         # Update log entry with completion data
         log_entry.duration_ms = duration_ms
         log_entry.request_size = request_size
@@ -248,7 +295,14 @@ def complete_request_log(log_entry, start_time: float, response_data: dict,
         log_entry.response_body = response_body
         log_entry.error_message = response_data.get('error_message')
         log_entry.completed_at = datetime.now()
+        
+        # Store token counts for performance analytics
+        log_entry.prompt_tokens = prompt_tokens
+        log_entry.completion_tokens = completion_tokens
+        log_entry.total_tokens = total_tokens
+        
         log_entry.save()
+        logger.debug(f"Request completed with {prompt_tokens} prompt tokens, {completion_tokens} completion tokens")
     except Exception as e:
         logger.error(f"Failed to complete request log: {e}")
 
@@ -532,7 +586,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                 # Complete logging for successful response
                 request_body_bytes = json.dumps(ollama_payload).encode('utf-8')
                 response_body_bytes = json.dumps(ollama_response).encode('utf-8')
-                complete_request_log(log_entry, start_time, {"status_code": resp.status_code}, 
+                # Include OpenAI usage data for accurate token counting
+                response_data = {"status_code": resp.status_code, "usage": openai_data.get("usage")}
+                complete_request_log(log_entry, start_time, response_data, 
                                    request_body=request_body_bytes, response_body=response_body_bytes)
                 
                 return JSONResponse(
@@ -752,6 +808,17 @@ async def dashboard(request: Request):
             status_code=500
         )
 
+@app.get("/performance", response_class=HTMLResponse)
+async def performance_dashboard(request: Request):
+    """Performance analytics dashboard with scatter plots"""
+    try:
+        return templates.TemplateResponse(request, "performance.html", {
+            "title": "Performance Analytics"
+        })
+    except Exception as e:
+        logger.error(f"Error loading performance dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading performance dashboard</h1>", status_code=500)
+
 @app.get("/api/logs")
 async def api_logs(limit: int = 100, service_type: str = None):
     """API endpoint for getting logs as JSON"""
@@ -821,6 +888,81 @@ async def api_inflight():
             content={"error": "Failed to get inflight requests"},
             status_code=500
         )
+
+
+@app.get("/api/performance")
+async def api_performance(
+    limit: int = 1000,
+    hours: int = 24,
+    model: str = None,
+    service_type: str = None
+):
+    """Get performance analytics data for scatter plot visualization.
+    
+    Returns data points with prompt_tokens (x-axis) vs duration_ms (y-axis),
+    grouped by model and endpoint for performance analysis.
+    
+    Args:
+        limit: Maximum number of data points to return (default: 1000)
+        hours: Number of hours to look back (default: 24)
+        model: Filter by specific model name (optional)
+        service_type: Filter by service type: 'openai' or 'ollama' (optional)
+    """
+    try:
+        from datetime import timedelta
+        
+        # Build query for completed requests with token data
+        query = RequestLog.select().where(
+            RequestLog.completed_at.is_null(False),  # Only completed requests
+            RequestLog.prompt_tokens.is_null(False),  # Must have token data
+            RequestLog.duration_ms.is_null(False),   # Must have duration data
+            RequestLog.timestamp >= datetime.now() - timedelta(hours=hours)
+        )
+        
+        # Apply filters
+        if model:
+            query = query.where(RequestLog.mapped_model == model)
+        if service_type:
+            query = query.where(RequestLog.service_type == service_type)
+        
+        # Order by timestamp desc and limit
+        query = query.order_by(RequestLog.timestamp.desc()).limit(limit)
+        
+        # Format data for scatter plot
+        data_points = []
+        for log in query:
+            data_points.append({
+                "id": log.id,
+                "timestamp": log.timestamp.isoformat(),
+                "prompt_tokens": log.prompt_tokens,
+                "completion_tokens": log.completion_tokens, 
+                "total_tokens": log.total_tokens,
+                "duration_ms": log.duration_ms,
+                "model": log.mapped_model or log.original_model,
+                "original_model": log.original_model,
+                "mapped_model": log.mapped_model,
+                "service_type": log.service_type,
+                "path": log.path,
+                "status_code": log.status_code,
+                "request_size": log.request_size,
+                "response_size": log.response_size,
+            })
+        
+        return {
+            "data_points": data_points,
+            "meta": {
+                "total_points": len(data_points),
+                "hours_back": hours,
+                "filters": {
+                    "model": model,
+                    "service_type": service_type
+                }
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get performance data: {e}")
+        return JSONResponse(content={"error": "Failed to get performance data"}, status_code=500)
 
 
 @app.get("/request/{request_id}", response_class=HTMLResponse)

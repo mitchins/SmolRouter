@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - SmolRouter</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .header h1 {
+            color: #1976d2;
+            font-weight: 600;
+            font-size: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .nav-links {
+            margin-top: 0.5rem;
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .nav-link {
+            color: #666;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        
+        .nav-link:hover {
+            color: #1976d2;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+        
+        .controls {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        
+        .control-group label {
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: #666;
+        }
+        
+        .control-group select,
+        .control-group input {
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.875rem;
+        }
+        
+        .refresh-btn {
+            background: #1976d2;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            margin-top: 1.25rem;
+        }
+        
+        .refresh-btn:hover {
+            background: #1565c0;
+        }
+        
+        .chart-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .chart-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .chart-wrapper {
+            position: relative;
+            height: 500px;
+            width: 100%;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-card .number {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #1976d2;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            margin-top: 0.5rem;
+            font-size: 0.875rem;
+        }
+        
+        .legend {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .legend-title {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #333;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.25rem;
+            font-size: 0.875rem;
+        }
+        
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 1rem;
+            }
+            
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .chart-wrapper {
+                height: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            <span class="material-icons">analytics</span>
+            {{ title }}
+        </h1>
+        <div class="nav-links">
+            <a href="/" class="nav-link">← Dashboard</a>
+            <a href="/performance" class="nav-link">Performance</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="controls">
+            <div class="control-group">
+                <label for="hoursSelect">Time Range</label>
+                <select id="hoursSelect">
+                    <option value="1">Last Hour</option>
+                    <option value="6">Last 6 Hours</option>
+                    <option value="24" selected>Last 24 Hours</option>
+                    <option value="72">Last 3 Days</option>
+                    <option value="168">Last Week</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="modelSelect">Model</label>
+                <select id="modelSelect">
+                    <option value="">All Models</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="serviceSelect">Service</label>
+                <select id="serviceSelect">
+                    <option value="">All Services</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="ollama">Ollama</option>
+                </select>
+            </div>
+            
+            <button class="refresh-btn" onclick="loadData()">
+                <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                Refresh
+            </button>
+        </div>
+        
+        <div class="stats-grid" id="statsGrid">
+            <!-- Stats will be populated by JavaScript -->
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-title">
+                <span class="material-icons">scatter_plot</span>
+                Response Time vs Input Tokens
+            </div>
+            <div class="chart-wrapper">
+                <canvas id="performanceChart"></canvas>
+            </div>
+            <div class="legend" id="chartLegend">
+                <div class="legend-title">Model Performance</div>
+                <!-- Legend items will be populated by JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let chart = null;
+        
+        // Color palette for different models
+        const colorPalette = [
+            '#1976d2', '#d32f2f', '#388e3c', '#f57c00', 
+            '#7b1fa2', '#0097a7', '#5d4037', '#455a64',
+            '#e91e63', '#ff5722', '#795548', '#607d8b'
+        ];
+        
+        async function loadData() {
+            try {
+                const hours = document.getElementById('hoursSelect').value;
+                const model = document.getElementById('modelSelect').value;
+                const service = document.getElementById('serviceSelect').value;
+                
+                const params = new URLSearchParams({
+                    hours: hours,
+                    limit: '1000'
+                });
+                
+                if (model) params.append('model', model);
+                if (service) params.append('service_type', service);
+                
+                const response = await fetch(`/api/performance?${params}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('API Error:', data.error);
+                    return;
+                }
+                
+                updateStats(data);
+                updateChart(data.data_points);
+                updateModelSelect(data.data_points);
+                
+            } catch (error) {
+                console.error('Failed to load performance data:', error);
+            }
+        }
+        
+        function updateStats(data) {
+            const dataPoints = data.data_points;
+            const totalRequests = dataPoints.length;
+            
+            if (totalRequests === 0) {
+                document.getElementById('statsGrid').innerHTML = `
+                    <div class="stat-card">
+                        <div class="number">0</div>
+                        <div class="label">No Data Available</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            const avgResponseTime = Math.round(
+                dataPoints.reduce((sum, p) => sum + p.duration_ms, 0) / totalRequests
+            );
+            
+            const avgTokens = Math.round(
+                dataPoints.reduce((sum, p) => sum + (p.prompt_tokens || 0), 0) / totalRequests
+            );
+            
+            const uniqueModels = new Set(dataPoints.map(p => p.model)).size;
+            
+            const fastestRequest = Math.min(...dataPoints.map(p => p.duration_ms));
+            
+            document.getElementById('statsGrid').innerHTML = `
+                <div class="stat-card">
+                    <div class="number">${totalRequests}</div>
+                    <div class="label">Total Requests</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${avgResponseTime}ms</div>
+                    <div class="label">Avg Response Time</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${avgTokens}</div>
+                    <div class="label">Avg Input Tokens</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${uniqueModels}</div>
+                    <div class="label">Models Used</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${fastestRequest}ms</div>
+                    <div class="label">Fastest Response</div>
+                </div>
+            `;
+        }
+        
+        function updateModelSelect(dataPoints) {
+            const models = [...new Set(dataPoints.map(p => p.model))].sort();
+            const modelSelect = document.getElementById('modelSelect');
+            const currentValue = modelSelect.value;
+            
+            modelSelect.innerHTML = '<option value="">All Models</option>';
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                if (model === currentValue) option.selected = true;
+                modelSelect.appendChild(option);
+            });
+        }
+        
+        function updateChart(dataPoints) {
+            const ctx = document.getElementById('performanceChart').getContext('2d');
+            
+            // Destroy existing chart
+            if (chart) {
+                chart.destroy();
+            }
+            
+            if (dataPoints.length === 0) {
+                return;
+            }
+            
+            // Group data by model
+            const modelGroups = {};
+            dataPoints.forEach(point => {
+                const model = point.model || 'Unknown';
+                if (!modelGroups[model]) {
+                    modelGroups[model] = [];
+                }
+                modelGroups[model].push({
+                    x: point.prompt_tokens || 0,
+                    y: point.duration_ms,
+                    point: point
+                });
+            });
+            
+            // Create datasets for each model
+            const datasets = Object.keys(modelGroups).map((model, index) => ({
+                label: model,
+                data: modelGroups[model],
+                backgroundColor: colorPalette[index % colorPalette.length] + '80',
+                borderColor: colorPalette[index % colorPalette.length],
+                borderWidth: 1
+            }));
+            
+            chart = new Chart(ctx, {
+                type: 'scatter',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Input Tokens'
+                            },
+                            beginAtZero: true
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Response Time (ms)'
+                            },
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(context) {
+                                    const point = context[0].raw.point;
+                                    return `${point.model} (${point.service_type})`;
+                                },
+                                label: function(context) {
+                                    const point = context.raw.point;
+                                    return [
+                                        `Tokens: ${point.prompt_tokens || 0}`,
+                                        `Response Time: ${point.duration_ms}ms`,
+                                        `Path: ${point.path}`,
+                                        `Status: ${point.status_code}`
+                                    ];
+                                }
+                            }
+                        },
+                        legend: {
+                            display: false  // We'll use custom legend
+                        }
+                    }
+                }
+            });
+            
+            updateLegend(Object.keys(modelGroups));
+        }
+        
+        function updateLegend(models) {
+            const legend = document.getElementById('chartLegend');
+            const legendItems = models.map((model, index) => {
+                const color = colorPalette[index % colorPalette.length];
+                return `
+                    <div class="legend-item">
+                        <div class="legend-color" style="background-color: ${color}"></div>
+                        <span>${model}</span>
+                    </div>
+                `;
+            }).join('');
+            
+            legend.innerHTML = `
+                <div class="legend-title">Model Performance</div>
+                ${legendItems}
+            `;
+        }
+        
+        // Event listeners
+        document.getElementById('hoursSelect').addEventListener('change', loadData);
+        document.getElementById('modelSelect').addEventListener('change', loadData);
+        document.getElementById('serviceSelect').addEventListener('change', loadData);
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadData, 30000);
+        
+        // Initial load
+        loadData();
+    </script>
+</body>
+</html>
