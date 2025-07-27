@@ -215,13 +215,16 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     start_time = time.time()
     original_model = None
     mapped_model = None
-    log_entry = None
+    
+    # Start logging immediately (creates inflight entry)
+    log_entry = start_request_log(request, "openai", original_model, mapped_model)
     
     # Read and mutate JSON body
     try:
         payload = await request.json()
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"})
         return JSONResponse(
             content={"error": "Invalid JSON in request body"},
             status_code=400
@@ -234,8 +237,14 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
         payload["model"] = mapped_model
 
-    # Start logging (creates inflight entry)
-    log_entry = start_request_log(request, "openai", original_model, mapped_model)
+        # Update log entry with model info
+        if log_entry:
+            try:
+                log_entry.original_model = original_model
+                log_entry.mapped_model = mapped_model
+                log_entry.save()
+            except Exception as e:
+                logger.error(f"Failed to update log entry: {e}")
 
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
@@ -366,11 +375,19 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
 
 
 async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse:
+    start_time = time.time()
+    original_model = None
+    mapped_model = None
+    
+    # Start logging immediately (creates inflight entry)
+    log_entry = start_request_log(request, "ollama", original_model, mapped_model)
+    
     # Read and mutate JSON body
     try:
         ollama_payload = await request.json()
     except Exception as e:
         logger.error(f"Failed to parse Ollama request JSON: {e}")
+        complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"})
         return JSONResponse(
             content={"error": "Invalid JSON in request body"},
             status_code=400
@@ -382,9 +399,21 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     is_chat_endpoint = "/chat" in path
 
     # Transform Ollama request to OpenAI format
+    original_model = ollama_payload["model"]
+    mapped_model = rewrite_model(original_model)
+    
     openai_payload = {}
-    openai_payload["model"] = rewrite_model(ollama_payload["model"])
+    openai_payload["model"] = mapped_model
     openai_payload["stream"] = ollama_payload.get("stream", False)
+    
+    # Update log entry with model info
+    if log_entry:
+        try:
+            log_entry.original_model = original_model
+            log_entry.mapped_model = mapped_model
+            log_entry.save()
+        except Exception as e:
+            logger.error(f"Failed to update Ollama log entry: {e}")
 
     if is_chat_endpoint:
         openai_payload["messages"] = ollama_payload["messages"]
@@ -432,6 +461,10 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     "done_reason": "stop",
                 }
                 logger.debug(f"Transformed non-stream Ollama response: {json.dumps(ollama_response)}")
+                
+                # Complete logging for successful response
+                complete_request_log(log_entry, start_time, {"status_code": resp.status_code})
+                
                 return JSONResponse(
                     content=ollama_response,
                     status_code=resp.status_code,
