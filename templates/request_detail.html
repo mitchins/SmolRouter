@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Request #{{ log.id }} - OpenAI Model Rerouter</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+        
+        .header h1 {
+            color: #1976d2;
+            font-weight: 600;
+            font-size: 1.5rem;
+        }
+        
+        .nav-link {
+            color: #666;
+            text-decoration: none;
+            margin-top: 0.5rem;
+            display: inline-block;
+        }
+        
+        .nav-link:hover {
+            color: #1976d2;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem;
+        }
+        
+        .detail-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            padding: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .detail-header {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid #f5f5f5;
+        }
+        
+        .detail-section h2 {
+            color: #1976d2;
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        
+        .detail-label {
+            font-weight: 500;
+            color: #666;
+            min-width: 140px;
+        }
+        
+        .detail-value {
+            color: #333;
+            word-break: break-all;
+        }
+        
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        
+        .status-success {
+            background: #e8f5e8;
+            color: #2e7d32;
+        }
+        
+        .status-error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        
+        .status-inflight {
+            background: #fff3e0;
+            color: #f57c00;
+        }
+        
+        .service-icon {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .service-openai {
+            color: #10a37f;
+        }
+        
+        .service-ollama {
+            color: #ff6b35;
+        }
+        
+        .collapsible {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            overflow: hidden;
+        }
+        
+        .collapsible-header {
+            background: #f8f9fa;
+            padding: 1rem 1.5rem;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .collapsible-header:hover {
+            background: #f0f0f0;
+        }
+        
+        .collapsible-title {
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .collapsible-icon {
+            transition: transform 0.2s ease;
+        }
+        
+        .collapsible-content {
+            padding: 1.5rem;
+            background: #fafafa;
+            border-top: 1px solid #e0e0e0;
+            display: none;
+        }
+        
+        .collapsible.open .collapsible-content {
+            display: block;
+        }
+        
+        .collapsible.open .collapsible-icon {
+            transform: rotate(180deg);
+        }
+        
+        .code-block {
+            background: #f8f8f8;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 1rem;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.5;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+        }
+        
+        .metric-item {
+            text-align: center;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1976d2;
+        }
+        
+        .metric-label {
+            font-size: 0.875rem;
+            color: #666;
+            margin-top: 0.25rem;
+        }
+        
+        .no-data {
+            color: #999;
+            font-style: italic;
+        }
+        
+        @media (max-width: 768px) {
+            .detail-header {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+            
+            .container {
+                padding: 0 1rem;
+            }
+            
+            .detail-card {
+                padding: 1rem;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Request #{{ log.id }} Details</h1>
+        <a href="/" class="nav-link">← Back to Dashboard</a>
+    </div>
+
+    <div class="container">
+        <div class="detail-card">
+            <div class="detail-header">
+                <div class="detail-section">
+                    <h2>Request Information</h2>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Timestamp:</span>
+                        <span class="detail-value">{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') }}</span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Method:</span>
+                        <span class="detail-value">{{ log.method }}</span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Path:</span>
+                        <span class="detail-value">{{ log.path }}</span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Source IP:</span>
+                        <span class="detail-value">{{ log.source_ip }}</span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Service:</span>
+                        <span class="detail-value">
+                            <div class="service-icon service-{{ log.service_type }}">
+                                {% if log.service_type == 'openai' %}
+                                <span class="material-icons" style="font-size: 1rem;">smart_toy</span>
+                                OpenAI
+                                {% else %}
+                                <span class="material-icons" style="font-size: 1rem;">psychology</span>
+                                Ollama
+                                {% endif %}
+                            </div>
+                        </span>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h2>Response Information</h2>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Status:</span>
+                        <span class="detail-value">
+                            {% if log.completed_at %}
+                                {% if log.status_code %}
+                                <span class="status-badge {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                                    {{ log.status_code }}
+                                </span>
+                                {% else %}
+                                <span class="status-badge status-success">✓ Completed</span>
+                                {% endif %}
+                            {% else %}
+                            <span class="status-badge status-inflight">🔄 Inflight</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Duration:</span>
+                        <span class="detail-value">
+                            {% if log.duration_ms %}
+                            {{ log.duration_ms }}ms
+                            {% elif not log.completed_at %}
+                            {{ ((log.timestamp.utcnow() - log.timestamp).total_seconds() * 1000) | int }}ms (ongoing)
+                            {% else %}
+                            <span class="no-data">N/A</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Completed:</span>
+                        <span class="detail-value">
+                            {% if log.completed_at %}
+                            {{ log.completed_at.strftime('%Y-%m-%d %H:%M:%S UTC') }}
+                            {% else %}
+                            <span class="no-data">Still processing...</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    
+                    {% if log.error_message %}
+                    <div class="detail-row">
+                        <span class="detail-label">Error:</span>
+                        <span class="detail-value">{{ log.error_message }}</span>
+                    </div>
+                    {% endif %}
+                    
+                    <div class="detail-row">
+                        <span class="detail-label">Upstream:</span>
+                        <span class="detail-value">{{ log.upstream_url }}</span>
+                    </div>
+                </div>
+            </div>
+            
+            {% if log.original_model or log.mapped_model %}
+            <div class="detail-section">
+                <h2>Model Mapping</h2>
+                <div class="detail-row">
+                    <span class="detail-label">Original Model:</span>
+                    <span class="detail-value">{{ log.original_model or 'N/A' }}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Mapped Model:</span>
+                    <span class="detail-value">{{ log.mapped_model or 'N/A' }}</span>
+                </div>
+                {% if log.original_model and log.mapped_model and log.original_model != log.mapped_model %}
+                <div class="detail-row">
+                    <span class="detail-label">Mapping Applied:</span>
+                    <span class="detail-value">✅ Yes</span>
+                </div>
+                {% endif %}
+            </div>
+            {% endif %}
+            
+            <div class="detail-section">
+                <h2>Performance Metrics</h2>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-value">{{ "%.1f"|format(log.request_size / 1024) if log.request_size else '0' }}</div>
+                        <div class="metric-label">Request Size (KB)</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">{{ "%.1f"|format(log.response_size / 1024) if log.response_size else '0' }}</div>
+                        <div class="metric-label">Response Size (KB)</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">{{ log.duration_ms or 'N/A' }}</div>
+                        <div class="metric-label">Duration (ms)</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Request Body -->
+            {% if request_body_str %}
+            <div class="collapsible">
+                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                    <span class="collapsible-title">Request Body</span>
+                    <span class="material-icons collapsible-icon">expand_more</span>
+                </div>
+                <div class="collapsible-content">
+                    <div class="code-block">{{ request_body_str }}</div>
+                </div>
+            </div>
+            {% endif %}
+            
+            <!-- Response Body -->
+            {% if response_body_str %}
+            <div class="collapsible">
+                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                    <span class="collapsible-title">Response Body</span>
+                    <span class="material-icons collapsible-icon">expand_more</span>
+                </div>
+                <div class="collapsible-content">
+                    <div class="code-block">{{ response_body_str }}</div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        function toggleCollapsible(header) {
+            const collapsible = header.parentElement;
+            collapsible.classList.toggle('open');
+        }
+        
+        // Auto-refresh if request is still inflight
+        {% if not log.completed_at %}
+        setTimeout(() => {
+            location.reload();
+        }, 2000);  // Refresh every 2 seconds for inflight requests
+        {% endif %}
+    </script>
+</body>
+</html>
