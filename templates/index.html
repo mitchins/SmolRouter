@@ -229,10 +229,16 @@
         <div class="table-container">
             <div class="table-header">
                 <h2>Recent Requests</h2>
-                <button class="refresh-btn" onclick="window.location.reload()">
-                    <span class="material-icons" style="font-size: 1rem;">refresh</span>
-                    Refresh
-                </button>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="refresh-btn" onclick="window.location.href='/performance'" style="background: #4caf50;">
+                        <span class="material-icons" style="font-size: 1rem;">analytics</span>
+                        Performance
+                    </button>
+                    <button class="refresh-btn" onclick="window.location.reload()">
+                        <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                        Refresh
+                    </button>
+                </div>
             </div>
             
             {% if logs %}

@@ -1,5 +1,7 @@
 import os
 import logging
+import re
+import json
 from datetime import datetime, timedelta
 from peewee import *
 
@@ -11,6 +13,74 @@ MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))
 
 # Initialize database
 db = SqliteDatabase(DB_PATH)
+
+def estimate_token_count(text: str) -> int:
+    """Estimate token count for text content.
+    
+    Uses a simple but reasonably accurate heuristic:
+    - Split on whitespace and punctuation
+    - Count tokens roughly as words + punctuation marks
+    - Better than simple character/4 for real-world text
+    
+    Args:
+        text: Input text to count tokens for
+        
+    Returns:
+        Estimated token count
+    """
+    if not text or not isinstance(text, str):
+        return 0
+    
+    # Split on whitespace and common punctuation
+    # This gives a decent approximation for most text
+    tokens = re.findall(r'\b\w+\b|[^\w\s]', text.lower())
+    return len(tokens)
+
+def extract_tokens_from_openai_response(response_data: dict) -> tuple[int, int, int]:
+    """Extract token counts from OpenAI response usage data.
+    
+    Args:
+        response_data: OpenAI API response dictionary
+        
+    Returns:
+        Tuple of (prompt_tokens, completion_tokens, total_tokens)
+        Returns (0, 0, 0) if usage data not available
+    """
+    usage = response_data.get('usage', {})
+    if not usage:
+        return (0, 0, 0)
+    
+    prompt_tokens = usage.get('prompt_tokens', 0)
+    completion_tokens = usage.get('completion_tokens', 0) 
+    total_tokens = usage.get('total_tokens', 0)
+    
+    return (prompt_tokens, completion_tokens, total_tokens)
+
+def estimate_tokens_from_request(request_data: dict) -> int:
+    """Estimate token count from request payload.
+    
+    Args:
+        request_data: Request payload dictionary
+        
+    Returns:
+        Estimated prompt token count
+    """
+    if not request_data:
+        return 0
+        
+    total_text = ""
+    
+    # Handle OpenAI format
+    if 'messages' in request_data:
+        for message in request_data.get('messages', []):
+            if isinstance(message, dict) and 'content' in message:
+                total_text += str(message['content']) + " "
+    
+    # Handle legacy prompt format
+    if 'prompt' in request_data:
+        total_text += str(request_data['prompt']) + " "
+    
+    return estimate_token_count(total_text)
 
 class BaseModel(Model):
     class Meta:
@@ -40,6 +110,11 @@ class RequestLog(BaseModel):
     response_size = IntegerField(default=0)
     status_code = IntegerField(null=True)
     
+    # Token metrics for performance analytics
+    prompt_tokens = IntegerField(null=True)
+    completion_tokens = IntegerField(null=True) 
+    total_tokens = IntegerField(null=True)
+    
     # Request status tracking
     completed_at = DateTimeField(null=True)  # NULL = inflight, NOT NULL = completed
     
@@ -57,6 +132,7 @@ class RequestLog(BaseModel):
             (('service_type', 'timestamp'), False),
             (('status_code', 'timestamp'), False),
             (('completed_at',), False),  # For inflight queries
+            (('prompt_tokens', 'duration_ms'), False),  # For performance analytics
         )
 
 def init_database():
