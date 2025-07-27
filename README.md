@@ -284,7 +284,7 @@ The service converts Ollama API calls to OpenAI format before forwarding:
 |----------|--------|-----------|-------------|
 | `/api/generate` | POST | ✅ Yes | Generate text from prompt (converted to chat format) |
 | `/api/chat` | POST | ✅ Yes | Chat completions (mapped to OpenAI format) |
-| `/api/tags` | GET | ❌ No | List available models (proxied to Ollama upstream) |
+| `/api/tags` | GET | ❌ No | List available models (converted from OpenAI upstream to Ollama format) |
 
 **Conversion Details:**
 - `/api/generate` → `/v1/chat/completions` (prompt converted to user message)
