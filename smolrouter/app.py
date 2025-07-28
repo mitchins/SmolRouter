@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import yaml
+import uuid
 from typing import AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urlparse
@@ -16,6 +17,10 @@ import httpx
 # Import database functionality
 from smolrouter.database import (init_database, RequestLog, get_recent_logs, get_log_stats, get_inflight_requests,
                      estimate_tokens_from_request, extract_tokens_from_openai_response, estimate_token_count)
+from smolrouter.storage import init_blob_storage
+from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
+from smolrouter.routing import get_smart_router
+from smolrouter.security import init_webui_security, get_webui_security
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +30,15 @@ app = FastAPI(
     title="OpenAI Model Rerouter",
     description="Allows software with hard-coded model IDs to use whatever you desire",
 )
+
+# Setup rate limiting
+setup_rate_limiting(app)
+
+# Add JWT authentication middleware if enabled
+jwt_secret = os.getenv("JWT_SECRET")
+if jwt_secret:
+    app.add_middleware(create_auth_middleware())
+    logger.info("JWT authentication middleware enabled")
 
 # Templates for web UI
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -132,6 +146,9 @@ def load_routes_config() -> Dict:
 
 ROUTES_CONFIG_DATA = load_routes_config()
 
+# Initialize smart router
+smart_router = get_smart_router(ROUTES_CONFIG_DATA, DEFAULT_UPSTREAM)
+
 def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
     """Find the best matching route for a request.
     
@@ -201,14 +218,18 @@ logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
 logger.info(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
 logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
 
-# Initialize database if logging is enabled
+# Initialize database and blob storage if logging is enabled
 if ENABLE_LOGGING:
     try:
+        init_blob_storage()
         init_database()
     except Exception as e:
         logger.error(f"Failed to initialize logging database: {e}")
         logger.warning("Request logging will be disabled")
         ENABLE_LOGGING = False
+
+# Initialize WebUI security
+init_webui_security()
 
 
 def rewrite_model(model: str) -> str:
@@ -297,7 +318,7 @@ def strip_json_markdown_from_text(text: str) -> str:
     return result.strip()
 
 
-def start_request_log(request: Request, service_type: str, upstream_url: str, original_model: str = None, mapped_model: str = None):
+def start_request_log(request: Request, service_type: str, upstream_url: str, original_model: str = None, mapped_model: str = None, auth_payload: dict = None):
     """Create initial log entry for inflight tracking"""
     if not ENABLE_LOGGING:
         return None
@@ -305,6 +326,17 @@ def start_request_log(request: Request, service_type: str, upstream_url: str, or
     try:
         # Get client IP
         source_ip = request.client.host if request.client else "unknown"
+        
+        # Generate unique request ID for traceability
+        request_id = str(uuid.uuid4())
+        
+        # Extract user agent
+        user_agent = request.headers.get("user-agent", "unknown")
+        
+        # Extract authenticated user if available
+        auth_user = None
+        if auth_payload:
+            auth_user = auth_payload.get("sub") or auth_payload.get("user") or auth_payload.get("username")
         
         # Create initial log entry (inflight - no completed_at)
         log_entry = RequestLog.create(
@@ -314,8 +346,16 @@ def start_request_log(request: Request, service_type: str, upstream_url: str, or
             service_type=service_type,
             upstream_url=upstream_url,
             original_model=original_model,
-            mapped_model=mapped_model
+            mapped_model=mapped_model,
+            request_id=request_id,
+            user_agent=user_agent,
+            auth_user=auth_user
         )
+        
+        # Log request start with traceability info
+        logger.info(f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "
+                   f"(user: {auth_user or 'anonymous'}, model: {original_model})")
+        
         return log_entry
     except Exception as e:
         logger.error(f"Failed to start request log: {e}")
@@ -384,8 +424,11 @@ def complete_request_log(log_entry, start_time: float, response_data: dict,
         log_entry.request_size = request_size
         log_entry.response_size = response_size
         log_entry.status_code = response_data.get('status_code')
-        log_entry.request_body = request_body
-        log_entry.response_body = response_body
+        # Store bodies in blob storage
+        if request_body:
+            log_entry.set_request_body(request_body)
+        if response_body:
+            log_entry.set_response_body(response_body)
         log_entry.error_message = response_data.get('error_message')
         log_entry.completed_at = datetime.now()
         
@@ -395,7 +438,14 @@ def complete_request_log(log_entry, start_time: float, response_data: dict,
         log_entry.total_tokens = total_tokens
         
         log_entry.save()
-        logger.debug(f"Request completed with {prompt_tokens} prompt tokens, {completion_tokens} completion tokens")
+        
+        # Enhanced completion logging with request ID
+        request_id = getattr(log_entry, 'request_id', 'unknown')
+        logger.info(f"[{request_id}] Request completed: {duration_ms}ms, {response_data.get('status_code', 'unknown')} status, "
+                   f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}")
+        
+        if response_data.get('error_message'):
+            logger.warning(f"[{request_id}] Request had error: {response_data['error_message']}")
     except Exception as e:
         logger.error(f"Failed to complete request log: {e}")
 
@@ -408,13 +458,21 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     # Get source IP for routing
     source_ip = request.client.host if request.client else "unknown"
     
+    # Get auth payload for enhanced logging (don't enforce here, middleware handles that)
+    auth_payload = None
+    try:
+        auth_payload = verify_request_auth(request)
+    except Exception:
+        # Auth verification failed or not configured, continue without auth info
+        pass
+    
     # Read and mutate JSON body
     try:
         payload = await request.json()
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
         # Use default upstream for error logging
-        log_entry = start_request_log(request, "openai", DEFAULT_UPSTREAM, original_model, mapped_model)
+        log_entry = start_request_log(request, "openai", DEFAULT_UPSTREAM, original_model, mapped_model, auth_payload)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"})
         return JSONResponse(
             content={"error": "Invalid JSON in request body"},
@@ -429,23 +487,14 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
             logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
         payload["model"] = mapped_model
     
-    # Find the best route for this request
-    upstream_url, route_model_override = find_route(source_ip, original_model or "unknown")
-    
-    # Apply route-specific model override if specified
-    final_model = route_model_override or mapped_model
-    if route_model_override and route_model_override != mapped_model:
-        logger.info(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
-        payload["model"] = route_model_override
-    
-    # Start logging with the determined upstream URL
-    log_entry = start_request_log(request, "openai", upstream_url, original_model, final_model)
+    # For logging purposes, we'll determine the upstream after routing
+    log_entry = start_request_log(request, "openai", "pending", original_model, mapped_model, auth_payload)
 
     # Update log entry with model info
     if log_entry:
         try:
             log_entry.original_model = original_model
-            log_entry.mapped_model = final_model
+            log_entry.mapped_model = mapped_model
             log_entry.save()
         except Exception as e:
             logger.error(f"Failed to update log entry: {e}")
@@ -461,136 +510,57 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     # Forward headers (keep Authorization)
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
 
-    url = f"{upstream_url}{path}"
-    logger.debug(f"Proxying request to: {url}")
-    
+    # Use smart router for request routing with failover
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            # Non-streaming case: forward and return JSON directly
-            if not payload.get("stream"):
-                resp = await client.post(url, json=payload, headers=headers)
-                response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-length", "transfer-encoding"]}
-                data = resp.json()
-                logger.debug(f"Downstream non-stream response data: {json.dumps(data)}")
-                
-                # Strip thinking chains and JSON markdown if enabled
-                if STRIP_THINKING or STRIP_JSON_MARKDOWN:
-                    for choice in data.get("choices", []):
-                        if "message" in choice and isinstance(choice["message"].get("content"), str):
-                            content = choice["message"]["content"]
-                            if STRIP_THINKING:
-                                content = strip_think_chain_from_text(content)
-                            if STRIP_JSON_MARKDOWN:
-                                content = strip_json_markdown_from_text(content)
-                            choice["message"]["content"] = content
-                        elif isinstance(choice.get("text"), str):
-                            text = choice["text"]
-                            if STRIP_THINKING:
-                                text = strip_think_chain_from_text(text)
-                            if STRIP_JSON_MARKDOWN:
-                                text = strip_json_markdown_from_text(text)
-                            choice["text"] = text
-                    logger.debug(f"Cleaned non-stream response data: {json.dumps(data)}")
-                
-                response = JSONResponse(
-                    content=data,
-                    status_code=resp.status_code,
-                    headers=response_headers,
-                )
-                
-                # Complete the logging
-                complete_request_log(log_entry, start_time, {"status_code": resp.status_code})
-                
-                return response
-            else:
-                async with client.stream("POST", url, json=payload, headers=headers) as upstream:
-                    async def openai_streaming_response_generator() -> AsyncIterator[bytes]:
-                        buffer = ""
-                        async for chunk in upstream.aiter_bytes():
-                            buffer += chunk.decode('utf-8')
-                            try:
-                                while True:
-                                    eol = buffer.find("\n\n")
-                                    if eol == -1:
-                                        break
-
-                                    message = buffer[:eol].strip()
-                                    buffer = buffer[eol+4:]
-
-                                    if message.startswith("data:"):
-                                        json_data = message[len("data:"):].strip()
-                                        if json_data == "[DONE]":
-                                            yield b"data: [DONE]\n\n"
-                                            return
-
-                                        try:
-                                            data = json.loads(json_data)
-                                            if STRIP_THINKING or STRIP_JSON_MARKDOWN:
-                                                if data.get("choices"):
-                                                    if "delta" in data["choices"][0] and isinstance(data["choices"][0]["delta"].get("content"), str):
-                                                        content = data["choices"][0]["delta"]["content"]
-                                                        if STRIP_THINKING:
-                                                            content = strip_think_chain_from_text(content)
-                                                        if STRIP_JSON_MARKDOWN:
-                                                            content = strip_json_markdown_from_text(content)
-                                                        data["choices"][0]["delta"]["content"] = content
-                                                    elif isinstance(data["choices"][0].get("text"), str):
-                                                        text = data["choices"][0]["text"]
-                                                        if STRIP_THINKING:
-                                                            text = strip_think_chain_from_text(text)
-                                                        if STRIP_JSON_MARKDOWN:
-                                                            text = strip_json_markdown_from_text(text)
-                                                        data["choices"][0]["text"] = text
-                                            yield f"data: {json.dumps(data)}\n\n".encode('utf-8')
-                                        except json.JSONDecodeError:
-                                            logger.warning(f"Could not decode JSON from SSE: {json_data!r}")
-                                            continue
-                            except Exception as e:
-                                logger.error(f"Error processing OpenAI stream: {e}")
-                                break
-
-                    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
-                    
-                    # Complete streaming request logging
-                    complete_request_log(log_entry, start_time, {"status_code": upstream.status_code})
-                    
-                    return StreamingResponse(
-                        openai_streaming_response_generator(),
-                        status_code=upstream.status_code,
-                        headers=response_headers,
-                        media_type="text/event-stream"
-                    )
-    except httpx.ConnectError as e:
-        logger.error(f"Connection error to upstream {url}: {e}")
-        
-        # Complete logging with error
-        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": str(e)})
-        
-        return JSONResponse(
-            content={
-                "error": "upstream_connection_failed",
-                "message": f"Could not connect to upstream server at {upstream_url}",
-                "details": str(e)
-            },
-            status_code=502
+        data, status_code, upstream_used = await smart_router.route_request(
+            source_ip, mapped_model, payload, path, headers, REQUEST_TIMEOUT
         )
-    except httpx.TimeoutException as e:
-        logger.error(f"Timeout error to upstream {url}: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 504, "error_message": str(e)})
-        return JSONResponse(
-            content={
-                "error": "upstream_timeout",
-                "message": f"Upstream server at {upstream_url} did not respond in time",
-                "details": str(e)
-            },
-            status_code=504
-        )
+        
+        # Update log entry with actual upstream used
+        if log_entry:
+            try:
+                log_entry.upstream_url = upstream_used
+                log_entry.save()
+            except Exception as e:
+                logger.error(f"Failed to update log entry with upstream: {e}")
+        
+        # Check if this was an error response
+        if status_code >= 400:
+            complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)})
+            return JSONResponse(content=data, status_code=status_code)
+        
+        logger.debug(f"Smart router response data: {json.dumps(data)}")
+        
+        # Strip thinking chains and JSON markdown if enabled
+        if STRIP_THINKING or STRIP_JSON_MARKDOWN:
+            for choice in data.get("choices", []):
+                if "message" in choice and isinstance(choice["message"].get("content"), str):
+                    content = choice["message"]["content"]
+                    if STRIP_THINKING:
+                        content = strip_think_chain_from_text(content)
+                    if STRIP_JSON_MARKDOWN:
+                        content = strip_json_markdown_from_text(content)
+                    choice["message"]["content"] = content
+                elif isinstance(choice.get("text"), str):
+                    text = choice["text"] 
+                    if STRIP_THINKING:
+                        text = strip_think_chain_from_text(text)
+                    if STRIP_JSON_MARKDOWN:
+                        text = strip_json_markdown_from_text(text)
+                    choice["text"] = text
+            logger.debug(f"Cleaned response data: {json.dumps(data)}")
+        
+        # Complete the logging
+        complete_request_log(log_entry, start_time, {"status_code": status_code})
+        
+        return JSONResponse(content=data, status_code=status_code)
+        
     except Exception as e:
-        logger.error(f"Unexpected error proxying to {url}: {e}")
+        logger.error(f"Unexpected error in proxy_request: {e}")
         complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)})
         return JSONResponse(
             content={
-                "error": "proxy_error",
+                "error": "proxy_error", 
                 "message": "An unexpected error occurred while proxying the request",
                 "details": str(e)
             },
@@ -925,6 +895,9 @@ async def ollama_list_models(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard showing request logs"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+    
     try:
         logs = get_recent_logs(limit=100)
         stats = get_log_stats()
@@ -942,6 +915,9 @@ async def dashboard(request: Request):
 @app.get("/performance", response_class=HTMLResponse)
 async def performance_dashboard(request: Request):
     """Performance analytics dashboard with scatter plots"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+    
     try:
         return templates.TemplateResponse(request, "performance.html", {
             "title": "Performance Analytics"
@@ -1099,6 +1075,9 @@ async def api_performance(
 @app.get("/request/{request_id}", response_class=HTMLResponse)
 async def request_detail(request_id: int, request: Request):
     """Detailed view of a specific request"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+    
     try:
         log_entry = RequestLog.get_by_id(request_id)
         
