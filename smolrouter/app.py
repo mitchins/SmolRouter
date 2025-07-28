@@ -281,12 +281,17 @@ def strip_think_chain_from_text(text: str) -> str:
 def strip_json_markdown_from_text(text: str) -> str:
     """Extract JSON from markdown code blocks, converting markdown-fenced JSON to pure JSON.
     
-    This function finds JSON code blocks like:
+    This function finds JSON code blocks in multiple formats:
+    
+    Format 1 (backticks):
     ```json
     {
       "key": "value"
     }
     ```
+    
+    Format 2 (square brackets):
+    [json] { "key": "value" } [json]
     
     And extracts just the JSON content, removing the markdown formatting.
     
@@ -296,24 +301,30 @@ def strip_json_markdown_from_text(text: str) -> str:
     Returns:
         Text with JSON markdown blocks replaced by pure JSON content
     """
-    # Pattern to match ```json...content...``` blocks (with or without newlines)
-    pattern = r'```json\s*(.*?)\s*```'
-    
     def extract_json_content(match):
         json_content = match.group(1).strip()
-        # Clean up the JSON content - remove extra whitespace but preserve structure  
-        lines = json_content.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped:  # Only keep non-empty lines
-                cleaned_lines.append(stripped)
         
-        # Join with single spaces to create compact JSON
-        return ' '.join(cleaned_lines)
+        # If it's multiline JSON (contains newlines), clean up line by line
+        if '\n' in json_content:
+            lines = json_content.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped:  # Only keep non-empty lines
+                    cleaned_lines.append(stripped)
+            return ' '.join(cleaned_lines)
+        else:
+            # For inline JSON, just normalize internal whitespace
+            # Use regex to normalize whitespace while preserving JSON structure
+            return re.sub(r'\s+', ' ', json_content).strip()
     
-    # Replace all JSON markdown blocks with their content
-    result = re.sub(pattern, extract_json_content, text, flags=re.DOTALL)
+    # Pattern 1: ```json...content...``` blocks (with or without newlines)
+    backtick_pattern = r'```json\s*(.*?)\s*```'
+    result = re.sub(backtick_pattern, extract_json_content, text, flags=re.DOTALL)
+    
+    # Pattern 2: [json] content [json] blocks (new variation discovered)
+    square_bracket_pattern = r'\[json\]\s*(.*?)\s*\[json\]'
+    result = re.sub(square_bracket_pattern, extract_json_content, result, flags=re.DOTALL)
     
     return result.strip()
 

@@ -79,7 +79,7 @@ response = client.chat.completions.create(
 - **Streaming Support:** Full support for streaming responses for both API formats.
 - **Content Manipulation:**
     - **Think-Chain Stripping:** Automatically remove `<think>...</think>` blocks from responses.
-    - **JSON Markdown Scrubbing:** Convert markdown-fenced JSON into pure JSON.
+    - **JSON Markdown Scrubbing:** Convert markdown-fenced JSON into pure JSON (supports both ````json``` and `[json]` formats).
 
 ## Configuration
 
