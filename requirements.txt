@@ -8,3 +8,5 @@ respx
 peewee
 jinja2
 pyyaml
+slowapi
+PyJWT

@@ -4,6 +4,7 @@ import re
 import json
 from datetime import datetime, timedelta
 from peewee import *
+from smolrouter.storage import get_blob_storage
 
 logger = logging.getLogger("model-rerouter")
 
@@ -100,6 +101,11 @@ class RequestLog(BaseModel):
     # Upstream details
     upstream_url = CharField(max_length=500)
     
+    # Enhanced traceability
+    request_id = CharField(max_length=64, null=True)  # Unique request identifier
+    user_agent = CharField(max_length=500, null=True)
+    auth_user = CharField(max_length=100, null=True)  # From JWT payload
+    
     # Model mapping
     original_model = CharField(max_length=200, null=True)
     mapped_model = CharField(max_length=200, null=True)
@@ -118,12 +124,48 @@ class RequestLog(BaseModel):
     # Request status tracking
     completed_at = DateTimeField(null=True)  # NULL = inflight, NOT NULL = completed
     
-    # Payload storage (large blobs)
-    request_body = BlobField(null=True)
-    response_body = BlobField(null=True)
+    # Payload storage (blob keys for side-car storage)
+    request_body_key = CharField(max_length=64, null=True)  # SHA256 hash key
+    response_body_key = CharField(max_length=64, null=True)  # SHA256 hash key
     
     # Error tracking
     error_message = TextField(null=True)
+    
+    @property
+    def request_body(self) -> bytes:
+        """Get request body from blob storage"""
+        if not self.request_body_key:
+            return None
+        return get_blob_storage().retrieve(self.request_body_key)
+    
+    @property
+    def response_body(self) -> bytes:
+        """Get response body from blob storage"""
+        if not self.response_body_key:
+            return None
+        return get_blob_storage().retrieve(self.response_body_key)
+    
+    def set_request_body(self, data: bytes) -> None:
+        """Store request body in blob storage"""
+        if data:
+            self.request_body_key = get_blob_storage().store(data, "application/json")
+        else:
+            self.request_body_key = None
+    
+    def set_response_body(self, data: bytes) -> None:
+        """Store response body in blob storage"""
+        if data:
+            self.response_body_key = get_blob_storage().store(data, "application/json")
+        else:
+            self.response_body_key = None
+    
+    def delete_blobs(self) -> None:
+        """Delete associated blob data"""
+        storage = get_blob_storage()
+        if self.request_body_key:
+            storage.delete(self.request_body_key)
+        if self.response_body_key:
+            storage.delete(self.response_body_key)
     
     class Meta:
         indexes = (
@@ -152,13 +194,35 @@ def init_database():
         raise
 
 def cleanup_old_logs():
-    """Remove logs older than MAX_AGE_DAYS"""
+    """Remove logs older than MAX_AGE_DAYS and their associated blobs"""
     try:
         cutoff_date = datetime.now() - timedelta(days=MAX_AGE_DAYS)
+        
+        # Get logs to delete and clean up their blobs first
+        old_logs = RequestLog.select().where(RequestLog.timestamp < cutoff_date)
+        blob_deletion_count = 0
+        
+        for log in old_logs:
+            try:
+                log.delete_blobs()
+                blob_deletion_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to delete blobs for log {log.id}: {e}")
+        
+        # Delete the log entries
         deleted_count = RequestLog.delete().where(RequestLog.timestamp < cutoff_date).execute()
         
         if deleted_count > 0:
-            logger.info(f"Cleaned up {deleted_count} old log entries (older than {MAX_AGE_DAYS} days)")
+            logger.info(f"Cleaned up {deleted_count} old log entries and {blob_deletion_count} blob sets (older than {MAX_AGE_DAYS} days)")
+        
+        # Also cleanup orphaned blobs
+        try:
+            blob_storage = get_blob_storage()
+            orphaned_count = blob_storage.cleanup_old(MAX_AGE_DAYS)
+            if orphaned_count > 0:
+                logger.info(f"Cleaned up {orphaned_count} orphaned blob files")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup orphaned blobs: {e}")
         
     except Exception as e:
         logger.error(f"Failed to cleanup old logs: {e}")

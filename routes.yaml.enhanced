@@ -1,0 +1,52 @@
+# Enhanced SmolRouter Configuration Example
+# This shows the new features: model aliases with failover, server definitions, and traditional routing
+
+# Define your servers for easy reference
+servers:
+  fast-box: "http://192.168.1.100:8000"
+  slow-box: "http://192.168.1.101:8000"
+  gpu-server: "http://192.168.1.102:8000"
+  dev-server: "http://localhost:8001"
+
+# Model aliases with automatic failover
+# When a client requests "git-commit-model", it will try the instances in order
+aliases:
+  git-commit-model:
+    instances:
+      - "fast-box/llama3-8b"      # Try fast-box first with llama3-8b model  
+      - "slow-box/llama3-3b"      # Fallback to slow-box with smaller model
+  
+  coding-assistant:
+    instances:
+      - server: "gpu-server"
+        model: "codellama-34b"
+      - server: "fast-box" 
+        model: "llama3-8b"
+  
+  chat-model:
+    instances:
+      - "fast-box/llama3-8b"
+      - "slow-box/llama3-8b"
+      - url: "http://backup-server:8000"
+        model: "llama2-7b"
+
+# Traditional routing rules (evaluated after aliases)
+routes:
+  # Route small models to specific server
+  - match:
+      model: "/.*-1.5b/"
+    route:
+      upstream: "http://192.168.1.100:8000"
+
+  # Route requests from specific developer to dev server
+  - match:
+      source_host: "10.0.1.100"
+    route:
+      upstream: "http://localhost:8001"
+
+  # Route OpenAI models to specific server with model mapping
+  - match:
+      model: "gpt-4"
+    route:
+      upstream: "http://192.168.1.102:8000"
+      model: "llama3-70b"
