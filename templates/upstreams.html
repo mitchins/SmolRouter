@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upstream Providers - SmolRouter</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .summary-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .summary-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        .summary-card .number {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            color: #667eea;
+        }
+        
+        .summary-card .label {
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .controls {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        .action-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            background: #667eea;
+            color: white;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .action-btn:hover {
+            background: #5a6fd8;
+            transform: translateY(-1px);
+        }
+        
+        .action-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .action-btn.secondary {
+            background: #6c757d;
+        }
+        
+        .action-btn.secondary:hover {
+            background: #5a6268;
+        }
+        
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+        
+        .upstream-grid {
+            display: grid;
+            gap: 20px;
+        }
+        
+        .upstream-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        .upstream-header {
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .upstream-info h3 {
+            margin: 0 0 5px 0;
+            color: #333;
+            font-size: 1.3em;
+        }
+        
+        .upstream-meta {
+            display: flex;
+            gap: 15px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        
+        .status-healthy {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status-unhealthy {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .status-disabled {
+            background: #e2e3e5;
+            color: #383d41;
+        }
+        
+        .status-unknown {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .provider-type {
+            background: #e3f2fd;
+            color: #0d47a1;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        
+        .models-section {
+            padding: 20px;
+        }
+        
+        .models-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .models-count {
+            background: #f8f9fa;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .models-list {
+            display: grid;
+            gap: 8px;
+        }
+        
+        .model-item {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .model-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+        
+        .model-id {
+            font-size: 0.8em;
+            color: #666;
+            font-family: monospace;
+        }
+        
+        .model-aliases {
+            font-size: 0.8em;
+            color: #888;
+            margin-top: 4px;
+        }
+        
+        .no-models {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            padding: 20px;
+        }
+        
+        .cache-info {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        
+        .cache-info h4 {
+            margin: 0 0 10px 0;
+            color: #856404;
+        }
+        
+        .cache-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            font-size: 0.9em;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            .summary-cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .upstream-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    {% include 'navigation.html' %}
+    
+    <div class="container">
+    
+        <div class="summary-cards" id="summaryCards">
+            <!-- Summary cards will be populated by JavaScript -->
+        </div>
+        
+        <div class="controls">
+            <button class="action-btn" onclick="refreshData()">
+                <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                Refresh
+            </button>
+            <button class="action-btn secondary" onclick="refreshCache()">
+                <span class="material-icons" style="font-size: 1rem;">clear</span>
+                Clear Cache
+            </button>
+            <span class="loading" id="loadingIndicator" style="display: none;">Loading...</span>
+        </div>
+    
+        <div id="cacheInfo"></div>
+        <div id="errorContainer"></div>
+        <div id="upstreamContainer" class="upstream-grid"></div>
+    </div>
+
+    <script>
+        let isLoading = false;
+        
+        async function fetchUpstreamData() {
+            try {
+                const response = await fetch('/api/upstreams');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching upstream data:', error);
+                throw error;
+            }
+        }
+        
+        function showLoading(show) {
+            isLoading = show;
+            document.getElementById('loadingIndicator').style.display = show ? 'inline' : 'none';
+            document.querySelectorAll('.action-btn').forEach(btn => btn.disabled = show);
+        }
+        
+        function showError(message) {
+            const container = document.getElementById('errorContainer');
+            container.innerHTML = `
+                <div class="error">
+                    <strong>Error:</strong> ${message}
+                </div>
+            `;
+        }
+        
+        function clearError() {
+            document.getElementById('errorContainer').innerHTML = '';
+        }
+        
+        function renderSummaryCards(summary) {
+            const container = document.getElementById('summaryCards');
+            container.innerHTML = `
+                <div class="summary-card">
+                    <div class="number">${summary.total_providers}</div>
+                    <div class="label">Total Providers</div>
+                </div>
+                <div class="summary-card">
+                    <div class="number">${summary.healthy_providers}</div>
+                    <div class="label">Healthy Providers</div>
+                </div>
+                <div class="summary-card">
+                    <div class="number">${summary.total_models}</div>
+                    <div class="label">Total Models</div>
+                </div>
+                <div class="summary-card">
+                    <div class="number">${summary.cache_entries}</div>
+                    <div class="label">Cache Entries</div>
+                </div>
+            `;
+        }
+        
+        function renderCacheInfo(cacheStats) {
+            const container = document.getElementById('cacheInfo');
+            if (!cacheStats || Object.keys(cacheStats).length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            
+            const statsHtml = Object.entries(cacheStats.entries_by_provider || {})
+                .map(([provider, stats]) => `
+                    <div>
+                        <strong>${provider}:</strong> 
+                        ${stats.model_count} models, 
+                        ${Math.round(stats.age_seconds)}s old,
+                        ${stats.access_count} hits
+                    </div>
+                `).join('');
+            
+            container.innerHTML = `
+                <div class="cache-info">
+                    <h4>📦 Cache Statistics</h4>
+                    <div class="cache-stats">
+                        <div><strong>Total Entries:</strong> ${cacheStats.total_entries}</div>
+                        <div><strong>Total Hits:</strong> ${cacheStats.total_access_count}</div>
+                        <div><strong>Cleanup Interval:</strong> ${cacheStats.cleanup_interval}s</div>
+                        <div><strong>Default TTL:</strong> ${cacheStats.default_ttl}s</div>
+                    </div>
+                    ${statsHtml ? `<div style="margin-top: 10px;">${statsHtml}</div>` : ''}
+                </div>
+            `;
+        }
+        
+        function renderUpstreams(upstreams) {
+            const container = document.getElementById('upstreamContainer');
+            
+            if (upstreams.length === 0) {
+                container.innerHTML = '<div class="no-models">No upstream providers configured</div>';
+                return;
+            }
+            
+            container.innerHTML = upstreams.map(upstream => `
+                <div class="upstream-card">
+                    <div class="upstream-header">
+                        <div class="upstream-info">
+                            <h3>${upstream.name}</h3>
+                            <div class="upstream-meta">
+                                <span class="provider-type">${upstream.type.toUpperCase()}</span>
+                                <span>Priority: ${upstream.priority}</span>
+                                <span>${upstream.endpoint}</span>
+                            </div>
+                        </div>
+                        <div class="status-badge ${getStatusClass(upstream)}">
+                            ${getStatusText(upstream)}
+                        </div>
+                    </div>
+                    
+                    <div class="models-section">
+                        <div class="models-header">
+                            <h4>Models</h4>
+                            <span class="models-count">${upstream.model_count} models</span>
+                        </div>
+                        
+                        ${upstream.models && upstream.models.length > 0 ? `
+                            <div class="models-list">
+                                ${upstream.models.map(model => `
+                                    <div class="model-item">
+                                        <div class="model-name">${model.display_name}</div>
+                                        <div class="model-id">${model.id}</div>
+                                        ${model.aliases && model.aliases.length > 0 ? 
+                                            `<div class="model-aliases">Aliases: ${model.aliases.join(', ')}</div>` : ''
+                                        }
+                                    </div>
+                                `).join('')}
+                            </div>
+                            ${upstream.model_count > upstream.models.length ? 
+                                `<div style="text-align: center; margin-top: 10px; color: #666; font-size: 0.9em;">
+                                    ... and ${upstream.model_count - upstream.models.length} more models
+                                </div>` : ''
+                            }
+                        ` : `
+                            <div class="no-models">
+                                ${upstream.healthy ? 'No models available' : 'Provider unhealthy - cannot fetch models'}
+                            </div>
+                        `}
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function getStatusClass(upstream) {
+            if (!upstream.enabled) return 'status-disabled';
+            
+            switch(upstream.status) {
+                case 'healthy': return 'status-healthy';
+                case 'unhealthy': return 'status-unhealthy';
+                case 'unknown': return 'status-unknown';
+                default: return upstream.healthy ? 'status-healthy' : 'status-unhealthy';
+            }
+        }
+        
+        function getStatusText(upstream) {
+            if (!upstream.enabled) return 'Disabled';
+            
+            let status = upstream.status || (upstream.healthy ? 'healthy' : 'unhealthy');
+            let text = status.charAt(0).toUpperCase() + status.slice(1);
+            
+            // Add last checked info
+            if (upstream.last_checked_ago) {
+                text += ` (checked ${upstream.last_checked_ago})`;
+            }
+            
+            return text;
+        }
+        
+        async function refreshData() {
+            if (isLoading) return;
+            
+            showLoading(true);
+            clearError();
+            
+            try {
+                const data = await fetchUpstreamData();
+                renderSummaryCards(data.summary);
+                renderCacheInfo(data.cache_stats);
+                renderUpstreams(data.upstreams);
+            } catch (error) {
+                showError(`Failed to load upstream data: ${error.message}`);
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        async function refreshCache() {
+            if (isLoading) return;
+            
+            if (!confirm('Are you sure you want to clear the model cache? This will force a refresh from all providers.')) {
+                return;
+            }
+            
+            showLoading(true);
+            clearError();
+            
+            try {
+                // For now, just refresh the data
+                // In the future, we could add a dedicated cache clear endpoint
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate cache clear
+                await refreshData();
+            } catch (error) {
+                showError(`Failed to clear cache: ${error.message}`);
+            } finally {
+                showLoading(false);
+            }
+        }
+        
+        // Load data on page load
+        document.addEventListener('DOMContentLoaded', refreshData);
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            if (!isLoading) {
+                refreshData();
+            }
+        }, 30000);
+    </script>
+</body>
+</html>

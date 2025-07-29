@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmolRouter - Request Logs</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #fafafa;
+            color: #333;
+        }
+        
+        .header {
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #1976d2;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .nav-links {
+            margin-top: 0.5rem;
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .nav-link {
+            color: #666;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        
+        .nav-link:hover {
+            color: #1976d2;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-card .number {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #1976d2;
+        }
+        
+        .stat-card .label {
+            color: #666;
+            margin-top: 0.5rem;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .table-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .table-header {
+            padding: 1rem;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .table-header h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+        
+        .refresh-btn {
+            background: #1976d2;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+        
+        .refresh-btn:hover {
+            background: #1565c0;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        th {
+            background: #f5f5f5;
+            font-weight: 600;
+            color: #666;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+        
+        tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .clickable-row {
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+        
+        .clickable-row:hover {
+            background: #e3f2fd !important;
+        }
+        
+        .service-icon {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+        }
+        
+        .service-openai {
+            color: #10a37f;
+        }
+        
+        .service-ollama {
+            color: #ff6b35;
+        }
+        
+        .status {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        
+        .status-success {
+            background: #e8f5e8;
+            color: #2e7d32;
+        }
+        
+        .status-error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        
+        .size {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.75rem;
+        }
+        
+        .duration {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.75rem;
+        }
+        
+        .timestamp {
+            font-size: 0.75rem;
+            color: #666;
+        }
+        
+        .no-data {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            <span class="material-icons">route</span>
+            SmolRouter
+        </h1>
+        <div class="nav-links">
+            <a href="/performance" class="nav-link">📈 Performance</a>
+            <a href="/upstreams" class="nav-link">🔗 Upstreams</a>
+        </div>
+    </div>
+    
+    <div class="stats">
+        <div class="stat-card">
+            <div class="number">{{ stats.total_requests }}</div>
+            <div class="label">Total Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="number">{{ stats.openai_requests }}</div>
+            <div class="label">OpenAI Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="number">{{ stats.ollama_requests }}</div>
+            <div class="label">Ollama Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="number">{{ stats.recent_requests }}</div>
+            <div class="label">Last 24 Hours</div>
+        </div>
+        <div class="stat-card">
+            <div class="number" style="color: #ff9800;">{{ stats.inflight_requests }}</div>
+            <div class="label">🔄 Inflight</div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Recent Requests</h2>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="refresh-btn" onclick="window.location.href='/performance'" style="background: #4caf50;">
+                        <span class="material-icons" style="font-size: 1rem;">analytics</span>
+                        Performance
+                    </button>
+                    <button class="refresh-btn" onclick="window.location.href='/upstreams'" style="background: #667eea;">
+                        <span class="material-icons" style="font-size: 1rem;">dns</span>
+                        Upstreams
+                    </button>
+                    <button class="refresh-btn" onclick="window.location.reload()">
+                        <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                        Refresh
+                    </button>
+                </div>
+            </div>
+            
+            {% if logs %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Source</th>
+                        <th>Service</th>
+                        <th>Path</th>
+                        <th>Model</th>
+                        <th>Size</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for log in logs %}
+                    <tr class="clickable-row" onclick="viewRequest({{ log.id }})" title="Click to view full request details">
+                        <td class="timestamp">
+                            {{ log.timestamp.strftime('%H:%M:%S') }}<br>
+                            <small>{{ log.timestamp.strftime('%m/%d') }}</small>
+                        </td>
+                        <td>{{ log.source_ip }}</td>
+                        <td>
+                            <div class="service-icon service-{{ log.service_type }}">
+                                {% if log.service_type == 'openai' %}
+                                <span class="material-icons" style="font-size: 1rem;">smart_toy</span>
+                                OpenAI
+                                {% else %}
+                                <span class="material-icons" style="font-size: 1rem;">psychology</span>
+                                Ollama
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td>{{ log.path }}</td>
+                        <td>
+                            {% if log.original_model and log.mapped_model and log.original_model != log.mapped_model %}
+                            <span title="Mapped from {{ log.original_model }}">{{ log.mapped_model }}</span>
+                            <span class="material-icons" style="font-size: 0.8rem; color: #ff9800;">swap_horiz</span>
+                            {% elif log.mapped_model %}
+                            {{ log.mapped_model }}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td class="size">
+                            {% if log.request_size %}
+                            {{ "%.1f"|format(log.request_size / 1024) }} KB
+                            {% if log.response_size %}
+                            / {{ "%.1f"|format(log.response_size / 1024) }} KB
+                            {% endif %}
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td class="duration">
+                            {% if log.duration_ms %}
+                            {{ log.duration_ms }}ms
+                            {% else %}
+                            -
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if log.completed_at %}
+                                {% if log.status_code %}
+                                <span class="status {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                                    {{ log.status_code }}
+                                </span>
+                                {% else %}
+                                <span class="status status-success">✓</span>
+                                {% endif %}
+                            {% else %}
+                            <span class="status" style="background: #ff9800; color: white;">🔄 Inflight</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="no-data">
+                <span class="material-icons" style="font-size: 3rem; color: #ccc;">inbox</span>
+                <p>No requests logged yet</p>
+                <p><small>Requests will appear here as they are processed</small></p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    
+    <script>
+        // Auto-refresh every 30 seconds
+        setTimeout(() => {
+            window.location.reload();
+        }, 30000);
+        
+        // Navigate to request detail view
+        function viewRequest(requestId) {
+            window.open('/request/' + requestId, '_blank');
+        }
+    </script>
+</body>
+</html>
