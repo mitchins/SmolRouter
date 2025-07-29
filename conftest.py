@@ -8,7 +8,7 @@ import os
 from unittest.mock import patch
 from peewee import SqliteDatabase
 
-from database import RequestLog
+from smolrouter.database import RequestLog
 
 
 @pytest.fixture(scope="function")
@@ -49,7 +49,7 @@ def disable_logging():
     """
     Disable logging during regular API tests to avoid database side effects.
     """
-    with patch('app.ENABLE_LOGGING', False):
+    with patch('smolrouter.app.ENABLE_LOGGING', False):
         yield
 
 

@@ -21,6 +21,7 @@ from smolrouter.storage import init_blob_storage
 from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
 from smolrouter.routing import get_smart_router
 from smolrouter.security import init_webui_security, get_webui_security
+from smolrouter.container import get_container, initialize_container
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -230,6 +231,28 @@ if ENABLE_LOGGING:
 
 # Initialize WebUI security
 init_webui_security()
+
+# Initialize new architecture container
+container = None
+
+async def init_new_architecture():
+    """Initialize the new architecture container"""
+    global container
+    try:
+        container = await initialize_container()
+        logger.info("New SmolRouter architecture initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize new architecture: {e}")
+        logger.warning("Falling back to legacy architecture only")
+
+# Initialize on startup
+import asyncio
+try:
+    # Try to initialize in background
+    asyncio.create_task(init_new_architecture())
+except RuntimeError:
+    # If no event loop is running, we'll initialize on first use
+    pass
 
 
 def rewrite_model(model: str) -> str:
@@ -822,7 +845,61 @@ async def completions(request: Request):
 
 @app.get("/v1/models")
 async def list_models(request: Request):
-    # Simply proxy model listing
+    """List available models with aggregation from multiple providers"""
+    global container
+    
+    # Initialize container if not already done
+    if container is None:
+        await init_new_architecture()
+    
+    # Try new architecture first
+    if container is not None:
+        try:
+            # Get client context
+            source_ip = request.client.host if request.client else "unknown"
+            auth_payload = None
+            try:
+                auth_payload = verify_request_auth(request)
+            except Exception:
+                pass  # Continue without auth
+            
+            client_context = container.create_client_context(
+                ip=source_ip, 
+                auth_payload=auth_payload,
+                headers=dict(request.headers)
+            )
+            
+            # Get mediator and fetch models
+            mediator = await container.get_mediator()
+            models = await mediator.get_available_models(client_context)
+            
+            # Convert to OpenAI format
+            openai_models = []
+            for model in models:
+                openai_models.append({
+                    "id": model.display_name,  # Use display name like "llama3-70b [fast-kitten]"
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": model.provider_id,
+                    "permission": [],
+                    "root": model.name,
+                    "parent": None
+                })
+            
+            response_data = {
+                "object": "list",
+                "data": openai_models
+            }
+            
+            logger.info(f"Served {len(openai_models)} aggregated models to {source_ip}")
+            return JSONResponse(content=response_data, status_code=200)
+            
+        except Exception as e:
+            logger.error(f"Error in new architecture model listing: {e}")
+            # Fall through to legacy behavior
+    
+    # Fallback to legacy single-upstream behavior
+    logger.warning("Using legacy model listing (single upstream)")
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization"]}
     url = f"{DEFAULT_UPSTREAM}/v1/models"
     logger.debug(f"Proxying models request to: {url}")
@@ -863,7 +940,60 @@ async def ollama_chat(request: Request):
 
 @app.get("/api/tags")
 async def ollama_list_models(request: Request):
-    """Convert OpenAI /v1/models to Ollama /api/tags format"""
+    """List available models in Ollama /api/tags format with aggregation"""
+    global container
+    
+    # Initialize container if not already done
+    if container is None:
+        await init_new_architecture()
+    
+    # Try new architecture first
+    if container is not None:
+        try:
+            # Get client context
+            source_ip = request.client.host if request.client else "unknown"
+            auth_payload = None
+            try:
+                auth_payload = verify_request_auth(request)
+            except Exception:
+                pass  # Continue without auth
+            
+            client_context = container.create_client_context(
+                ip=source_ip, 
+                auth_payload=auth_payload,
+                headers=dict(request.headers)
+            )
+            
+            # Get mediator and fetch models
+            mediator = await container.get_mediator()
+            models = await mediator.get_available_models(client_context)
+            
+            # Convert to Ollama format
+            ollama_models = []
+            for model in models:
+                # Use metadata if available, otherwise provide defaults
+                size = model.metadata.get('size', 4000000000)  # Default 4GB
+                modified_at = model.metadata.get('modified_at', "2024-01-01T00:00:00Z")
+                digest = model.metadata.get('digest', "sha256:mock_digest")
+                
+                ollama_models.append({
+                    "name": model.display_name,  # Use display name like "llama3-70b [fast-kitten]"
+                    "modified_at": modified_at,
+                    "size": size,
+                    "digest": digest
+                })
+            
+            ollama_response = {"models": ollama_models}
+            logger.info(f"Served {len(ollama_models)} aggregated models in Ollama format to {source_ip}")
+            
+            return JSONResponse(content=ollama_response, status_code=200)
+            
+        except Exception as e:
+            logger.error(f"Error in new architecture Ollama model listing: {e}")
+            # Fall through to legacy behavior
+    
+    # Fallback to legacy behavior
+    logger.warning("Using legacy Ollama model listing (single upstream)")
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization"]}
     url = f"{DEFAULT_UPSTREAM}/v1/models"
     logger.debug(f"Converting OpenAI models from {url} to Ollama tags format")
@@ -914,7 +1044,8 @@ async def dashboard(request: Request):
         stats = get_log_stats()
         return templates.TemplateResponse(request, "index.html", {
             "logs": logs,
-            "stats": stats
+            "stats": stats,
+            "current_page": "dashboard"
         })
     except Exception as e:
         logger.error(f"Error rendering dashboard: {e}")
@@ -931,7 +1062,8 @@ async def performance_dashboard(request: Request):
     
     try:
         return templates.TemplateResponse(request, "performance.html", {
-            "title": "Performance Analytics"
+            "title": "Performance Analytics",
+            "current_page": "performance"
         })
     except Exception as e:
         logger.error(f"Error loading performance dashboard: {e}")
@@ -1081,6 +1213,140 @@ async def api_performance(
     except Exception as e:
         logger.error(f"Failed to get performance data: {e}")
         return JSONResponse(content={"error": "Failed to get performance data"}, status_code=500)
+
+
+@app.get("/api/upstreams")
+async def api_upstreams():
+    """API endpoint for getting upstream provider information"""
+    global container
+    
+    # Initialize container if not already done
+    if container is None:
+        await init_new_architecture()
+    
+    # Try new architecture first
+    if container is not None:
+        try:
+            mediator = await container.get_mediator()
+            
+            # Get provider health (backward compatibility)
+            provider_health = await mediator.get_provider_health()
+            
+            # Get detailed provider health information  
+            detailed_health = await mediator.get_provider_health_detailed()
+            
+            # Get architecture stats
+            stats = await mediator.get_mediator_stats()
+            
+            # Get providers info
+            providers = container.get_providers()
+            
+            upstreams = []
+            for provider in providers:
+                provider_id = provider.get_provider_id()
+                is_healthy = provider_health.get(provider_id, False)
+                health_detail = detailed_health.get(provider_id, {})
+                
+                # Get models from this provider
+                try:
+                    client_context = container.create_client_context(ip="127.0.0.1")
+                    provider_models = await mediator.get_models_by_provider(provider_id, client_context)
+                    model_count = len(provider_models)
+                    models = [
+                        {
+                            "id": model.id,
+                            "name": model.name,
+                            "display_name": model.display_name,
+                            "aliases": model.aliases
+                        } for model in provider_models[:10]  # Limit to first 10 for UI
+                    ]
+                except Exception as e:
+                    logger.debug(f"Failed to get models for provider {provider_id}: {e}")
+                    model_count = 0
+                    models = []
+                
+                upstream_info = {
+                    "id": provider_id,
+                    "name": provider_id,
+                    "type": provider.get_provider_type(),
+                    "endpoint": provider.get_endpoint(),
+                    "healthy": is_healthy,
+                    "status": health_detail.get('status', 'unknown'),
+                    "last_checked": health_detail.get('last_checked'),
+                    "last_checked_ago": health_detail.get('last_checked_ago', 'never'),
+                    "last_healthy": health_detail.get('last_healthy'),
+                    "model_count": model_count,
+                    "models": models,
+                    "priority": getattr(provider.config, 'priority', 999),
+                    "enabled": getattr(provider.config, 'enabled', True)
+                }
+                upstreams.append(upstream_info)
+            
+            # Sort by priority
+            upstreams.sort(key=lambda x: x['priority'])
+            
+            # Get cache stats
+            cache_stats = stats.get('aggregation', {}).get('cache_stats', {})
+            
+            return {
+                "upstreams": upstreams,
+                "summary": {
+                    "total_providers": len(upstreams),
+                    "healthy_providers": sum(1 for u in upstreams if u['healthy']),
+                    "total_models": sum(u['model_count'] for u in upstreams),
+                    "cache_enabled": len(cache_stats) > 0,
+                    "cache_entries": cache_stats.get('total_entries', 0)
+                },
+                "cache_stats": cache_stats
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting upstream data: {e}")
+            return JSONResponse(
+                content={"error": "Failed to get upstream data", "details": str(e)},
+                status_code=500
+            )
+    
+    # Fallback to legacy data
+    return {
+        "upstreams": [
+            {
+                "id": "default",
+                "name": "Default Upstream",
+                "type": "openai",
+                "endpoint": DEFAULT_UPSTREAM,
+                "healthy": True,  # Assume healthy
+                "model_count": "Unknown",
+                "models": [],
+                "priority": 0,
+                "enabled": True
+            }
+        ],
+        "summary": {
+            "total_providers": 1,
+            "healthy_providers": 1,
+            "total_models": "Unknown",
+            "cache_enabled": False,
+            "cache_entries": 0
+        },
+        "cache_stats": {}
+    }
+
+
+@app.get("/upstreams", response_class=HTMLResponse)
+async def upstreams_dashboard(request: Request):
+    """Web UI for viewing upstream providers and their models"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+    
+    try:
+        return templates.TemplateResponse(request, "upstreams.html", {
+            "title": "Upstream Providers",
+            "current_page": "upstreams"
+        })
+    except Exception as e:
+        logger.error(f"Error loading upstreams dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading upstreams dashboard</h1>", status_code=500)
 
 
 @app.get("/request/{request_id}", response_class=HTMLResponse)
