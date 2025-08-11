@@ -23,7 +23,9 @@ dependencies = [
     "uvicorn[standard]",
     "peewee",
     "jinja2",
-    "pyyaml"
+    "pyyaml",
+    'jwt',
+    'slowapi'
 ]
 
 [project.scripts]
