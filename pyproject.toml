@@ -39,7 +39,8 @@ dev = [
     "flake8-comprehensions",
     "flake8-simplify",
     "vulture",
-    "pre-commit"
+    "pre-commit",
+    "ruff"
 ]
 
 [project.scripts]
