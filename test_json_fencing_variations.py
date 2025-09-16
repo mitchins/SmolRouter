@@ -93,13 +93,10 @@ def test_json_fencing_variations():
     print(f"\n{'='*50}")
     print(f"📊 Test Results: {passed} passed, {failed} failed")
     
-    if failed == 0:
-        print("🎉 All JSON fencing variations work correctly!")
-        print("📝 The discovered [json] ... [json] pattern is now supported")
-    else:
-        print("⚠️  Some tests failed - JSON stripping may not work correctly")
+    assert failed == 0, f"{failed} JSON fencing tests failed - JSON stripping may not work correctly"
     
-    return failed == 0
+    print("🎉 All JSON fencing variations work correctly!")
+    print("📝 The discovered [json] ... [json] pattern is now supported")
 
 def test_real_world_example():
     """Test the specific example that was discovered"""
@@ -114,13 +111,9 @@ def test_real_world_example():
     print(f"Input:  {repr(real_example)}")
     print(f"Output: {repr(result)}")
     
-    if result == expected:
-        print("✅ Real-world example works correctly!")
-        return True
-    else:
-        print("❌ Real-world example failed!")
-        print(f"Expected: {repr(expected)}")
-        return False
+    assert result == expected, f"Real-world example failed! Expected: {repr(expected)}, Got: {repr(result)}"
+    
+    print("✅ Real-world example works correctly!")
 
 def main():
     """Run all JSON fencing tests"""

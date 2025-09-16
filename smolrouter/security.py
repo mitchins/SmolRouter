@@ -36,18 +36,28 @@ class WebUISecurityManager:
             "x-original-forwarded-for"
         }
         
-        # Check if JWT is configured when required (only for ALWAYS_AUTH now)
+        # Check if JWT is configured and valid when required (only for ALWAYS_AUTH now)
         jwt_secret = os.getenv("JWT_SECRET")
-        if self.policy == SecurityPolicy.ALWAYS_AUTH and not jwt_secret:
-            logger.error(f"WEBUI_SECURITY is set to {self.policy.value} but JWT_SECRET is not configured!")
-            logger.error("WebUI will be inaccessible. Either:")
-            logger.error("  1. Set JWT_SECRET environment variable, or")
-            logger.error("  2. Set WEBUI_SECURITY=NONE (NOT recommended for production)")
-            # Don't exit - let the application start but WebUI will be unusable
+        jwt_configured = False
+        
+        if self.policy == SecurityPolicy.ALWAYS_AUTH:
+            if not jwt_secret:
+                logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
+                logger.error("WebUI will be inaccessible. Either:")
+                logger.error("  1. Set JWT_SECRET environment variable, or")
+                logger.error("  2. Set WEBUI_SECURITY=NONE (NOT recommended for production)")
+            else:
+                # Validate JWT secret strength
+                from smolrouter.auth import _validate_jwt_secret
+                if not _validate_jwt_secret(jwt_secret):
+                    logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
+                    logger.error("WebUI will be inaccessible due to invalid JWT_SECRET.")
+                else:
+                    jwt_configured = True
         
         # Pre-import auth verification function to avoid circular imports during request processing
         self._verify_request_auth = None
-        if self.policy == SecurityPolicy.ALWAYS_AUTH and jwt_secret:
+        if self.policy == SecurityPolicy.ALWAYS_AUTH and jwt_configured:
             try:
                 from smolrouter.auth import verify_request_auth
                 self._verify_request_auth = verify_request_auth
@@ -56,8 +66,13 @@ class WebUISecurityManager:
                 logger.error(f"Failed to import JWT verification: {e}")
         
         logger.info(f"WebUI Security Policy: {self.policy.value}")
-        if jwt_secret:
-            logger.info("JWT authentication is configured")
+        if self.policy == SecurityPolicy.ALWAYS_AUTH:
+            if jwt_configured:
+                logger.info("JWT authentication is configured and valid")
+            else:
+                logger.warning("JWT authentication is NOT properly configured")
+        elif jwt_secret:
+            logger.info("JWT authentication is available")
         else:
             logger.warning("JWT authentication is NOT configured")
     
@@ -97,7 +112,7 @@ class WebUISecurityManager:
             try:
                 self._verify_request_auth(request)
                 return True, "valid_jwt_provided"
-            except:
+            except Exception:
                 return False, "jwt_required"
         
         # This shouldn't happen but fallback to denying access

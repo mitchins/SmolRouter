@@ -4,8 +4,7 @@ Test JWT secret validation to prevent weak/empty secrets
 """
 
 import os
-import pytest
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 from smolrouter.auth import _validate_jwt_secret, get_jwt_auth, JWTAuth
 
 class TestJWTSecretValidation:
@@ -115,8 +114,9 @@ class TestJWTSecretValidation:
         
         mock_logger.reset_mock()
         
-        # Test weak secret logging
-        _validate_jwt_secret("password")
+        # Test weak secret logging (use a 32+ char weak secret to bypass length check)
+        weak_32_char = "123456789012345678901234567890123"  # 33 chars, matches weak_secrets list
+        _validate_jwt_secret(weak_32_char)
         mock_logger.error.assert_called_with("JWT_SECRET appears to be a weak/default secret. Use a cryptographically secure random key.")
         
         mock_logger.reset_mock()
@@ -152,7 +152,7 @@ class TestJWTSecretValidation:
     
     def test_security_policy_with_invalid_jwt_secret(self):
         """Test that security policy handles invalid JWT secrets correctly"""
-        from smolrouter.security import WebUISecurityManager, SecurityPolicy
+        from smolrouter.security import WebUISecurityManager
         
         # Test ALWAYS_AUTH with invalid secret
         os.environ["WEBUI_SECURITY"] = "ALWAYS_AUTH"
@@ -160,7 +160,7 @@ class TestJWTSecretValidation:
         
         # Should create manager but log error about inaccessible WebUI
         with patch('smolrouter.security.logger') as mock_logger:
-            security = WebUISecurityManager()
+            _ = WebUISecurityManager()
             
             # Should log error about invalid JWT_SECRET
             mock_logger.error.assert_any_call("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")

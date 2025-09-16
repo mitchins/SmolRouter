@@ -5,7 +5,7 @@ Simple test script to verify WebUI security policy logic
 
 import os
 from unittest.mock import Mock
-from smolrouter.security import WebUISecurityManager, SecurityPolicy
+from smolrouter.security import WebUISecurityManager
 
 def create_mock_request(headers=None):
     """Create a mock FastAPI Request object"""

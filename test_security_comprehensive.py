@@ -113,8 +113,8 @@ class TestWebUISecurityComprehensive:
         with pytest.raises(HTTPException) as exc_info:
             security.check_webui_access(request)
         
-        assert exc_info.value.status_code == 500  # Configuration error
-        assert "configuration_error" in str(exc_info.value.detail)
+        assert exc_info.value.status_code == 403  # Access denied (better than 500)  
+        assert "jwt_verification_not_available" in str(exc_info.value.detail)
     
     def test_policy_fallback_on_invalid_config(self):
         """Test that invalid policy falls back to secure default"""
@@ -157,7 +157,6 @@ class TestWebUISecurityComprehensive:
     def test_concurrent_access_attempts(self):
         """Test thread safety of security manager"""
         import threading
-        import time
         
         os.environ["WEBUI_SECURITY"] = "AUTH_WHEN_PROXIED"
         security = WebUISecurityManager()
@@ -184,11 +183,11 @@ class TestWebUISecurityComprehensive:
         assert all(not accessible for accessible, reason in results)
         assert all(reason == "webui_disabled_when_proxied" for accessible, reason in results)
     
-    @patch('smolrouter.security.verify_request_auth')
+    @patch('smolrouter.auth.verify_request_auth')
     def test_jwt_verification_in_always_auth(self, mock_verify):
         """Test JWT verification actually gets called in ALWAYS_AUTH mode"""
         os.environ["WEBUI_SECURITY"] = "ALWAYS_AUTH"
-        os.environ["JWT_SECRET"] = "test-secret"
+        os.environ["JWT_SECRET"] = "this-is-a-valid-32-character-key"
         
         security = WebUISecurityManager()
         

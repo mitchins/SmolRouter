@@ -2,6 +2,9 @@
 
 A smart, lightweight proxy for routing AI model requests with performance analytics. Perfect for local LLM enthusiasts who want intelligent routing, real-time monitoring, and seamless model switching.
 
+[![CI Pipeline](https://github.com/mcurrie/smolrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/mcurrie/smolrouter/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/mcurrie/smolrouter/branch/main/graph/badge.svg)](https://codecov.io/gh/mcurrie/smolrouter)
+
 ## Quick Start
 
 ### Using Docker
@@ -35,6 +38,9 @@ A smart, lightweight proxy for routing AI model requests with performance analyt
     export DEFAULT_UPSTREAM="http://localhost:8000"
     export MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}'
     smolrouter
+
+    # Or specify a custom port:
+    LISTEN_PORT=8080 python -m smolrouter.app
     ```
 
 ### Usage

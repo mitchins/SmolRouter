@@ -15,11 +15,9 @@ import pytest
 import asyncio
 import time
 from unittest.mock import Mock, AsyncMock, patch
-from typing import List
 
 from smolrouter.interfaces import (
-    ModelInfo, ClientContext, ProviderConfig, IModelProvider, 
-    IModelStrategy, IAccessControl, IModelCache
+    ModelInfo, ClientContext, ProviderConfig
 )
 from smolrouter.providers import (
     OllamaProvider, OpenAIProvider, ProviderFactory
@@ -276,10 +274,12 @@ class TestCaching:
         entry.cached_at = time.time() - 2  # 2 seconds ago with 1 second TTL
         assert entry.is_expired()
     
+    @patch('smolrouter.providers.OpenAIProvider.discover_models')
+    @patch('smolrouter.providers.OpenAIProvider.health_check')
     @patch('smolrouter.providers.OllamaProvider.discover_models')
     @patch('smolrouter.providers.OllamaProvider.health_check')
     @pytest.mark.asyncio
-    async def test_model_aggregator(self, mock_health, mock_discover):
+    async def test_model_aggregator(self, mock_ollama_health, mock_ollama_discover, mock_openai_health, mock_openai_discover):
         """Test model aggregator functionality"""
         # Create mock providers
         config1 = ProviderConfig(name="provider1", type="ollama", url="http://localhost:11434")
@@ -292,8 +292,11 @@ class TestCaching:
         models1 = [ModelInfo("model1@provider1", "model1", "provider1", "ollama", "http://localhost:11434")]
         models2 = [ModelInfo("model2@provider2", "model2", "provider2", "openai", "http://localhost:8000")]
         
-        mock_health.return_value = True
-        mock_discover.side_effect = [models1, models2]
+        # Mock both providers
+        mock_ollama_health.return_value = True
+        mock_openai_health.return_value = True
+        mock_ollama_discover.return_value = models1
+        mock_openai_discover.return_value = models2
         
         # Create aggregator
         cache = InMemoryModelCache()
@@ -306,10 +309,12 @@ class TestCaching:
         assert all_models[1].id == "model2@provider2"
         
         # Test caching (second call should use cache)
-        mock_discover.reset_mock()
+        mock_ollama_discover.reset_mock()
+        mock_openai_discover.reset_mock()
         all_models2 = await aggregator.get_all_models()
         assert len(all_models2) == 2
-        mock_discover.assert_not_called()  # Should use cache
+        mock_ollama_discover.assert_not_called()  # Should use cache
+        mock_openai_discover.assert_not_called()  # Should use cache
         
         # Test provider-specific queries
         provider1_models = await aggregator.get_models_by_provider("provider1")

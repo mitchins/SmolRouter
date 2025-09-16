@@ -2,7 +2,7 @@ import os
 import hashlib
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger("model-rerouter")
@@ -11,90 +11,101 @@ logger = logging.getLogger("model-rerouter")
 MAX_BLOB_SIZE = int(os.getenv("MAX_BLOB_SIZE", "10485760"))  # 10MB default
 MAX_TOTAL_STORAGE_SIZE = int(os.getenv("MAX_TOTAL_STORAGE_SIZE", "1073741824"))  # 1GB default
 
+
 class BlobStorage(ABC):
     """Abstract base class for blob storage backends"""
-    
+
     @abstractmethod
-    def store(self, data: bytes, content_type: str = "application/json") -> str:
+    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
         """Store data and return a reference key"""
-        pass
-    
+        raise NotImplementedError()
+
     @abstractmethod
-    def retrieve(self, key: str) -> Optional[bytes]:
+    def retrieve(self, key: str, record_id: Optional[int] = None) -> Optional[bytes]:
         """Retrieve data by key, return None if not found"""
-        pass
-    
+        raise NotImplementedError()
+
     @abstractmethod
-    def delete(self, key: str) -> bool:
+    def delete(self, key: str, record_id: Optional[int] = None) -> bool:
         """Delete data by key, return True if successful"""
-        pass
-    
+        raise NotImplementedError()
+
     @abstractmethod
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, record_id: Optional[int] = None) -> bool:
         """Check if key exists"""
-        pass
-    
+        raise NotImplementedError()
+
     @abstractmethod
     def cleanup_old(self, max_age_days: int) -> int:
         """Remove old blobs, return count of deleted items"""
-        pass
+        raise NotImplementedError()
+
 
 class FilesystemBlobStorage(BlobStorage):
     """Filesystem-based blob storage implementation"""
-    
+
     def __init__(self, base_path: str = "blob_storage"):
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Initialized filesystem blob storage at {self.base_path}")
-    
-    def _get_blob_path(self, key: str) -> Path:
-        """Get the filesystem path for a blob key"""
-        # Use first two chars as subdirectory for better performance
-        subdir = key[:2] if len(key) >= 2 else "00"
+
+    def _get_blob_path(self, key: str, record_id: Optional[int] = None) -> Path:
+        """Get the filesystem path for a blob key with enhanced sharding"""
+        # Enhanced sharding strategy for 1M+ records
+        if record_id is not None:
+            # Shard by record_id/10000 for predictable distribution
+            shard = record_id // 10000
+            subdir = f"shard_{shard:04d}"
+        else:
+            # Fallback to hash-based sharding (for manual/legacy keys)
+            subdir = key[:2] if len(key) >= 2 else "00"
+
         return self.base_path / subdir / f"{key}.blob"
-    
+
     def _generate_key(self, data: bytes) -> str:
         """Generate a SHA256 hash key for the data"""
         return hashlib.sha256(data).hexdigest()
-    
-    def store(self, data: bytes, content_type: str = "application/json") -> str:
+
+    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
+        # content_type is accepted for API compatibility but not used here
+        _ = content_type
         if not data:
             return ""
-        
+
         # Check individual blob size limit
         if len(data) > MAX_BLOB_SIZE:
             logger.warning(f"Blob size {len(data)} bytes exceeds limit {MAX_BLOB_SIZE} bytes, truncating")
             data = data[:MAX_BLOB_SIZE]
-        
+
         key = self._generate_key(data)
-        blob_path = self._get_blob_path(key)
-        
+        blob_path = self._get_blob_path(key, record_id)
+
         # Create subdirectory if needed
         blob_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Only write if file doesn't exist (deduplication)
         if not blob_path.exists():
             # Check total storage size limit before writing
             if not self._check_storage_limit(len(data)):
                 logger.warning(f"Total storage limit exceeded, running cleanup before storing blob {key}")
                 self._cleanup_for_space(len(data))
-            
+
             with open(blob_path, 'wb') as f:
                 f.write(data)
             logger.debug(f"Stored blob {key} ({len(data)} bytes)")
         else:
             logger.debug(f"Blob {key} already exists, skipping write")
-        
+
         return key
-    
-    def retrieve(self, key: str) -> Optional[bytes]:
+
+    def retrieve(self, key: str, record_id: Optional[int] = None) -> Optional[bytes]:
         """Retrieve data by key"""
         if not key:
             return None
-        
-        blob_path = self._get_blob_path(key)
-        
+
+        blob_path = self._get_blob_path(key, record_id)
+
         try:
             if blob_path.exists():
                 with open(blob_path, 'rb') as f:
@@ -103,15 +114,15 @@ class FilesystemBlobStorage(BlobStorage):
                 return data
         except Exception as e:
             logger.error(f"Failed to retrieve blob {key}: {e}")
-        
+
         return None
-    
-    def delete(self, key: str) -> bool:
+
+    def delete(self, key: str, record_id: Optional[int] = None) -> bool:
         """Delete data by key"""
         if not key:
             return False
         
-        blob_path = self._get_blob_path(key)
+        blob_path = self._get_blob_path(key, record_id)
         
         try:
             if blob_path.exists():
@@ -123,16 +134,15 @@ class FilesystemBlobStorage(BlobStorage):
         
         return False
     
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, record_id: Optional[int] = None) -> bool:
         """Check if key exists"""
         if not key:
             return False
-        return self._get_blob_path(key).exists()
+        return self._get_blob_path(key, record_id).exists()
     
     def cleanup_old(self, max_age_days: int) -> int:
         """Remove blobs older than max_age_days"""
         import time
-        from datetime import datetime, timedelta
         
         cutoff_time = time.time() - (max_age_days * 24 * 60 * 60)
         deleted_count = 0
@@ -219,32 +229,34 @@ class InMemoryBlobStorage(BlobStorage):
         """Generate a SHA256 hash key for the data"""
         return hashlib.sha256(data).hexdigest()
     
-    def store(self, data: bytes, content_type: str = "application/json") -> str:
+    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
+        # content_type is accepted for API compatibility but not used here
+        _ = content_type
         if not data:
             return ""
-        
+
         # Check individual blob size limit
         if len(data) > MAX_BLOB_SIZE:
             logger.warning(f"Blob size {len(data)} bytes exceeds limit {MAX_BLOB_SIZE} bytes, truncating")
             data = data[:MAX_BLOB_SIZE]
-        
+
         key = self._generate_key(data)
-        
+
         # Check total storage size limit
         current_size = sum(len(blob) for blob in self._storage.values())
         if current_size + len(data) > MAX_TOTAL_STORAGE_SIZE:
-            logger.warning(f"Memory storage limit exceeded, cleaning up old blobs")
+            logger.warning("Memory storage limit exceeded, cleaning up old blobs")
             self._cleanup_for_space(len(data))
-        
+
         self._storage[key] = data
         import time
         self._timestamps[key] = time.time()
-        
+
         logger.debug(f"Stored blob {key} in memory ({len(data)} bytes)")
         return key
     
-    def retrieve(self, key: str) -> Optional[bytes]:
+    def retrieve(self, key: str, record_id: Optional[int] = None) -> Optional[bytes]:
         """Retrieve data by key"""
         if not key:
             return None
@@ -254,7 +266,7 @@ class InMemoryBlobStorage(BlobStorage):
             logger.debug(f"Retrieved blob {key} from memory ({len(data)} bytes)")
         return data
     
-    def delete(self, key: str) -> bool:
+    def delete(self, key: str, record_id: Optional[int] = None) -> bool:
         """Delete data by key"""
         if not key:
             return False
@@ -266,7 +278,7 @@ class InMemoryBlobStorage(BlobStorage):
             return True
         return False
     
-    def exists(self, key: str) -> bool:
+    def exists(self, key: str, record_id: Optional[int] = None) -> bool:
         """Check if key exists"""
         return key in self._storage
     
@@ -290,7 +302,6 @@ class InMemoryBlobStorage(BlobStorage):
     
     def _cleanup_for_space(self, needed_bytes: int):
         """Remove oldest blobs to make space for needed_bytes"""
-        import time
         
         # Sort by timestamp (oldest first) 
         items_by_age = sorted(self._timestamps.items(), key=lambda x: x[1])

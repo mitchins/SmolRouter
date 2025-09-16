@@ -60,6 +60,7 @@ _jwt_auth: Optional[JWTAuth] = None
 def _validate_jwt_secret(secret: str) -> bool:
     """Validate JWT secret meets minimum security requirements"""
     if not secret:
+        logger.error("JWT_SECRET is empty or whitespace-only")
         return False
     
     # Remove whitespace
@@ -80,7 +81,7 @@ def _validate_jwt_secret(secret: str) -> bool:
     }
     
     if secret.lower() in weak_secrets:
-        logger.error(f"JWT_SECRET appears to be a weak/default secret. Use a cryptographically secure random key.")
+        logger.error("JWT_SECRET appears to be a weak/default secret. Use a cryptographically secure random key.")
         return False
     
     # Check for repeated characters (like "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -136,7 +137,7 @@ def verify_request_auth(request: Request) -> Optional[Dict[str, Any]]:
 
 def create_auth_middleware():
     """Create FastAPI middleware for JWT authentication"""
-    from fastapi import Request, Response
+    from fastapi import Request
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
     

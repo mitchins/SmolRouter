@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SmolRouter"
-version = "0.2.0"
+version = "1.0.0"
 authors = [
   { name="Mitchell Currie", email="mitchell.currie@gmail.com" },
 ]
@@ -24,8 +24,22 @@ dependencies = [
     "peewee",
     "jinja2",
     "pyyaml",
-    'jwt',
+    'pyjwt',
     'slowapi'
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock", 
+    "respx",
+    "flake8",
+    "flake8-bugbear",
+    "flake8-comprehensions",
+    "flake8-simplify",
+    "vulture",
+    "pre-commit"
 ]
 
 [project.scripts]
@@ -33,6 +47,53 @@ smolrouter = "smolrouter.cli:main"
 
 [tool.setuptools]
 packages = ["smolrouter"]
+
+# Linting configuration migrated from setup.cfg
+[tool.flake8]
+max-line-length = 120
+extend-ignore = ["E203", "E501", "B009"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".eggs",
+    "*.egg-info",
+    ".venv",
+    "venv",
+]
+per-file-ignores = {"test_*.py" = ["S101", "S105", "S106"]}
+
+# Ruff configuration (migrated from flake8)
+[tool.ruff]
+line-length = 120
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    ".eggs",
+    "*.egg-info",
+    ".venv",
+    "venv",
+]
+
+# New lint subsection to satisfy newer ruff configuration
+[tool.ruff.lint]
+extend-ignore = ["E203", "E501", "B009"]
+
+# Per-file-ignores for ruff (syntax is slightly different)
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["S101", "S105", "S106"]
+
+# Pytest configuration migrated from setup.cfg
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+python_files = "test_*.py"
+python_functions = "test_*"
+python_classes = "Test*"
+addopts = "-v --tb=short"
 
 [project.urls]
 "Homepage" = "https://github.com/mcurrie/smolrouter"

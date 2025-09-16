@@ -7,7 +7,7 @@ AI model serving platforms like Ollama and OpenAI-compatible APIs.
 
 import logging
 import httpx
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urljoin
 
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig
