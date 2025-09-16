@@ -191,17 +191,29 @@ class SmartModelStrategy(IModelStrategy):
     def _parse_fully_qualified_name(self, requested_model: str) -> Optional[Tuple[str, str]]:
         """
         Parse fully qualified model names like 'llama3-70b [fast-kitten]'
-        
+
         Returns:
             Tuple of (model_name, provider_id) or None if not FQ format
         """
-        # Pattern: "model_name [provider_id]"
-        match = re.match(r'^(.+?)\s*\[([^\]]+)\]$', requested_model.strip())
-        if match:
-            model_name = match.group(1).strip()
-            provider_id = match.group(2).strip()
+        # Use string methods to avoid ReDoS vulnerability
+        model_str = requested_model.strip()
+
+        # Check if it has the expected format
+        if not model_str.endswith(']') or '[' not in model_str:
+            return None
+
+        # Find the last '[' to handle model names that might contain '['
+        bracket_idx = model_str.rfind('[')
+        if bracket_idx == -1:
+            return None
+
+        model_name = model_str[:bracket_idx].strip()
+        provider_id = model_str[bracket_idx+1:-1].strip()
+
+        # Validate that we have both parts
+        if model_name and provider_id:
             return model_name, provider_id
-        
+
         return None
     
     async def _apply_alias_transformations(self, model_name: str) -> str:

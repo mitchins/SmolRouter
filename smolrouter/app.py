@@ -326,9 +326,15 @@ def strip_json_markdown_from_text(text: str) -> str:
     Returns:
         Text with JSON markdown blocks replaced by pure JSON content
     """
-    def extract_json_content(match):
-        json_content = match.group(1).strip()
-        
+    def extract_json_content(json_content):
+        # Handle both string input and regex match objects for backward compatibility
+        if hasattr(json_content, 'group'):
+            json_content = json_content.group(1).strip()
+        elif json_content:
+            json_content = json_content.strip()
+        else:
+            return ''
+
         # If it's multiline JSON (contains newlines), clean up line by line
         if '\n' in json_content:
             lines = json_content.split('\n')
@@ -344,12 +350,37 @@ def strip_json_markdown_from_text(text: str) -> str:
             return re.sub(r'\s+', ' ', json_content).strip()
     
     # Pattern 1: ```json...content...``` blocks (with or without newlines)
-    backtick_pattern = r'```json\s*(.*?)\s*```'
-    result = re.sub(backtick_pattern, extract_json_content, text, flags=re.DOTALL)
-    
-    # Pattern 2: [json] content [json] blocks (new variation discovered)
-    square_bracket_pattern = r'\[json\]\s*(.*?)\s*\[json\]'
-    result = re.sub(square_bracket_pattern, extract_json_content, result, flags=re.DOTALL)
+    # Using string methods instead of regex to avoid potential ReDoS
+    result = text
+    start_marker = '```json'
+    end_marker = '```'
+
+    while start_marker in result:
+        start_idx = result.find(start_marker)
+        if start_idx == -1:
+            break
+
+        # Find the closing marker after the opening one
+        end_idx = result.find(end_marker, start_idx + len(start_marker))
+        if end_idx == -1:
+            break
+
+        # Extract and process the JSON content
+        json_content = result[start_idx + len(start_marker):end_idx]
+        cleaned = extract_json_content(json_content)
+
+        # Replace the entire block with cleaned content
+        result = result[:start_idx] + cleaned + result[end_idx + len(end_marker):]
+
+    # Pattern 2: [json] content [json] blocks
+    marker = '[json]'
+    parts = result.split(marker)
+    if len(parts) > 2:
+        # Process alternating parts (content between markers)
+        for i in range(1, len(parts), 2):
+            if i < len(parts):
+                parts[i] = extract_json_content(parts[i])
+        result = ''.join(parts)
     
     return result.strip()
 
