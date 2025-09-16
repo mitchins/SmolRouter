@@ -60,7 +60,7 @@ jobs:
 
     - name: Run ruff linting
       run: |
-        ruff check smolrouter/
+        python -m ruff check smolrouter/
 
     - name: Run vulture for dead code detection
       run: |
