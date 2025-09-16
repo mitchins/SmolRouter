@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import logging
@@ -21,7 +22,7 @@ from smolrouter.storage import init_blob_storage
 from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
 from smolrouter.routing import get_smart_router
 from smolrouter.security import init_webui_security, get_webui_security
-from smolrouter.container import get_container, initialize_container
+from smolrouter.container import initialize_container
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -131,11 +132,11 @@ def load_routes_config() -> Dict:
                 
         # Validate config structure
         if not isinstance(config, dict) or 'routes' not in config:
-            logger.error(f"Invalid routes config: missing 'routes' key")
+            logger.error("Invalid routes config: missing 'routes' key")
             return {"routes": []}
             
         if not isinstance(config['routes'], list):
-            logger.error(f"Invalid routes config: 'routes' must be a list")
+            logger.error("Invalid routes config: 'routes' must be a list")
             return {"routes": []}
             
         logger.info(f"Loaded {len(config['routes'])} routing rules from {ROUTES_CONFIG}")
@@ -208,7 +209,7 @@ except ValueError as e:
     exit(1)
 
 # Log configuration at startup
-logger.info(f"SmolRouter starting...")
+logger.info("SmolRouter starting...")
 logger.info(f"DEFAULT_UPSTREAM: {DEFAULT_UPSTREAM}")
 logger.info(f"MODEL_MAP: {MODEL_MAP}")
 logger.info(f"ROUTES_CONFIG: {ROUTES_CONFIG} ({len(ROUTES_CONFIG_DATA.get('routes', []))} rules)")
@@ -246,10 +247,11 @@ async def init_new_architecture():
         logger.warning("Falling back to legacy architecture only")
 
 # Initialize on startup
-import asyncio
 try:
-    # Try to initialize in background
-    asyncio.create_task(init_new_architecture())
+    # Try to initialize in background - suppress the warning by adding weak reference
+    loop = asyncio.get_running_loop()
+    if loop.is_running():
+        loop.create_task(init_new_architecture())
 except RuntimeError:
     # If no event loop is running, we'll initialize on first use
     pass
@@ -488,6 +490,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     start_time = time.time()
     original_model = None
     mapped_model = None
+    request_body_bytes = None
     
     # Get source IP for routing
     source_ip = request.client.host if request.client else "unknown"
@@ -503,6 +506,7 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     # Read and mutate JSON body
     try:
         payload = await request.json()
+        request_body_bytes = json.dumps(payload).encode('utf-8')
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
         # Use default upstream for error logging
@@ -560,7 +564,9 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
         
         # Check if this was an error response
         if status_code >= 400:
-            complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)})
+            response_body_bytes = json.dumps(data).encode('utf-8') if data else None
+            complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)}, 
+                               request_body=request_body_bytes, response_body=response_body_bytes)
             return JSONResponse(content=data, status_code=status_code)
         
         logger.debug(f"Smart router response data: {json.dumps(data)}")
@@ -584,14 +590,17 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
                     choice["text"] = text
             logger.debug(f"Cleaned response data: {json.dumps(data)}")
         
-        # Complete the logging
-        complete_request_log(log_entry, start_time, {"status_code": status_code})
+        # Complete the logging with request and response bodies
+        response_body_bytes = json.dumps(data).encode('utf-8')
+        complete_request_log(log_entry, start_time, {"status_code": status_code}, 
+                           request_body=request_body_bytes, response_body=response_body_bytes)
         
         return JSONResponse(content=data, status_code=status_code)
         
     except Exception as e:
         logger.error(f"Unexpected error in proxy_request: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)})
+        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)}, 
+                           request_body=request_body_bytes)
         return JSONResponse(
             content={
                 "error": "proxy_error", 
@@ -606,6 +615,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     start_time = time.time()
     original_model = None
     mapped_model = None
+    request_body_bytes = None
     
     # Get source IP for routing
     source_ip = request.client.host if request.client else "unknown"
@@ -613,6 +623,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     # Read and mutate JSON body
     try:
         ollama_payload = await request.json()
+        request_body_bytes = json.dumps(ollama_payload).encode('utf-8')
     except Exception as e:
         logger.error(f"Failed to parse Ollama request JSON: {e}")
         # Use default upstream for error logging
@@ -790,7 +801,8 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
 
                     response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
                     # Complete logging for streaming response
-                    complete_request_log(log_entry, start_time, {"status_code": upstream.status_code})
+                    complete_request_log(log_entry, start_time, {"status_code": upstream.status_code}, 
+                                       request_body=request_body_bytes)
                     
                     return StreamingResponse(
                         ollama_streaming_response_generator(),
@@ -800,7 +812,8 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     )
     except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream {url}: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": str(e)})
+        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": str(e)}, 
+                           request_body=request_body_bytes)
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
@@ -811,7 +824,8 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         )
     except httpx.TimeoutException as e:
         logger.error(f"Timeout error to upstream {url}: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 504, "error_message": str(e)})
+        complete_request_log(log_entry, start_time, {"status_code": 504, "error_message": str(e)}, 
+                           request_body=request_body_bytes)
         return JSONResponse(
             content={
                 "error": "upstream_timeout", 
@@ -822,7 +836,8 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         )
     except Exception as e:
         logger.error(f"Unexpected error proxying Ollama request to {url}: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)})
+        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)}, 
+                           request_body=request_body_bytes)
         return JSONResponse(
             content={
                 "error": "proxy_error",

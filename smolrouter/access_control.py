@@ -7,8 +7,7 @@ clients can see and access based on IP address, authentication, or other criteri
 
 import re
 import logging
-from typing import List, Dict, Any, Optional, Set
-from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
 
 from .interfaces import IAccessControl, ModelInfo, ClientContext
 
@@ -93,7 +92,9 @@ class IPBasedAccessControl(IAccessControl):
         if regex_obj:
             return bool(regex_obj.match(model_id))
         else:
-            return model_id == pattern
+            # Use fnmatch for wildcard patterns (*, ?, [])
+            import fnmatch
+            return fnmatch.fnmatch(model_id, pattern)
     
     def _find_matching_rule(self, client: ClientContext) -> Optional[Dict[str, Any]]:
         """Find the first matching rule for a client"""
@@ -270,9 +271,11 @@ class AuthBasedAccessControl(IAccessControl):
                     if regex.match(identifier):
                         return True
             else:
-                # Exact match
-                if pattern in model_identifiers:
-                    return True
+                # Wildcard match
+                import fnmatch
+                for identifier in model_identifiers:
+                    if fnmatch.fnmatch(identifier, pattern):
+                        return True
         
         return False
     
@@ -291,9 +294,11 @@ class AuthBasedAccessControl(IAccessControl):
                     if regex.match(identifier):
                         return True
             else:
-                # Exact match
-                if pattern in model_identifiers:
-                    return True
+                # Wildcard match
+                import fnmatch
+                for identifier in model_identifiers:
+                    if fnmatch.fnmatch(identifier, pattern):
+                        return True
         
         return False
     

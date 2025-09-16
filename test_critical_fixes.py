@@ -5,7 +5,6 @@ Test the critical security fixes we implemented
 
 import os
 import sys
-import unittest
 from unittest.mock import Mock, patch
 
 # Add project to path
@@ -59,11 +58,11 @@ def test_header_case_sensitivity_fix():
         else:
             print("✅ Direct request correctly allowed")
         
-        return all_blocked
+        assert all_blocked, "Some requests were not properly blocked"
         
     except Exception as e:
         print(f"❌ Test failed with exception: {e}")
-        return False
+        assert False, f"Test failed with exception: {e}"
 
 def test_jwt_secret_validation():
     """Test that weak JWT secrets are rejected"""
@@ -104,11 +103,11 @@ def test_jwt_secret_validation():
             else:
                 print(f"✅ Correctly accepted strong secret: '{secret[:8]}...'")
         
-        return all_rejected
+        assert all_rejected, "Some weak secrets were incorrectly accepted or strong secrets were rejected"
         
     except Exception as e:
         print(f"❌ Test failed with exception: {e}")
-        return False
+        assert False, f"Test failed with exception: {e}"
 
 def test_blob_size_limits():
     """Test that blob size limits prevent DoS"""
@@ -131,22 +130,17 @@ def test_blob_size_limits():
                 # Should have logged a warning about truncation
                 mock_logger.warning.assert_called()
                 warning_call = mock_logger.warning.call_args[0][0]
-                if "exceeds limit" not in warning_call:
-                    print("❌ FAILED: No truncation warning logged")
-                    return False
+                assert "exceeds limit" in warning_call, "No truncation warning logged"
                 
                 # Retrieved data should be truncated
                 retrieved = storage.retrieve(key)
-                if len(retrieved) != MAX_BLOB_SIZE:
-                    print(f"❌ FAILED: Retrieved data was {len(retrieved)} bytes, expected {MAX_BLOB_SIZE}")
-                    return False
+                assert len(retrieved) == MAX_BLOB_SIZE, f"Retrieved data was {len(retrieved)} bytes, expected {MAX_BLOB_SIZE}"
                 
                 print(f"✅ Large blob correctly truncated to {MAX_BLOB_SIZE} bytes")
-                return True
         
     except Exception as e:
         print(f"❌ Test failed with exception: {e}")
-        return False
+        assert False, f"Test failed with exception: {e}"
 
 def test_performance_improvements():
     """Test that performance improvements work correctly"""
@@ -182,21 +176,16 @@ def test_performance_improvements():
         duration = time.time() - start
         
         # Should be fast despite many headers
-        if duration > 0.1:  # 100ms threshold
-            print(f"❌ FAILED: Operation took too long: {duration:.3f}s")
-            return False
+        assert duration <= 0.1, f"Operation took too long: {duration:.3f}s"
         
         # Should correctly identify as proxied
-        if accessible:
-            print("❌ FAILED: Request with proxy header was not blocked")
-            return False
+        assert not accessible, "Request with proxy header was not blocked"
         
         print(f"✅ Fast header processing: {duration:.3f}s for {len(many_headers)} headers")
-        return True
         
     except Exception as e:
         print(f"❌ Test failed with exception: {e}")
-        return False
+        assert False, f"Test failed with exception: {e}"
 
 def main():
     """Run all critical security tests"""

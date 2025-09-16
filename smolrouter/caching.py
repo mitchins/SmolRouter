@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from .interfaces import IModelCache, ModelInfo
 
@@ -299,7 +299,7 @@ class ModelAggregator:
             else:
                 providers_to_query = [
                     p for p in self.providers 
-                    if self._provider_health.get(p.get_provider_id(), ProviderHealthInfo(healthy=True)).healthy != False
+                    if self._provider_health.get(p.get_provider_id(), ProviderHealthInfo(healthy=True)).healthy is not False
                 ]
             
             # Collect models from all providers

@@ -1,14 +1,11 @@
 import pytest
-import tempfile
-import os
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import httpx
 from httpx import AsyncClient
-from peewee import SqliteDatabase
 
-from app import app
-from database import RequestLog, get_recent_logs, get_log_stats, cleanup_old_logs
+from smolrouter.app import app
+from smolrouter.database import RequestLog, get_recent_logs, get_log_stats, cleanup_old_logs
 
 
 # Use the shared isolated_db fixture from conftest.py
@@ -114,7 +111,7 @@ def test_cleanup_old_logs(isolated_db, sample_logs):
     assert RequestLog.select().count() == 4
     
     # Mock the MAX_AGE_DAYS to 7 days
-    with patch('database.MAX_AGE_DAYS', 7):
+    with patch('smolrouter.database.MAX_AGE_DAYS', 7):
         cleanup_old_logs()
     
     # After cleanup, should have 3 logs (the 10-day-old one should be removed)
@@ -139,7 +136,7 @@ async def test_web_ui_dashboard(isolated_db, sample_logs, disable_logging):
         
         # Check that the response contains expected UI elements
         content = response.text
-        assert "OpenAI Model Rerouter" in content
+        assert "SmolRouter" in content
         assert "Recent Requests" in content
         assert "Total Requests" in content
 
@@ -236,10 +233,13 @@ async def test_request_detail_view(isolated_db, disable_logging):
         request_size=512,
         response_size=1024,
         status_code=200,
-        request_body=b'{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}',
-        response_body=b'{"choices": [{"message": {"content": "Hello!"}}]}',
         completed_at=datetime.now()
     )
+    
+    # Set bodies using the setter methods
+    log_entry.set_request_body(b'{"model": "gpt-4", "messages": [{"role": "user", "content": "test"}]}')
+    log_entry.set_response_body(b'{"choices": [{"message": {"content": "Hello!"}}]}')
+    log_entry.save()
     
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/request/{log_entry.id}")
@@ -304,10 +304,13 @@ def test_request_log_model_fields(isolated_db):
         request_size=512,
         response_size=2048,
         status_code=200,
-        request_body=b'{"model": "gpt-4", "messages": [...]}',
-        response_body=b'{"choices": [...]}',
         error_message=None
     )
+    
+    # Set bodies using the setter methods
+    log.set_request_body(b'{"model": "gpt-4", "messages": [...]}')
+    log.set_response_body(b'{"choices": [...]}')
+    log.save()
     
     # Verify all fields are stored correctly
     retrieved_log = RequestLog.get_by_id(log.id)
@@ -330,11 +333,11 @@ async def test_logging_middleware_integration(isolated_db):
     """Test that requests are actually logged when ENABLE_LOGGING is True"""
     
     # Mock the upstream server to avoid real network calls
-    with patch('app.ENABLE_LOGGING', True):
+    with patch('smolrouter.app.ENABLE_LOGGING', True):
         async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             
             # Before request, check log count
-            initial_count = RequestLog.select().count()
+            _ = RequestLog.select().count()
             
             # Make a request that will fail (no upstream server)
             try:
@@ -342,7 +345,7 @@ async def test_logging_middleware_integration(isolated_db):
                     "/v1/chat/completions",
                     json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "test"}]}
                 )
-            except:
+            except Exception:
                 pass  # We expect this to fail due to no upstream
             
             # After request, there should be one more log entry
@@ -388,7 +391,7 @@ def test_error_logging(isolated_db):
 
 def test_inflight_tracking(isolated_db):
     """Test inflight request tracking"""
-    from database import get_inflight_requests
+    from smolrouter.database import get_inflight_requests
     
     # Create an inflight request (no completed_at)
     inflight_log = RequestLog.create(
@@ -402,7 +405,7 @@ def test_inflight_tracking(isolated_db):
     )
     
     # Create a completed request
-    completed_log = RequestLog.create(
+    _ = RequestLog.create(
         source_ip="127.0.0.1",
         method="POST", 
         path="/v1/chat/completions",
@@ -443,7 +446,7 @@ def test_inflight_tracking(isolated_db):
 
 def test_vacuum_database(isolated_db):
     """Test database vacuum functionality"""
-    from database import vacuum_database
+    from smolrouter.database import vacuum_database
     
     # Create some test data
     RequestLog.create(
