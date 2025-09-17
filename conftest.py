@@ -8,7 +8,23 @@ import os
 from unittest.mock import patch
 from peewee import SqliteDatabase
 
-from database import RequestLog
+from smolrouter.database import RequestLog
+
+
+@pytest.fixture(autouse=True)
+def suppress_jinja2_deprecation_warnings():
+    """Globally suppress specific Jinja2 DeprecationWarning about utcnow during tests.
+
+    This avoids noisy test output and prevents CI from treating warnings as failures.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="datetime.datetime.utcnow() is deprecated",
+            category=DeprecationWarning,
+        )
+        yield
 
 
 @pytest.fixture(scope="function")
@@ -44,12 +60,12 @@ def isolated_db():
         pass  # File might already be deleted
 
 
-@pytest.fixture(scope="function") 
+@pytest.fixture(scope="function")
 def disable_logging():
     """
     Disable logging during regular API tests to avoid database side effects.
     """
-    with patch('app.ENABLE_LOGGING', False):
+    with patch('smolrouter.app.ENABLE_LOGGING', False):
         yield
 
 

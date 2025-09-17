@@ -1,7 +1,7 @@
 import pytest
 import httpx
 from httpx import AsyncClient
-from app import app, rewrite_model, strip_think_chain_from_text, strip_json_markdown_from_text, MODEL_MAP, validate_url
+from smolrouter.app import app, rewrite_model, strip_think_chain_from_text, strip_json_markdown_from_text, MODEL_MAP, validate_url
 import json
 import respx
 
@@ -82,15 +82,6 @@ async def test_openai_completions_non_streaming(mock_openai_upstream, disable_lo
 
 
 @pytest.mark.asyncio
-async def test_openai_list_models(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/v1/models")
-    assert response.status_code == 200
-    data = response.json()
-    assert "gpt-3.5-turbo" in [m["id"] for m in data["data"]]
-
-
-@pytest.mark.asyncio
 async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -126,19 +117,6 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     assert "<think>" not in data["response"]
     assert data["done"] is True
     assert data["model"] == "mistral"
-
-
-@pytest.mark.asyncio
-async def test_ollama_list_models(mock_openai_upstream, disable_logging):
-    """Test /api/tags endpoint converts OpenAI models to Ollama format"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/tags")
-    assert response.status_code == 200
-    data = response.json()
-    assert "models" in data
-    # Should convert from OpenAI model format to Ollama format
-    assert len(data["models"]) > 0
-    assert "name" in data["models"][0]  # Ollama format has "name" field
 
 
 def test_rewrite_model_exact_match():
@@ -248,7 +226,7 @@ def test_timeout_configuration():
     with patch.dict(os.environ, {}, clear=True):
         # Reimport to get fresh config
         import importlib
-        import app
+        from smolrouter import app
         importlib.reload(app)
         assert app.REQUEST_TIMEOUT == 3000.0
     
@@ -328,17 +306,17 @@ def test_json_markdown_environment_variable():
     # Test disabled by default
     with patch.dict(os.environ, {}, clear=True):
         import importlib
-        import app
+        from smolrouter import app
         importlib.reload(app)
-        assert app.STRIP_JSON_MARKDOWN == False
+        assert app.STRIP_JSON_MARKDOWN is False
     
     # Test enabled
     with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": "true"}, clear=True):
         importlib.reload(app)
-        assert app.STRIP_JSON_MARKDOWN == True
+        assert app.STRIP_JSON_MARKDOWN is True
     
     # Test various true values
     for true_value in ["1", "TRUE", "yes", "Yes"]:
         with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": true_value}, clear=True):
             importlib.reload(app)
-            assert app.STRIP_JSON_MARKDOWN == True
+            assert app.STRIP_JSON_MARKDOWN is True

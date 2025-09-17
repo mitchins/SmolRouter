@@ -5,8 +5,6 @@ Demo script to test the logging functionality of the OpenAI Model Rerouter
 
 import asyncio
 import httpx
-import json
-import time
 
 async def demo_requests():
     """Send some demo requests to test logging"""

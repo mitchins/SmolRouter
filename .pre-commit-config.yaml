@@ -1,0 +1,34 @@
+repos:
+  # Code formatting and basic checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-json
+
+  # Python linting and code quality
+  - repo: https://github.com/pycqa/flake8
+    rev: 6.0.0
+    hooks:
+      - id: flake8
+        additional_dependencies: 
+          - flake8-bugbear
+          - flake8-comprehensions
+          - flake8-simplify
+
+  # Dead code detection
+  - repo: local
+    hooks:
+      - id: vulture
+        name: vulture
+        entry: vulture
+        language: python
+        additional_dependencies: [vulture]
+        args: [--min-confidence=80]
+        files: '\.py$'
+        exclude: '^(tests/|test_)'
