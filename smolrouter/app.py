@@ -593,39 +593,41 @@ async def proxy_request(path: str, request: Request):
         for instance in instances_to_try:
             try:
                 async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                    upstream_response = await client.post(
+                    # Use client.stream for true streaming without buffering
+                    async with client.stream(
+                        "POST",
                         f"{instance.url.rstrip('/')}{path}",
                         json=payload,
                         headers=headers,
                         timeout=REQUEST_TIMEOUT
-                    )
+                    ) as upstream_response:
 
-                    # Update log entry with actual upstream used
-                    if log_entry:
-                        try:
-                            log_entry.upstream_url = str(instance)
-                            log_entry.save()
-                        except Exception as e:
-                            logger.error(f"Failed to update log entry with upstream: {e}")
+                        # Update log entry with actual upstream used
+                        if log_entry:
+                            try:
+                                log_entry.upstream_url = str(instance)
+                                log_entry.save()
+                            except Exception as e:
+                                logger.error(f"Failed to update log entry with upstream: {e}")
 
-                    if upstream_response.status_code >= 400:
-                        logger.warning(f"Upstream {instance} returned error {upstream_response.status_code}")
-                        continue
+                        if upstream_response.status_code >= 400:
+                            logger.warning(f"Upstream {instance} returned error {upstream_response.status_code}")
+                            continue
 
-                    async def streaming_response_generator():
-                        async for chunk in upstream_response.aiter_bytes():
-                            yield chunk
+                        async def streaming_response_generator():
+                            async for chunk in upstream_response.aiter_bytes():
+                                yield chunk
 
-                    # Complete logging for successful streaming request
-                    complete_request_log(log_entry, start_time, {"status_code": upstream_response.status_code},
-                                       request_body=request_body_bytes)
+                        # Complete logging for successful streaming request
+                        complete_request_log(log_entry, start_time, {"status_code": upstream_response.status_code},
+                                           request_body=request_body_bytes)
 
-                    return StreamingResponse(
-                        streaming_response_generator(),
-                        status_code=upstream_response.status_code,
-                        headers=dict(upstream_response.headers),
-                        media_type="text/plain"
-                    )
+                        return StreamingResponse(
+                            streaming_response_generator(),
+                            status_code=upstream_response.status_code,
+                            headers=dict(upstream_response.headers),
+                            media_type="text/plain"
+                        )
 
             except Exception as e:
                 logger.warning(f"Streaming request failed for {instance}: {e}")
