@@ -351,7 +351,10 @@ class ModelAggregator:
         except Exception as e:
             logger.error(f"Failed to discover models from provider {provider_id}: {e}")
             # Mark provider as unhealthy
-            self._provider_health[provider_id] = False
+            health_info = self._provider_health.get(provider_id, ProviderHealthInfo())
+            health_info.healthy = False
+            health_info.last_checked = datetime.now()
+            self._provider_health[provider_id] = health_info
             return []
     
     async def get_models_by_provider(self, provider_id: str, 
