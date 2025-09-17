@@ -3,38 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmolRouter - Request Logs</title>
+    <title>SmolRouter - Dashboard</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #fafafa;
-            color: #333;
-        }
-        
-        .header {
-            background: white;
-            border-bottom: 1px solid #e0e0e0;
-            padding: 1rem 2rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .header h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #1976d2;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        
         .stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -48,62 +20,90 @@
             background: white;
             padding: 1.5rem;
             border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
         
         .stat-card .number {
             font-size: 2rem;
-            font-weight: 600;
-            color: #1976d2;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
         }
         
         .stat-card .label {
             color: #666;
-            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: 2rem;
+            padding: 0 2rem 2rem 2rem;
         }
         
         .table-container {
             background: white;
             border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         
         .table-header {
-            padding: 1rem;
+            padding: 1.5rem 2rem;
             border-bottom: 1px solid #e0e0e0;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            background: #fafafa;
         }
         
         .table-header h2 {
-            font-size: 1.25rem;
+            margin: 0;
+            color: #333;
+            font-size: 1.2rem;
             font-weight: 600;
         }
         
-        .refresh-btn {
-            background: #1976d2;
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            cursor: pointer;
+        .action-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+        
+        .action-btn {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            font-size: 0.875rem;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
         }
         
-        .refresh-btn:hover {
-            background: #1565c0;
+        .action-btn:hover {
+            background: #5a6fd8;
+            transform: translateY(-1px);
+        }
+        
+        .action-btn.secondary {
+            background: #6c757d;
+        }
+        
+        .action-btn.secondary:hover {
+            background: #5a6268;
         }
         
         table {
@@ -112,74 +112,53 @@
         }
         
         th, td {
-            padding: 0.75rem;
+            padding: 0.75rem 1rem;
             text-align: left;
             border-bottom: 1px solid #e0e0e0;
         }
         
         th {
-            background: #f5f5f5;
+            background: #f8f9fa;
             font-weight: 600;
-            color: #666;
-            font-size: 0.875rem;
+            color: #495057;
+            font-size: 0.85rem;
             text-transform: uppercase;
-            letter-spacing: 0.025em;
+            letter-spacing: 0.5px;
         }
         
         tr:hover {
             background: #f8f9fa;
         }
         
-        .clickable-row {
-            cursor: pointer;
-            transition: background-color 0.2s ease;
-        }
-        
-        .clickable-row:hover {
-            background: #e3f2fd !important;
-        }
-        
-        .service-icon {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.875rem;
-        }
-        
-        .service-openai {
-            color: #10a37f;
-        }
-        
-        .service-ollama {
-            color: #ff6b35;
-        }
-        
         .status {
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .status-200 { background: #d4edda; color: #155724; }
+        .status-400 { background: #fff3cd; color: #856404; }
+        .status-500 { background: #f8d7da; color: #721c24; }
+        
+        .service-badge {
+            background: #e3f2fd;
+            color: #0d47a1;
             padding: 0.25rem 0.5rem;
             border-radius: 4px;
             font-size: 0.75rem;
             font-weight: 600;
-            text-align: center;
+            text-transform: uppercase;
         }
         
-        .status-success {
-            background: #e8f5e8;
-            color: #2e7d32;
-        }
-        
-        .status-error {
-            background: #ffebee;
-            color: #c62828;
-        }
-        
-        .size {
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 0.75rem;
-        }
+        .service-ollama { background: #e8f5e8; color: #2e7d32; }
+        .service-openai { background: #fff3e0; color: #f57c00; }
         
         .duration {
             font-family: 'Monaco', 'Menlo', monospace;
             font-size: 0.75rem;
+            color: #666;
         }
         
         .timestamp {
@@ -191,32 +170,66 @@
             text-align: center;
             padding: 3rem;
             color: #666;
+            font-style: italic;
+        }
+        
+        .model-info {
+            font-size: 0.8rem;
+        }
+        
+        .model-original {
+            color: #666;
+        }
+        
+        .model-mapped {
+            color: #333;
+            font-weight: 500;
+        }
+        
+        @media (max-width: 768px) {
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+                padding: 1rem;
+            }
+            
+            .container {
+                padding: 0 1rem 1rem 1rem;
+            }
+            
+            .table-header {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: stretch;
+            }
+            
+            .action-buttons {
+                justify-content: center;
+            }
+            
+            table {
+                font-size: 0.9rem;
+            }
+            
+            th, td {
+                padding: 0.5rem;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>
-            <span class="material-icons">route</span>
-            SmolRouter
-        </h1>
-    </div>
+    {% include 'navigation.html' %}
     
     <div class="stats">
         <div class="stat-card">
-            <div class="number">{{ stats.total_requests }}</div>
+            <div class="number" style="color: #1976d2;">{{ stats.total_requests }}</div>
             <div class="label">Total Requests</div>
         </div>
         <div class="stat-card">
-            <div class="number">{{ stats.openai_requests }}</div>
-            <div class="label">OpenAI Requests</div>
+            <div class="number" style="color: #388e3c;">{{ stats.successful_requests }}</div>
+            <div class="label">Successful</div>
         </div>
         <div class="stat-card">
-            <div class="number">{{ stats.ollama_requests }}</div>
-            <div class="label">Ollama Requests</div>
-        </div>
-        <div class="stat-card">
-            <div class="number">{{ stats.recent_requests }}</div>
+            <div class="number" style="color: #f57c00;">{{ stats.requests_24h }}</div>
             <div class="label">Last 24 Hours</div>
         </div>
         <div class="stat-card">
@@ -229,12 +242,8 @@
         <div class="table-container">
             <div class="table-header">
                 <h2>Recent Requests</h2>
-                <div style="display: flex; gap: 0.5rem;">
-                    <button class="refresh-btn" onclick="window.location.href='/performance'" style="background: #4caf50;">
-                        <span class="material-icons" style="font-size: 1rem;">analytics</span>
-                        Performance
-                    </button>
-                    <button class="refresh-btn" onclick="window.location.reload()">
+                <div class="action-buttons">
+                    <button class="action-btn secondary" onclick="window.location.reload()">
                         <span class="material-icons" style="font-size: 1rem;">refresh</span>
                         Refresh
                     </button>
@@ -257,62 +266,48 @@
                 </thead>
                 <tbody>
                     {% for log in logs %}
-                    <tr class="clickable-row" onclick="viewRequest({{ log.id }})" title="Click to view full request details">
-                        <td class="timestamp">
-                            {{ log.timestamp.strftime('%H:%M:%S') }}<br>
-                            <small>{{ log.timestamp.strftime('%m/%d') }}</small>
-                        </td>
+                    <tr onclick="window.location.href='/request/{{ log.id }}'" style="cursor: pointer;">
+                        <td class="timestamp">{{ log.timestamp.strftime('%H:%M:%S') }}</td>
                         <td>{{ log.source_ip }}</td>
                         <td>
-                            <div class="service-icon service-{{ log.service_type }}">
-                                {% if log.service_type == 'openai' %}
-                                <span class="material-icons" style="font-size: 1rem;">smart_toy</span>
-                                OpenAI
-                                {% else %}
-                                <span class="material-icons" style="font-size: 1rem;">psychology</span>
-                                Ollama
-                                {% endif %}
-                            </div>
+                            <span class="service-badge service-{{ log.service_type }}">
+                                {{ log.service_type }}
+                            </span>
                         </td>
                         <td>{{ log.path }}</td>
                         <td>
-                            {% if log.original_model and log.mapped_model and log.original_model != log.mapped_model %}
-                            <span title="Mapped from {{ log.original_model }}">{{ log.mapped_model }}</span>
-                            <span class="material-icons" style="font-size: 0.8rem; color: #ff9800;">swap_horiz</span>
-                            {% elif log.mapped_model %}
-                            {{ log.mapped_model }}
-                            {% else %}
-                            -
-                            {% endif %}
+                            <div class="model-info">
+                                {% if log.mapped_model and log.mapped_model != log.original_model %}
+                                    <div class="model-original">{{ log.original_model }}</div>
+                                    <div class="model-mapped">→ {{ log.mapped_model }}</div>
+                                {% else %}
+                                    <div class="model-mapped">{{ log.original_model or 'N/A' }}</div>
+                                {% endif %}
+                            </div>
                         </td>
-                        <td class="size">
+                        <td>
                             {% if log.request_size %}
-                            {{ "%.1f"|format(log.request_size / 1024) }} KB
-                            {% if log.response_size %}
-                            / {{ "%.1f"|format(log.response_size / 1024) }} KB
-                            {% endif %}
+                                {{ "%.1f"|format(log.request_size / 1024) }} KB
                             {% else %}
-                            -
+                                -
                             {% endif %}
                         </td>
                         <td class="duration">
                             {% if log.duration_ms %}
-                            {{ log.duration_ms }}ms
+                                {{ log.duration_ms }}ms
                             {% else %}
-                            -
+                                -
                             {% endif %}
                         </td>
                         <td>
-                            {% if log.completed_at %}
-                                {% if log.status_code %}
-                                <span class="status {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                            {% if log.status_code %}
+                                <span class="status status-{{ log.status_code // 100 * 100 }}">
                                     {{ log.status_code }}
                                 </span>
-                                {% else %}
-                                <span class="status status-success">✓</span>
-                                {% endif %}
                             {% else %}
-                            <span class="status" style="background: #ff9800; color: white;">🔄 Inflight</span>
+                                <span class="status" style="background: #f0f0f0; color: #666;">
+                                    PENDING
+                                </span>
                             {% endif %}
                         </td>
                     </tr>
@@ -321,24 +316,11 @@
             </table>
             {% else %}
             <div class="no-data">
-                <span class="material-icons" style="font-size: 3rem; color: #ccc;">inbox</span>
-                <p>No requests logged yet</p>
-                <p><small>Requests will appear here as they are processed</small></p>
+                <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
+                No requests logged yet
             </div>
             {% endif %}
         </div>
     </div>
-    
-    <script>
-        // Auto-refresh every 30 seconds
-        setTimeout(() => {
-            window.location.reload();
-        }, 30000);
-        
-        // Navigate to request detail view
-        function viewRequest(requestId) {
-            window.open('/request/' + requestId, '_blank');
-        }
-    </script>
 </body>
 </html>

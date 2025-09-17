@@ -8,50 +8,6 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #fafafa;
-            color: #333;
-        }
-        
-        .header {
-            background: white;
-            border-bottom: 1px solid #e0e0e0;
-            padding: 1rem 2rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        
-        .header h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #1976d2;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-        
-        .nav-links {
-            margin-top: 0.5rem;
-            display: flex;
-            gap: 1rem;
-        }
-        
-        .nav-link {
-            color: #666;
-            text-decoration: none;
-            font-size: 0.9rem;
-        }
-        
-        .nav-link:hover {
-            color: #1976d2;
-        }
-        
         .container {
             max-width: 1200px;
             margin: 0 auto;
@@ -60,76 +16,136 @@
         
         .controls {
             background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 1.5rem;
+            border-radius: 8px;
             margin-bottom: 2rem;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
-            align-items: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .controls h3 {
+            margin: 0 0 1rem 0;
+            color: #333;
+            font-size: 1.1rem;
+            font-weight: 600;
         }
         
         .control-group {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        
+        .control-item {
             display: flex;
             flex-direction: column;
-            gap: 0.25rem;
+            gap: 0.5rem;
         }
         
-        .control-group label {
-            font-size: 0.875rem;
+        .control-item label {
+            font-size: 0.9rem;
             font-weight: 500;
-            color: #666;
+            color: #555;
         }
         
-        .control-group select,
-        .control-group input {
+        .control-item select,
+        .control-item input {
             padding: 0.5rem;
             border: 1px solid #ddd;
-            border-radius: 6px;
-            font-size: 0.875rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
         }
         
-        .refresh-btn {
-            background: #1976d2;
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            cursor: pointer;
+        .control-item select:focus,
+        .control-item input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        
+        .action-btn {
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            font-size: 0.875rem;
-            margin-top: 1.25rem;
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            background: #667eea;
+            color: white;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
         }
         
-        .refresh-btn:hover {
-            background: #1565c0;
+        .action-btn:hover {
+            background: #5a6fd8;
+            transform: translateY(-1px);
+        }
+        
+        .action-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .action-btn.secondary {
+            background: #6c757d;
+        }
+        
+        .action-btn.secondary:hover {
+            background: #5a6268;
         }
         
         .chart-container {
             background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             margin-bottom: 2rem;
         }
         
-        .chart-title {
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 1rem;
+        .chart-header {
             display: flex;
+            justify-content: between;
             align-items: center;
-            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .chart-header h3 {
+            margin: 0;
+            color: #333;
+            font-size: 1.2rem;
+            font-weight: 600;
         }
         
         .chart-wrapper {
             position: relative;
-            height: 500px;
+            height: 400px;
             width: 100%;
+        }
+        
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
         }
         
         .stats-grid {
@@ -143,249 +159,188 @@
             background: white;
             padding: 1.5rem;
             border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
             text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
         
         .stat-card .number {
             font-size: 2rem;
-            font-weight: 600;
-            color: #1976d2;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            color: #667eea;
         }
         
         .stat-card .label {
             color: #666;
-            margin-top: 0.5rem;
-            font-size: 0.875rem;
-        }
-        
-        .legend {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 1rem;
-            margin-top: 1rem;
-        }
-        
-        .legend-title {
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: #333;
-        }
-        
-        .legend-item {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.25rem;
-            font-size: 0.875rem;
-        }
-        
-        .legend-color {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
         @media (max-width: 768px) {
             .container {
-                padding: 0 1rem;
+                padding: 1rem;
             }
             
-            .controls {
+            .control-group {
+                grid-template-columns: 1fr;
+            }
+            
+            .action-buttons {
                 flex-direction: column;
-                align-items: stretch;
             }
             
             .chart-wrapper {
-                height: 400px;
+                height: 300px;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
             }
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>
-            <span class="material-icons">analytics</span>
-            {{ title }}
-        </h1>
-        <div class="nav-links">
-            <a href="/" class="nav-link">← Back to Dashboard</a>
-        </div>
-    </div>
+    {% include 'navigation.html' %}
 
     <div class="container">
-        <div class="controls">
-            <div class="control-group">
-                <label for="hoursSelect">Time Range</label>
-                <select id="hoursSelect">
-                    <option value="1">Last Hour</option>
-                    <option value="6">Last 6 Hours</option>
-                    <option value="24" selected>Last 24 Hours</option>
-                    <option value="72">Last 3 Days</option>
-                    <option value="168">Last Week</option>
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="modelSelect">Model</label>
-                <select id="modelSelect">
-                    <option value="">All Models</option>
-                </select>
-            </div>
-            
-            <div class="control-group">
-                <label for="serviceSelect">Service</label>
-                <select id="serviceSelect">
-                    <option value="">All Services</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="ollama">Ollama</option>
-                </select>
-            </div>
-            
-            <button class="refresh-btn" onclick="loadData()">
-                <span class="material-icons" style="font-size: 1rem;">refresh</span>
-                Refresh
-            </button>
-        </div>
-        
+        <!-- Performance Stats -->
         <div class="stats-grid" id="statsGrid">
             <!-- Stats will be populated by JavaScript -->
         </div>
-        
-        <div class="chart-container">
-            <div class="chart-title">
-                <span class="material-icons">scatter_plot</span>
-                Response Time vs Input Tokens
+
+        <!-- Controls -->
+        <div class="controls">
+            <h3>📊 Performance Filters</h3>
+            <div class="control-group">
+                <div class="control-item">
+                    <label for="hoursSelect">Time Range</label>
+                    <select id="hoursSelect">
+                        <option value="1">Last Hour</option>
+                        <option value="6">Last 6 Hours</option>
+                        <option value="24" selected>Last 24 Hours</option>
+                        <option value="168">Last Week</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label for="modelSelect">Model Filter</label>
+                    <select id="modelSelect">
+                        <option value="">All Models</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label for="serviceSelect">Service Type</label>
+                    <select id="serviceSelect">
+                        <option value="">All Services</option>
+                        <option value="openai">OpenAI</option>
+                        <option value="ollama">Ollama</option>
+                    </select>
+                </div>
+                <div class="control-item">
+                    <label for="limitSelect">Data Points</label>
+                    <select id="limitSelect">
+                        <option value="100">100 points</option>
+                        <option value="500">500 points</option>
+                        <option value="1000" selected>1000 points</option>
+                        <option value="5000">5000 points</option>
+                    </select>
+                </div>
             </div>
+            <div class="action-buttons">
+                <button class="action-btn" onclick="loadPerformanceData()">
+                    <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                    Refresh Data
+                </button>
+                <button class="action-btn secondary" onclick="exportData()">
+                    <span class="material-icons" style="font-size: 1rem;">download</span>
+                    Export CSV
+                </button>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="chart-container">
+            <div class="chart-header">
+                <h3>Token Count vs Response Time</h3>
+            </div>
+            <div id="errorContainer"></div>
             <div class="chart-wrapper">
                 <canvas id="performanceChart"></canvas>
             </div>
-            <div class="legend" id="chartLegend">
-                <div class="legend-title">Model Performance</div>
-                <!-- Legend items will be populated by JavaScript -->
+            <div id="loadingIndicator" class="loading" style="display: none;">
+                <span class="material-icons" style="margin-right: 0.5rem;">hourglass_empty</span>
+                Loading performance data...
             </div>
         </div>
     </div>
 
     <script>
-        let chart = null;
-        
-        // Color palette for different models
-        const colorPalette = [
-            '#1976d2', '#d32f2f', '#388e3c', '#f57c00', 
-            '#7b1fa2', '#0097a7', '#5d4037', '#455a64',
-            '#e91e63', '#ff5722', '#795548', '#607d8b'
-        ];
-        
-        async function loadData() {
+        let performanceChart = null;
+        let currentData = [];
+
+        async function loadPerformanceData() {
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            const errorContainer = document.getElementById('errorContainer');
+            
+            // Show loading, hide errors
+            loadingIndicator.style.display = 'flex';
+            errorContainer.innerHTML = '';
+            
+            // Disable buttons
+            document.querySelectorAll('.action-btn').forEach(btn => btn.disabled = true);
+            
             try {
                 const hours = document.getElementById('hoursSelect').value;
                 const model = document.getElementById('modelSelect').value;
-                const service = document.getElementById('serviceSelect').value;
+                const serviceType = document.getElementById('serviceSelect').value;
+                const limit = document.getElementById('limitSelect').value;
                 
                 const params = new URLSearchParams({
-                    hours: hours,
-                    limit: '1000'
+                    hours,
+                    limit,
+                    ...(model && { model }),
+                    ...(serviceType && { service_type: serviceType })
                 });
                 
-                if (model) params.append('model', model);
-                if (service) params.append('service_type', service);
-                
                 const response = await fetch(`/api/performance?${params}`);
-                const data = await response.json();
-                
-                if (data.error) {
-                    console.error('API Error:', data.error);
-                    return;
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 
-                updateStats(data);
-                updateChart(data.data_points);
-                updateModelSelect(data.data_points);
+                const data = await response.json();
+                currentData = data.data_points || [];
+                
+                renderChart(currentData);
+                renderStats(data);
+                updateModelOptions(currentData);
                 
             } catch (error) {
-                console.error('Failed to load performance data:', error);
-            }
-        }
-        
-        function updateStats(data) {
-            const dataPoints = data.data_points;
-            const totalRequests = dataPoints.length;
-            
-            if (totalRequests === 0) {
-                document.getElementById('statsGrid').innerHTML = `
-                    <div class="stat-card">
-                        <div class="number">0</div>
-                        <div class="label">No Data Available</div>
+                console.error('Error loading performance data:', error);
+                errorContainer.innerHTML = `
+                    <div class="error">
+                        <strong>Error:</strong> ${error.message}
                     </div>
                 `;
-                return;
+            } finally {
+                loadingIndicator.style.display = 'none';
+                document.querySelectorAll('.action-btn').forEach(btn => btn.disabled = false);
             }
-            
-            const avgResponseTime = Math.round(
-                dataPoints.reduce((sum, p) => sum + p.duration_ms, 0) / totalRequests
-            );
-            
-            const avgTokens = Math.round(
-                dataPoints.reduce((sum, p) => sum + (p.prompt_tokens || 0), 0) / totalRequests
-            );
-            
-            const uniqueModels = new Set(dataPoints.map(p => p.model)).size;
-            
-            const fastestRequest = Math.min(...dataPoints.map(p => p.duration_ms));
-            
-            document.getElementById('statsGrid').innerHTML = `
-                <div class="stat-card">
-                    <div class="number">${totalRequests}</div>
-                    <div class="label">Total Requests</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">${avgResponseTime}ms</div>
-                    <div class="label">Avg Response Time</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">${avgTokens}</div>
-                    <div class="label">Avg Input Tokens</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">${uniqueModels}</div>
-                    <div class="label">Models Used</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">${fastestRequest}ms</div>
-                    <div class="label">Fastest Response</div>
-                </div>
-            `;
         }
         
-        function updateModelSelect(dataPoints) {
-            const models = [...new Set(dataPoints.map(p => p.model))].sort();
-            const modelSelect = document.getElementById('modelSelect');
-            const currentValue = modelSelect.value;
-            
-            modelSelect.innerHTML = '<option value="">All Models</option>';
-            models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model;
-                option.textContent = model;
-                if (model === currentValue) option.selected = true;
-                modelSelect.appendChild(option);
-            });
-        }
-        
-        function updateChart(dataPoints) {
+        function renderChart(dataPoints) {
             const ctx = document.getElementById('performanceChart').getContext('2d');
             
-            // Destroy existing chart
-            if (chart) {
-                chart.destroy();
+            if (performanceChart) {
+                performanceChart.destroy();
             }
             
-            if (dataPoints.length === 0) {
-                return;
-            }
-            
-            // Group data by model
+            // Group data by model for different colors
             const modelGroups = {};
             dataPoints.forEach(point => {
                 const model = point.model || 'Unknown';
@@ -393,22 +348,32 @@
                     modelGroups[model] = [];
                 }
                 modelGroups[model].push({
-                    x: point.prompt_tokens || 0,
+                    x: point.prompt_tokens,
                     y: point.duration_ms,
-                    point: point
+                    data: point
                 });
             });
             
             // Create datasets for each model
-            const datasets = Object.keys(modelGroups).map((model, index) => ({
-                label: model,
-                data: modelGroups[model],
-                backgroundColor: colorPalette[index % colorPalette.length] + '80',
-                borderColor: colorPalette[index % colorPalette.length],
-                borderWidth: 1
-            }));
+            const colors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#ffecd2'];
+            let colorIndex = 0;
             
-            chart = new Chart(ctx, {
+            const datasets = Object.entries(modelGroups).map(([model, points]) => {
+                const color = colors[colorIndex % colors.length];
+                colorIndex++;
+                
+                return {
+                    label: model,
+                    data: points,
+                    backgroundColor: color + '80', // Add transparency
+                    borderColor: color,
+                    borderWidth: 1,
+                    pointRadius: 4,
+                    pointHoverRadius: 6
+                };
+            });
+            
+            performanceChart = new Chart(ctx, {
                 type: 'scatter',
                 data: { datasets },
                 options: {
@@ -416,76 +381,143 @@
                     maintainAspectRatio: false,
                     scales: {
                         x: {
+                            type: 'linear',
+                            position: 'bottom',
                             title: {
                                 display: true,
-                                text: 'Input Tokens'
-                            },
-                            beginAtZero: true
+                                text: 'Prompt Tokens'
+                            }
                         },
                         y: {
                             title: {
                                 display: true,
                                 text: 'Response Time (ms)'
-                            },
-                            beginAtZero: true
+                            }
                         }
                     },
                     plugins: {
                         tooltip: {
                             callbacks: {
                                 title: function(context) {
-                                    const point = context[0].raw.point;
-                                    return `${point.model} (${point.service_type})`;
+                                    const point = context[0].raw.data;
+                                    return `${point.model} - ${point.service_type}`;
                                 },
                                 label: function(context) {
-                                    const point = context.raw.point;
+                                    const point = context.raw.data;
                                     return [
-                                        `Tokens: ${point.prompt_tokens || 0}`,
+                                        `Prompt Tokens: ${point.prompt_tokens}`,
                                         `Response Time: ${point.duration_ms}ms`,
-                                        `Path: ${point.path}`,
-                                        `Status: ${point.status_code}`
+                                        `Total Tokens: ${point.total_tokens}`,
+                                        `Status: ${point.status_code}`,
+                                        `Time: ${new Date(point.timestamp).toLocaleString()}`
                                     ];
                                 }
                             }
                         },
                         legend: {
-                            display: false  // We'll use custom legend
+                            display: true,
+                            position: 'top'
                         }
                     }
                 }
             });
-            
-            updateLegend(Object.keys(modelGroups));
         }
         
-        function updateLegend(models) {
-            const legend = document.getElementById('chartLegend');
-            const legendItems = models.map((model, index) => {
-                const color = colorPalette[index % colorPalette.length];
-                return `
-                    <div class="legend-item">
-                        <div class="legend-color" style="background-color: ${color}"></div>
-                        <span>${model}</span>
+        function renderStats(data) {
+            const statsGrid = document.getElementById('statsGrid');
+            const points = data.data_points || [];
+            
+            if (points.length === 0) {
+                statsGrid.innerHTML = `
+                    <div class="stat-card">
+                        <div class="number" style="color: #666;">0</div>
+                        <div class="label">No Data</div>
                     </div>
                 `;
-            }).join('');
+                return;
+            }
             
-            legend.innerHTML = `
-                <div class="legend-title">Model Performance</div>
-                ${legendItems}
+            // Calculate statistics
+            const totalPoints = points.length;
+            const avgDuration = Math.round(points.reduce((sum, p) => sum + p.duration_ms, 0) / totalPoints);
+            const avgTokens = Math.round(points.reduce((sum, p) => sum + p.prompt_tokens, 0) / totalPoints);
+            const uniqueModels = new Set(points.map(p => p.model)).size;
+            
+            statsGrid.innerHTML = `
+                <div class="stat-card">
+                    <div class="number">${totalPoints}</div>
+                    <div class="label">Data Points</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${avgDuration}ms</div>
+                    <div class="label">Avg Response Time</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${avgTokens}</div>
+                    <div class="label">Avg Prompt Tokens</div>
+                </div>
+                <div class="stat-card">
+                    <div class="number">${uniqueModels}</div>
+                    <div class="label">Unique Models</div>
+                </div>
             `;
         }
         
-        // Event listeners
-        document.getElementById('hoursSelect').addEventListener('change', loadData);
-        document.getElementById('modelSelect').addEventListener('change', loadData);
-        document.getElementById('serviceSelect').addEventListener('change', loadData);
+        function updateModelOptions(dataPoints) {
+            const modelSelect = document.getElementById('modelSelect');
+            const currentValue = modelSelect.value;
+            
+            // Get unique models
+            const models = [...new Set(dataPoints.map(p => p.model))].sort();
+            
+            // Clear and rebuild options
+            modelSelect.innerHTML = '<option value="">All Models</option>';
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.textContent = model;
+                modelSelect.appendChild(option);
+            });
+            
+            // Restore selection if it still exists
+            if (models.includes(currentValue)) {
+                modelSelect.value = currentValue;
+            }
+        }
         
-        // Auto-refresh every 30 seconds
-        setInterval(loadData, 30000);
+        function exportData() {
+            if (currentData.length === 0) {
+                alert('No data to export');
+                return;
+            }
+            
+            // Convert to CSV
+            const headers = ['timestamp', 'model', 'service_type', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'duration_ms', 'status_code', 'request_size', 'response_size'];
+            const csv = [
+                headers.join(','),
+                ...currentData.map(row => headers.map(header => JSON.stringify(row[header] || '')).join(','))
+            ].join('\n');
+            
+            // Download
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `smolrouter-performance-${new Date().toISOString().split('T')[0]}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }
         
-        // Initial load
-        loadData();
+        // Load data on page load
+        document.addEventListener('DOMContentLoaded', loadPerformanceData);
+        
+        // Reload data when filters change
+        document.getElementById('hoursSelect').addEventListener('change', loadPerformanceData);
+        document.getElementById('modelSelect').addEventListener('change', loadPerformanceData);
+        document.getElementById('serviceSelect').addEventListener('change', loadPerformanceData);
+        document.getElementById('limitSelect').addEventListener('change', loadPerformanceData);
     </script>
 </body>
 </html>

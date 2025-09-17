@@ -1,0 +1,68 @@
+# Example configuration showcasing the new SOLID architecture
+# This demonstrates aggregation across multiple providers with clean separation
+
+# Define your model providers (servers)
+servers:
+  fast-kitten: "http://192.168.1.100:8000"    # Fast local GPU server (OpenAI-compatible)
+  slow-kitten: "http://192.168.1.101:8000"    # Slower backup server (OpenAI-compatible)  
+  gpu-server: "http://192.168.1.102:11434"    # Ollama server
+  cloud-api: "https://api.openai.com"         # External OpenAI API
+
+# Model aliases with automatic failover (new architecture feature)
+aliases:
+  # Simple alias - will try providers in order defined in servers
+  coding-assistant:
+    instances:
+      - "gpu-server/codellama:34b"      # Try Ollama server first
+      - "fast-kitten/llama3-70b"        # Fallback to fast server
+      - "slow-kitten/llama3-8b"         # Final fallback
+
+  # Git commit message model with specific preferences  
+  git-commit-model:
+    instances:
+      - server: "fast-kitten"
+        model: "llama3-8b"
+      - server: "slow-kitten" 
+        model: "llama3-3b"
+
+  # Production model with cloud failover
+  production-gpt:
+    instances:
+      - "fast-kitten/llama3-70b"        # Local first for speed
+      - "cloud-api/gpt-4"               # Cloud failover
+
+# Traditional routing rules (still supported for backward compatibility)
+routes:
+  # Route small models to specific GPU server using regex
+  - match:
+      model: "/.*-1.5b/"
+    route:
+      upstream: "http://192.168.1.102:11434"
+
+  # Route requests from dev machine to dev server
+  - match:
+      source_host: "10.0.1.100"
+    route:
+      upstream: "http://dev-server:8000"
+
+  # Route "gpt-4" requests to local equivalent
+  - match:
+      model: "gpt-4"
+    route:
+      upstream: "http://192.168.1.100:8000"
+      model: "llama3-70b"
+
+# Example: The new architecture will now:
+# 1. Discover models from all healthy servers automatically
+# 2. Present them with clear provider context: "llama3-70b [fast-kitten]"
+# 3. Support fully qualified requests: "llama3-70b [fast-kitten]"  
+# 4. Handle aliases with automatic failover
+# 5. Cache model lists with TTL for performance
+# 6. Apply access control rules (future enhancement)
+#
+# Benefits:
+# - Single endpoint shows all available models
+# - Clear provider disambiguation  
+# - Automatic health checking and failover
+# - Minimal latency through intelligent caching
+# - Clean separation of concerns for future features
