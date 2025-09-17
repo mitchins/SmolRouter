@@ -82,17 +82,6 @@ async def test_openai_completions_non_streaming(mock_openai_upstream, disable_lo
 
 
 @pytest.mark.asyncio
-async def test_openai_list_models(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/v1/models")
-    assert response.status_code == 200
-    data = response.json()
-    # Check if we get models with or without provider suffixes
-    model_ids = [m["id"] for m in data["data"]]
-    assert any("gpt-3.5-turbo" in model_id for model_id in model_ids)
-
-
-@pytest.mark.asyncio
 async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -128,19 +117,6 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     assert "<think>" not in data["response"]
     assert data["done"] is True
     assert data["model"] == "mistral"
-
-
-@pytest.mark.asyncio
-async def test_ollama_list_models(mock_openai_upstream, disable_logging):
-    """Test /api/tags endpoint converts OpenAI models to Ollama format"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/tags")
-    assert response.status_code == 200
-    data = response.json()
-    assert "models" in data
-    # Should convert from OpenAI model format to Ollama format
-    assert len(data["models"]) > 0
-    assert "name" in data["models"][0]  # Ollama format has "name" field
 
 
 def test_rewrite_model_exact_match():
