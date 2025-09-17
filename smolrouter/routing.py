@@ -194,37 +194,32 @@ class SmartRouter:
             Tuple of (response_data, status_code, upstream_used)
         """
         instances_to_try, model_override = self.find_route(source_host, model)
-        
+
         errors = []
-        
+        last_status_code = 502  # Default to bad gateway if no attempts made
+
         for i, instance in enumerate(instances_to_try):
             logger.debug(f"Trying upstream {i+1}/{len(instances_to_try)}: {instance}")
-            
+
             success, result, status_code = await self.try_upstream(
                 instance, request_payload, path, headers, timeout
             )
-            
+
+            # Always track the last status code we received
+            last_status_code = status_code
+
             if success:
                 logger.info(f"Request succeeded via {instance} ({status_code})")
                 return result, status_code, str(instance)
             else:
                 errors.append(f"{instance}: {result}")
                 logger.warning(f"Upstream {instance} failed ({status_code}): {result}")
-        
+
         # All upstreams failed
         logger.error(f"All {len(instances_to_try)} upstreams failed for {model}")
-        
-        # Return the last error status or 502 if all were connection errors
-        final_status = 502
-        if instances_to_try and len(errors) > 0:
-            # Try to extract status from the last error
-            try:
-                _, _, last_status = await self.try_upstream(
-                    instances_to_try[-1], request_payload, path, headers, timeout
-                )
-                final_status = last_status
-            except Exception:
-                pass
+
+        # Use the last status code we got from actual attempts
+        final_status = last_status_code
         
         error_response = {
             "error": "all_upstreams_failed",
