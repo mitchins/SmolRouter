@@ -60,7 +60,7 @@ def isolated_db():
         pass  # File might already be deleted
 
 
-@pytest.fixture(scope="function") 
+@pytest.fixture(scope="function")
 def disable_logging():
     """
     Disable logging during regular API tests to avoid database side effects.
