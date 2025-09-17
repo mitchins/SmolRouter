@@ -30,6 +30,7 @@ def sample_logs(isolated_db):
             request_size=256,
             response_size=1024,
             status_code=200
+            ,completed_at=now - timedelta(minutes=4)
         ),
         RequestLog.create(
             timestamp=now - timedelta(minutes=3),
@@ -44,6 +45,7 @@ def sample_logs(isolated_db):
             request_size=128,
             response_size=512,
             status_code=200
+            ,completed_at=now - timedelta(minutes=2)
         ),
         RequestLog.create(
             timestamp=now - timedelta(minutes=1),
@@ -56,6 +58,7 @@ def sample_logs(isolated_db):
             request_size=0,
             response_size=2048,
             status_code=200
+            ,completed_at=now - timedelta(minutes=1)
         ),
         RequestLog.create(
             timestamp=now - timedelta(days=10),  # Old log for cleanup testing
@@ -66,6 +69,7 @@ def sample_logs(isolated_db):
             upstream_url="http://localhost:8000",
             status_code=500,
             error_message="Connection timeout"
+            ,completed_at=now - timedelta(days=10)
         )
     ]
     
