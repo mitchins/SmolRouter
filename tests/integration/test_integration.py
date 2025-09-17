@@ -130,9 +130,9 @@ def test_run_architecture_demo():
     import subprocess
     import sys
     
-    # Run the demo script that was moved to tests/
+    # Run the demo script that was moved to tests/integration/
     result = subprocess.run([
-        sys.executable, "tests/test_new_architecture.py"
+        sys.executable, "tests/integration/test_new_architecture.py"
     ], capture_output=True, text=True)
     
     # Should complete without fatal errors
