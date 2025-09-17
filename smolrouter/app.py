@@ -517,7 +517,7 @@ def complete_request_log(log_entry, start_time: float, response_data: dict,
         logger.error(f"Failed to complete request log: {e}")
 
 
-async def proxy_request(path: str, request: Request) -> StreamingResponse:
+async def proxy_request(path: str, request: Request):
     start_time = time.time()
     original_model = None
     mapped_model = None
@@ -579,67 +579,128 @@ async def proxy_request(path: str, request: Request) -> StreamingResponse:
     # Forward headers (keep Authorization)
     headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
 
-    # Use smart router for request routing with failover
-    try:
-        data, status_code, upstream_used = await smart_router.route_request(
-            source_ip, mapped_model, payload, path, headers, REQUEST_TIMEOUT
-        )
-        
-        # Update log entry with actual upstream used
-        if log_entry:
+    # Check if streaming is requested
+    is_streaming = payload.get("stream", False)
+
+    if is_streaming:
+        # For streaming requests, use direct proxy approach
+        instances_to_try, model_override = smart_router.find_route(source_ip, mapped_model or original_model or "unknown")
+
+        # Override model if specified in route
+        if model_override:
+            payload["model"] = model_override
+
+        for instance in instances_to_try:
             try:
-                log_entry.upstream_url = upstream_used
-                log_entry.save()
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                    upstream_response = await client.post(
+                        f"{instance.url.rstrip('/')}{path}",
+                        json=payload,
+                        headers=headers,
+                        timeout=REQUEST_TIMEOUT
+                    )
+
+                    # Update log entry with actual upstream used
+                    if log_entry:
+                        try:
+                            log_entry.upstream_url = str(instance)
+                            log_entry.save()
+                        except Exception as e:
+                            logger.error(f"Failed to update log entry with upstream: {e}")
+
+                    if upstream_response.status_code >= 400:
+                        logger.warning(f"Upstream {instance} returned error {upstream_response.status_code}")
+                        continue
+
+                    async def streaming_response_generator():
+                        async for chunk in upstream_response.aiter_bytes():
+                            yield chunk
+
+                    # Complete logging for successful streaming request
+                    complete_request_log(log_entry, start_time, {"status_code": upstream_response.status_code},
+                                       request_body=request_body_bytes)
+
+                    return StreamingResponse(
+                        streaming_response_generator(),
+                        status_code=upstream_response.status_code,
+                        headers=dict(upstream_response.headers),
+                        media_type="text/plain"
+                    )
+
             except Exception as e:
-                logger.error(f"Failed to update log entry with upstream: {e}")
-        
-        # Check if this was an error response
-        if status_code >= 400:
-            response_body_bytes = json.dumps(data).encode('utf-8') if data else None
-            complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)}, 
-                               request_body=request_body_bytes, response_body=response_body_bytes)
-            return JSONResponse(content=data, status_code=status_code)
-        
-        logger.debug(f"Smart router response data: {json.dumps(data)}")
-        
-        # Strip thinking chains and JSON markdown if enabled
-        if STRIP_THINKING or STRIP_JSON_MARKDOWN:
-            for choice in data.get("choices", []):
-                if "message" in choice and isinstance(choice["message"].get("content"), str):
-                    content = choice["message"]["content"]
-                    if STRIP_THINKING:
-                        content = strip_think_chain_from_text(content)
-                    if STRIP_JSON_MARKDOWN:
-                        content = strip_json_markdown_from_text(content)
-                    choice["message"]["content"] = content
-                elif isinstance(choice.get("text"), str):
-                    text = choice["text"] 
-                    if STRIP_THINKING:
-                        text = strip_think_chain_from_text(text)
-                    if STRIP_JSON_MARKDOWN:
-                        text = strip_json_markdown_from_text(text)
-                    choice["text"] = text
-            logger.debug(f"Cleaned response data: {json.dumps(data)}")
-        
-        # Complete the logging with request and response bodies
-        response_body_bytes = json.dumps(data).encode('utf-8')
-        complete_request_log(log_entry, start_time, {"status_code": status_code}, 
-                           request_body=request_body_bytes, response_body=response_body_bytes)
-        
-        return JSONResponse(content=data, status_code=status_code)
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in proxy_request: {e}")
-        complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)}, 
+                logger.warning(f"Streaming request failed for {instance}: {e}")
+                continue
+
+        # All streaming upstreams failed
+        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": "All streaming upstreams failed"},
                            request_body=request_body_bytes)
         return JSONResponse(
-            content={
-                "error": "proxy_error", 
-                "message": "An unexpected error occurred while proxying the request",
-                "details": str(e)
-            },
-            status_code=500
+            content={"error": "streaming_upstreams_failed", "message": "All streaming upstreams failed"},
+            status_code=502
         )
+
+    else:
+        # For non-streaming requests, use smart router with failover
+        try:
+            data, status_code, upstream_used = await smart_router.route_request(
+                source_ip, mapped_model or original_model or "unknown", payload, path, headers, REQUEST_TIMEOUT
+            )
+
+            # Update log entry with actual upstream used
+            if log_entry:
+                try:
+                    log_entry.upstream_url = upstream_used
+                    log_entry.save()
+                except Exception as e:
+                    logger.error(f"Failed to update log entry with upstream: {e}")
+
+            # Check if this was an error response
+            if status_code >= 400:
+                response_body_bytes = json.dumps(data).encode('utf-8') if data else None
+                complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)},
+                                   request_body=request_body_bytes, response_body=response_body_bytes)
+                return JSONResponse(content=data, status_code=status_code)
+
+            logger.debug(f"Smart router response data: {json.dumps(data)}")
+
+            # Strip thinking chains and JSON markdown if enabled
+            if STRIP_THINKING or STRIP_JSON_MARKDOWN:
+                for choice in data.get("choices", []):
+                    if "message" in choice and isinstance(choice["message"].get("content"), str):
+                        content = choice["message"]["content"]
+                        if STRIP_THINKING:
+                            content = strip_think_chain_from_text(content)
+                        if STRIP_JSON_MARKDOWN:
+                            content = strip_json_markdown_from_text(content)
+                        choice["message"]["content"] = content
+                    elif isinstance(choice.get("text"), str):
+                        text = choice["text"]
+                        if STRIP_THINKING:
+                            text = strip_think_chain_from_text(text)
+                        if STRIP_JSON_MARKDOWN:
+                            text = strip_json_markdown_from_text(text)
+                        choice["text"] = text
+                logger.debug(f"Cleaned response data: {json.dumps(data)}")
+
+            # Complete the logging with request and response bodies
+            response_body_bytes = json.dumps(data).encode('utf-8')
+            complete_request_log(log_entry, start_time, {"status_code": status_code},
+                               request_body=request_body_bytes, response_body=response_body_bytes)
+
+            return JSONResponse(content=data, status_code=status_code)
+
+        except Exception as e:
+            logger.error(f"Unexpected error in non-streaming proxy_request: {e}")
+            complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)},
+                               request_body=request_body_bytes)
+            return JSONResponse(
+                content={
+                    "error": "proxy_error",
+                    "message": "An unexpected error occurred while proxying the request",
+                    "details": str(e)
+                },
+                status_code=500
+            )
 
 
 async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse:
