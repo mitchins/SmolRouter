@@ -7,7 +7,7 @@ Relocated into `tests/` and updated subprocess call to reference moved scripts.
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
-import sys
+from importlib import import_module
 
 # Import the app
 from smolrouter.app import app
@@ -125,19 +125,16 @@ class TestBackwardCompatibility:
         pass
 
 
-def test_run_architecture_demo():
-    """Test that the architecture demo script runs without errors"""
-    import subprocess
-    import sys
-    
-    # Run the demo script that was moved to tests/integration/
-    result = subprocess.run([
-        sys.executable, "tests/integration/test_new_architecture.py"
-    ], capture_output=True, text=True)
-    
-    # Should complete without fatal errors
-    assert result.returncode == 0
-    assert "Demo completed successfully!" in result.stdout
+@pytest.mark.asyncio
+async def test_run_architecture_demo(capsys):
+    """Test that the architecture demo completes successfully"""
+
+    demo_module = import_module("tests.integration.test_new_architecture")
+
+    await demo_module.demo_new_architecture()
+
+    captured = capsys.readouterr()
+    assert "Demo completed successfully!" in captured.out
 
 
 def test_web_ui_navigation():
