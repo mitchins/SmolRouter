@@ -32,15 +32,17 @@ async def demo_new_architecture():
     provider_configs = [
         ProviderConfig(
             name="fast-kitten",
-            type="openai", 
+            type="openai",
             url="http://localhost:8001",  # NOSONAR S1313
+            timeout=0.1,
             priority=0,
             enabled=True
         ),
         ProviderConfig(
-            name="slow-kitten", 
+            name="slow-kitten",
             type="openai",
             url="http://localhost:8002",  # NOSONAR S1313
+            timeout=0.1,
             priority=1,
             enabled=True
         ),
@@ -48,7 +50,8 @@ async def demo_new_architecture():
             name="gpu-server",
             type="ollama",
             url="http://localhost:11434", # NOSONAR S1313
-            priority=2, 
+            timeout=0.1,
+            priority=2,
             enabled=True
         )
     ]
