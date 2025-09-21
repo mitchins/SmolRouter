@@ -2,8 +2,8 @@
 
 SmolRouter is a lightweight, observable proxy for routing AI model traffic. It keeps your existing OpenAI-compatible clients working while you experiment with different local or hosted model providers.
 
-[![CI Pipeline](https://github.com/mcurrie/smolrouter/actions/workflows/ci.yml/badge.svg)](https://github.com/mcurrie/smolrouter/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/mcurrie/smolrouter/branch/main/graph/badge.svg)](https://codecov.io/gh/mcurrie/smolrouter)
+[![PyPI version](https://badge.fury.io/py/SmolRouter.svg)](https://badge.fury.io/py/SmolRouter)
+[![codecov](https://codecov.io/gh/mitchins/smolrouter/branch/main/graph/badge.svg)](https://codecov.io/gh/mitchins/smolrouter)
 
 ## TL;DR
 
