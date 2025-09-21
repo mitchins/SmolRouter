@@ -131,9 +131,6 @@ jobs:
       uses: SonarSource/sonarqube-scan-action@v5
       env:
         SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        # SONAR_HOST_URL is optional - only needed for self-hosted SonarQube
-        # For SonarCloud, this can be omitted
-        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   build:
     name: Build Package
