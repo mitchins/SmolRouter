@@ -32,7 +32,8 @@ dependencies = [
 dev = [
     "pytest",
     "pytest-asyncio",
-    "pytest-mock", 
+    "pytest-cov",
+    "pytest-mock",
     "respx",
     "flake8",
     "flake8-bugbear",
@@ -97,5 +98,5 @@ python_classes = "Test*"
 addopts = "-v --tb=short"
 
 [project.urls]
-"Homepage" = "https://github.com/mcurrie/smolrouter"
-"Bug Tracker" = "https://github.com/mcurrie/smolrouter/issues"
+"Homepage" = "https://github.com/mitchins/smolrouter"
+"Bug Tracker" = "https://github.com/mitchins/smolrouter/issues"
