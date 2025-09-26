@@ -20,7 +20,6 @@ from smolrouter.database import (init_database, RequestLog, get_recent_logs, get
                      estimate_tokens_from_request, extract_tokens_from_openai_response, estimate_token_count)
 from smolrouter.storage import init_blob_storage
 from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
-from smolrouter.routing import get_smart_router
 from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 
@@ -148,8 +147,6 @@ def load_routes_config() -> Dict:
 
 ROUTES_CONFIG_DATA = load_routes_config()
 
-# Initialize smart router
-smart_router = get_smart_router(ROUTES_CONFIG_DATA, DEFAULT_UPSTREAM)
 
 def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
     """Find the best matching route for a request.
@@ -301,6 +298,13 @@ def strip_think_chain_from_text(text: str) -> str:
     result = re.sub(r'\s+([.!?,:;])', r'\1', result)
     
     return result.strip()
+
+
+
+def _extract_model_from_provider_url(model_name: str) -> str:
+    """Extract the actual model name from provider URL format"""
+    # For gemini-* and claude-* models, use as-is
+    return model_name
 
 
 def strip_json_markdown_from_text(text: str) -> str:
@@ -582,127 +586,117 @@ async def proxy_request(path: str, request: Request):
     # Check if streaming is requested
     is_streaming = payload.get("stream", False)
 
-    if is_streaming:
-        # For streaming requests, use direct proxy approach
-        instances_to_try, model_override = smart_router.find_route(source_ip, mapped_model or original_model or "unknown")
+    # Initialize container if not already done
+    global container
+    if container is None:
+        await init_new_architecture()
 
-        # Override model if specified in route
-        if model_override:
-            payload["model"] = model_override
+    # Route all models (streaming and non-streaming) through the unified provider architecture
+    model_name = mapped_model or original_model or "unknown"
 
-        for instance in instances_to_try:
+    try:
+        if container is not None:
+            # Use the unified provider architecture for all models
+            actual_model = _extract_model_from_provider_url(model_name)
+            # Update payload with actual model name for provider API
+            payload["model"] = actual_model
+
+            # The container architecture handles both streaming and non-streaming automatically
+            if is_streaming:
+                # For streaming, use the container's streaming capabilities
+                data, status_code, upstream_used = await container.route_streaming_request(
+                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+                )
+
+                # Update log entry
+                if log_entry:
+                    try:
+                        log_entry.upstream_url = upstream_used
+                        log_entry.save()
+                    except Exception as e:
+                        logger.error(f"Failed to update log entry with upstream: {e}")
+
+                # Complete logging for streaming request
+                complete_request_log(log_entry, start_time, {"status_code": status_code},
+                                   request_body=request_body_bytes)
+
+                return data  # data should be a StreamingResponse for streaming requests
+            else:
+                # For non-streaming requests
+                data, status_code, upstream_used = await container.route_request(
+                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+                )
+        else:
+            # Fallback error if container not initialized
+            raise Exception("Provider architecture not available")
+    except Exception as e:
+        # Handle case where container doesn't support streaming yet - fallback to non-streaming
+        if is_streaming:
+            logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
+            # Try non-streaming instead
             try:
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                    # Use client.stream for true streaming without buffering
-                    async with client.stream(
-                        "POST",
-                        f"{instance.url.rstrip('/')}{path}",
-                        json=payload,
-                        headers=headers,
-                        timeout=REQUEST_TIMEOUT
-                    ) as upstream_response:
-
-                        # Update log entry with actual upstream used
-                        if log_entry:
-                            try:
-                                log_entry.upstream_url = str(instance)
-                                log_entry.save()
-                            except Exception as e:
-                                logger.error(f"Failed to update log entry with upstream: {e}")
-
-                        if upstream_response.status_code >= 400:
-                            logger.warning(f"Upstream {instance} returned error {upstream_response.status_code}")
-                            continue
-
-                        async def streaming_response_generator():
-                            async for chunk in upstream_response.aiter_bytes():
-                                yield chunk
-
-                        # Complete logging for successful streaming request
-                        complete_request_log(log_entry, start_time, {"status_code": upstream_response.status_code},
-                                           request_body=request_body_bytes)
-
-                        return StreamingResponse(
-                            streaming_response_generator(),
-                            status_code=upstream_response.status_code,
-                            headers=dict(upstream_response.headers),
-                            media_type="text/plain"
-                        )
-
-            except Exception as e:
-                logger.warning(f"Streaming request failed for {instance}: {e}")
-                continue
-
-        # All streaming upstreams failed
-        complete_request_log(log_entry, start_time, {"status_code": 502, "error_message": "All streaming upstreams failed"},
-                           request_body=request_body_bytes)
-        return JSONResponse(
-            content={"error": "streaming_upstreams_failed", "message": "All streaming upstreams failed"},
-            status_code=502
-        )
-
-    else:
-        # For non-streaming requests, use smart router with failover
-        try:
-            data, status_code, upstream_used = await smart_router.route_request(
-                source_ip, mapped_model or original_model or "unknown", payload, path, headers, REQUEST_TIMEOUT
-            )
-
-            # Update log entry with actual upstream used
-            if log_entry:
-                try:
-                    log_entry.upstream_url = upstream_used
-                    log_entry.save()
-                except Exception as e:
-                    logger.error(f"Failed to update log entry with upstream: {e}")
-
-            # Check if this was an error response
-            if status_code >= 400:
-                response_body_bytes = json.dumps(data).encode('utf-8') if data else None
-                complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)},
-                                   request_body=request_body_bytes, response_body=response_body_bytes)
-                return JSONResponse(content=data, status_code=status_code)
-
-            logger.debug(f"Smart router response data: {json.dumps(data)}")
-
-            # Strip thinking chains and JSON markdown if enabled
-            if STRIP_THINKING or STRIP_JSON_MARKDOWN:
-                for choice in data.get("choices", []):
-                    if "message" in choice and isinstance(choice["message"].get("content"), str):
-                        content = choice["message"]["content"]
-                        if STRIP_THINKING:
-                            content = strip_think_chain_from_text(content)
-                        if STRIP_JSON_MARKDOWN:
-                            content = strip_json_markdown_from_text(content)
-                        choice["message"]["content"] = content
-                    elif isinstance(choice.get("text"), str):
-                        text = choice["text"]
-                        if STRIP_THINKING:
-                            text = strip_think_chain_from_text(text)
-                        if STRIP_JSON_MARKDOWN:
-                            text = strip_json_markdown_from_text(text)
-                        choice["text"] = text
-                logger.debug(f"Cleaned response data: {json.dumps(data)}")
-
-            # Complete the logging with request and response bodies
-            response_body_bytes = json.dumps(data).encode('utf-8')
-            complete_request_log(log_entry, start_time, {"status_code": status_code},
-                               request_body=request_body_bytes, response_body=response_body_bytes)
-
-            return JSONResponse(content=data, status_code=status_code)
-
-        except Exception as e:
-            logger.error(f"Unexpected error in non-streaming proxy_request: {e}")
-            complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(e)},
+                data, status_code, upstream_used = await container.route_request(
+                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+                )
+            except Exception as fallback_e:
+                logger.error(f"Both streaming and non-streaming failed: {fallback_e}")
+                complete_request_log(log_entry, start_time, {"status_code": 503, "error_message": str(fallback_e)},
+                                   request_body=request_body_bytes)
+                return JSONResponse(
+                    content={"error": "provider_architecture_failed", "message": str(fallback_e)},
+                    status_code=503
+                )
+        else:
+            logger.error(f"Provider architecture failed: {e}")
+            complete_request_log(log_entry, start_time, {"status_code": 503, "error_message": str(e)},
                                request_body=request_body_bytes)
             return JSONResponse(
-                content={
-                    "error": "proxy_error",
-                    "message": "An unexpected error occurred while proxying the request",
-                    "details": str(e)
-                },
-                status_code=500
+                content={"error": "provider_architecture_failed", "message": str(e)},
+                status_code=503
             )
+
+    # Update log entry with actual upstream used
+    if log_entry:
+        try:
+            log_entry.upstream_url = upstream_used
+            log_entry.save()
+        except Exception as e:
+            logger.error(f"Failed to update log entry with upstream: {e}")
+
+    # Check if this was an error response
+    if status_code >= 400:
+        response_body_bytes = json.dumps(data).encode('utf-8') if data else None
+        complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": str(data)},
+                           request_body=request_body_bytes, response_body=response_body_bytes)
+        return JSONResponse(content=data, status_code=status_code)
+
+    logger.debug(f"Provider architecture response data: {json.dumps(data) if data else 'None'}")
+
+    # Strip thinking chains and JSON markdown if enabled
+    if STRIP_THINKING or STRIP_JSON_MARKDOWN:
+        for choice in data.get("choices", []):
+            if "message" in choice and isinstance(choice["message"].get("content"), str):
+                content = choice["message"]["content"]
+                if STRIP_THINKING:
+                    content = strip_think_chain_from_text(content)
+                if STRIP_JSON_MARKDOWN:
+                    content = strip_json_markdown_from_text(content)
+                choice["message"]["content"] = content
+            elif isinstance(choice.get("text"), str):
+                text = choice["text"]
+                if STRIP_THINKING:
+                    text = strip_think_chain_from_text(text)
+                if STRIP_JSON_MARKDOWN:
+                    text = strip_json_markdown_from_text(text)
+                choice["text"] = text
+
+    # Complete logging
+    response_body_bytes = json.dumps(data).encode('utf-8') if data else None
+    complete_request_log(log_entry, start_time, {"status_code": status_code},
+                       request_body=request_body_bytes, response_body=response_body_bytes)
+
+    return JSONResponse(content=data, status_code=status_code)
+
 
 
 async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse:
@@ -950,6 +944,11 @@ async def chat_completions(request: Request):
 @app.post("/v1/completions")
 async def completions(request: Request):
     return await proxy_request("/v1/completions", request)
+
+
+@app.post("/v1/responses")
+async def responses(request: Request):
+    return await proxy_request("/v1/responses", request)
 
 
 @app.get("/v1/models")
@@ -1324,6 +1323,86 @@ async def api_performance(
         return JSONResponse(content={"error": "Failed to get performance data"}, status_code=500)
 
 
+@app.get("/api/google-genai/stats")
+async def api_google_genai_stats():
+    """API endpoint for getting Google GenAI API key statistics"""
+    global container
+
+    if container is None:
+        await init_new_architecture()
+
+    if container is not None:
+        try:
+            providers = container.get_providers()
+            google_providers = [p for p in providers if p.get_provider_type() == "google-genai"]
+
+            if not google_providers:
+                return {"error": "No Google GenAI providers configured"}
+
+            all_stats = {}
+            for provider in google_providers:
+                provider_stats = provider.get_api_key_stats()
+                all_stats[provider.get_provider_id()] = provider_stats
+
+            return {
+                "providers": all_stats,
+                "summary": {
+                    "total_providers": len(google_providers),
+                    "total_keys": sum(len(stats) for stats in all_stats.values()),
+                    "timezone": "US/Pacific (Google's reset time)"
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting Google GenAI stats: {e}")
+            return JSONResponse(
+                content={"error": "Failed to get Google GenAI stats", "details": str(e)},
+                status_code=500
+            )
+
+    return {"error": "New architecture not available"}
+
+
+@app.get("/api/anthropic/stats")
+async def api_anthropic_stats():
+    """API endpoint for getting Anthropic API statistics"""
+    global container
+
+    if container is None:
+        await init_new_architecture()
+
+    if container is not None:
+        try:
+            providers = container.get_providers()
+            anthropic_providers = [p for p in providers if p.get_provider_type() == "anthropic"]
+
+            if not anthropic_providers:
+                return {"error": "No Anthropic providers configured"}
+
+            all_stats = {}
+            for provider in anthropic_providers:
+                provider_stats = provider.get_api_key_stats()
+                all_stats[provider.get_provider_id()] = provider_stats
+
+            return {
+                "providers": all_stats,
+                "summary": {
+                    "total_providers": len(anthropic_providers),
+                    "passthrough_mode": True,  # Anthropic uses passthrough keys
+                    "note": "Keys are passed through from client requests, with fallback to configured keys"
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting Anthropic stats: {e}")
+            return JSONResponse(
+                content={"error": "Failed to get Anthropic stats", "details": str(e)},
+                status_code=500
+            )
+
+    return {"error": "New architecture not available"}
+
+
 @app.get("/api/upstreams")
 async def api_upstreams():
     """API endpoint for getting upstream provider information"""
@@ -1456,6 +1535,110 @@ async def upstreams_dashboard(request: Request):
     except Exception as e:
         logger.error(f"Error loading upstreams dashboard: {e}")
         return HTMLResponse(content="<h1>Error loading upstreams dashboard</h1>", status_code=500)
+
+
+@app.get("/google-genai", response_class=HTMLResponse)
+async def google_genai_dashboard(request: Request):
+    """Web UI for viewing Google GenAI provider status and quota usage"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        return templates.TemplateResponse(request, "google_genai.html", {
+            "title": "Google GenAI Status",
+            "current_page": "google-genai"
+        })
+    except Exception as e:
+        logger.error(f"Error loading Google GenAI dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading Google GenAI dashboard</h1>", status_code=500)
+
+
+@app.get("/system", response_class=HTMLResponse)
+async def system_dashboard(request: Request):
+    """Web UI for viewing system configuration and tuneables"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        import platform
+        import sys
+        from datetime import datetime
+        import os
+
+        # Gather all system settings and configuration
+        settings = {
+            'request_timeout': REQUEST_TIMEOUT,
+            'default_upstream': DEFAULT_UPSTREAM,
+            'strip_thinking': STRIP_THINKING,
+            'strip_json_markdown': STRIP_JSON_MARKDOWN,
+            'disable_thinking': DISABLE_THINKING,
+            'enable_logging': ENABLE_LOGGING,
+            'database_file': 'requests.db',
+            'blob_storage_path': 'blob_storage'
+        }
+
+        # Provider configurations
+        providers = []
+        if container:
+            try:
+                container_providers = container.get_providers()
+                for provider in container_providers:
+                    providers.append({
+                        'name': provider.get_provider_id(),
+                        'type': provider.get_provider_type(),
+                        'url': provider.get_endpoint(),
+                        'timeout': getattr(provider.config, 'timeout', 'N/A'),
+                        'enabled': getattr(provider.config, 'enabled', True),
+                        'priority': getattr(provider.config, 'priority', 0),
+                        'has_api_key': bool(getattr(provider.config, 'api_key', None) or getattr(provider.config, 'api_keys', None))
+                    })
+            except Exception as e:
+                logger.warning(f"Could not load provider configurations: {e}")
+
+        # Security settings
+        jwt_secret = os.getenv("JWT_SECRET")
+        security = {
+            'jwt_enabled': bool(jwt_secret),
+            'webui_policy': 'AUTH_WHEN_PROXIED',  # This is the current policy
+            'rate_limiting_enabled': True,  # Rate limiting is enabled by default
+            'ip_restrictions_count': 0,  # Placeholder - would need to check actual rules
+            'model_restrictions_count': 0,  # Placeholder
+            'user_restrictions_count': 0   # Placeholder
+        }
+
+        # Routing configuration
+        routing = {
+            'strategy_type': 'smart' if container else 'unknown',
+            'aliases_count': 0,  # Would need to check actual aliases
+            'routes_count': 0,   # Would need to check routes.yaml
+            'health_check_interval': 60,  # Default health check interval
+            'cache_ttl': 300,    # Default cache TTL
+            'auto_refresh': True
+        }
+
+        # Environment information
+        env_info = {
+            'version': 'SmolRouter v1.0.0',
+            'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            'platform': platform.system(),
+            'host': '0.0.0.0',
+            'port': '8080',
+            'start_time': 'Runtime Info',
+            'uptime': 'N/A'
+        }
+
+        return templates.TemplateResponse(request, "system.html", {
+            "title": "System Configuration",
+            "current_page": "system",
+            "settings": settings,
+            "providers": providers,
+            "security": security,
+            "routing": routing,
+            "env_info": env_info
+        })
+    except Exception as e:
+        logger.error(f"Error loading system dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading system dashboard</h1>", status_code=500)
 
 
 @app.get("/request/{request_id}", response_class=HTMLResponse)

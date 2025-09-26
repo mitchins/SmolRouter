@@ -1,9 +1,11 @@
 import os
 import logging
 import re
+import hashlib
 from datetime import datetime, timedelta
 from peewee import (
     AutoField,
+    BooleanField,
     CharField,
     DateTimeField,
     IntegerField,
@@ -191,12 +193,103 @@ class RequestLog(BaseModel):
             (('completed_at', 'prompt_tokens', 'duration_ms'), False),
         )
 
+class ApiKeyQuota(BaseModel):
+    """Persistent quota tracking for API keys across providers"""
+    id = AutoField()
+
+    # Key identification (hashed for privacy)
+    api_key_hash = CharField(max_length=64, index=True)  # SHA256 of API key
+    provider_name = CharField(max_length=50)  # e.g., 'google-test'
+    model_name = CharField(max_length=100)   # e.g., 'gemini-2.5-flash-lite'
+
+    # Daily quota tracking
+    requests_today = IntegerField(default=0)
+    tokens_today = IntegerField(default=0)
+    last_reset_date = CharField(max_length=10)  # YYYY-MM-DD in Pacific timezone
+
+    # Error and exhaustion tracking
+    quota_exhausted_at = DateTimeField(null=True)  # When quota was exhausted (Pacific time)
+    invalid_key = BooleanField(default=False)  # Permanently invalid/expired keys
+    error_count = IntegerField(default=0)
+    last_error = TextField(null=True)
+
+    # Timestamps
+    created_at = DateTimeField(default=datetime.now)
+    updated_at = DateTimeField(default=datetime.now)
+
+    @classmethod
+    def hash_api_key(cls, api_key: str) -> str:
+        """Create a SHA256 hash of API key for privacy"""
+        return hashlib.sha256(api_key.encode()).hexdigest()
+
+    @classmethod
+    def get_or_create_quota(cls, api_key: str, provider_name: str, model_name: str, pacific_date: str):
+        """Get or create quota record for key+provider+model combination"""
+        key_hash = cls.hash_api_key(api_key)
+        quota, created = cls.get_or_create(
+            api_key_hash=key_hash,
+            provider_name=provider_name,
+            model_name=model_name,
+            defaults={
+                'last_reset_date': pacific_date,
+                'updated_at': datetime.now()
+            }
+        )
+
+        # Reset daily stats if date changed
+        if quota.last_reset_date != pacific_date:
+            quota.requests_today = 0
+            quota.tokens_today = 0
+            quota.quota_exhausted_at = None
+            quota.last_reset_date = pacific_date
+            quota.error_count = max(0, quota.error_count - 5)  # Decay errors on reset
+            quota.updated_at = datetime.now()
+            quota.save()
+
+        return quota, created
+
+    def mark_request_success(self, tokens: int = 0):
+        """Mark a successful request"""
+        self.requests_today += 1
+        self.tokens_today += tokens
+        self.error_count = max(0, self.error_count - 1)  # Decay errors on success
+        self.updated_at = datetime.now()
+        self.save()
+
+    def mark_request_failure(self, error: str = None, quota_exhausted: bool = False, invalid_key: bool = False):
+        """Mark a failed request"""
+        self.error_count += 1
+        self.last_error = error
+        self.updated_at = datetime.now()
+
+        if quota_exhausted:
+            # Use Pacific timezone for Google GenAI quota consistency
+            import pytz
+            pacific_tz = pytz.timezone('US/Pacific')
+            self.quota_exhausted_at = datetime.now(pacific_tz)
+
+        if invalid_key:
+            self.invalid_key = True
+
+        self.save()
+
+    class Meta:
+        indexes = (
+            # Unique constraint for key+provider+model combination
+            (('api_key_hash', 'provider_name', 'model_name'), True),
+            # Query optimization indexes
+            (('provider_name', 'last_reset_date'), False),
+            (('provider_name', 'model_name'), False),
+            (('last_reset_date',), False),  # For cleanup operations
+            (('invalid_key',), False),  # Filter out invalid keys
+        )
+
 def init_database():
     """Initialize database and create tables"""
     try:
         if not db.is_connection_usable():
             db.connect()
-        db.create_tables([RequestLog], safe=True)
+        db.create_tables([RequestLog, ApiKeyQuota], safe=True)
         logger.info(f"Database initialized at {DB_PATH}")
         
         # Only run cleanup on startup if explicitly enabled (not for 1M+ record scenarios)

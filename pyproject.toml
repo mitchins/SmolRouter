@@ -11,7 +11,7 @@ authors = [
 ]
 description = "A smart, lightweight proxy for routing AI model requests with performance analytics."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -25,7 +25,9 @@ dependencies = [
     "jinja2",
     "pyyaml",
     'pyjwt',
-    'slowapi'
+    'slowapi',
+    "google-generativeai>=0.8.5",
+    "pytz>=2025.2",
 ]
 
 [project.optional-dependencies]
@@ -96,6 +98,13 @@ python_files = "test_*.py"
 python_functions = "test_*"
 python_classes = "Test*"
 addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "respx>=0.22.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/mitchins/smolrouter"

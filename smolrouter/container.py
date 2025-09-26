@@ -144,36 +144,41 @@ class SmolRouterContainer:
             logger.error(f"Failed to load routes config from {config_path}: {e}")
             return {"routes": [], "servers": {}, "aliases": {}}
     
-    def _create_providers_from_legacy_config(self, default_upstream: str, 
+    def _create_providers_from_legacy_config(self, default_upstream: str,
                                            routes_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Create providers list from legacy configuration"""
+        """Create providers list from configuration (supports both new and legacy)"""
         providers = []
-        
-        # Add default upstream as primary provider
-        providers.append({
-            'name': 'default',
-            'type': 'openai',  # Assume OpenAI-compatible by default
-            'url': default_upstream,
-            'priority': 0,
-            'enabled': True
-        })
-        
-        # Add servers from routes config
-        servers = routes_data.get('servers', {})
-        for i, (name, url) in enumerate(servers.items()):
-            # Try to detect provider type from URL patterns
-            provider_type = 'openai'  # Default assumption
-            if '/api/tags' in url or 'ollama' in url.lower():
-                provider_type = 'ollama'
-            
+
+        # Check if there's a new-style providers section
+        if 'providers' in routes_data:
+            providers.extend(routes_data['providers'])
+        else:
+            # Fall back to legacy configuration
+            # Add default upstream as primary provider
             providers.append({
-                'name': name,
-                'type': provider_type,
-                'url': url,
-                'priority': i + 1,  # Default provider has priority 0
+                'name': 'default',
+                'type': 'openai',  # Assume OpenAI-compatible by default
+                'url': default_upstream,
+                'priority': 0,
                 'enabled': True
             })
-        
+
+            # Add servers from legacy routes config
+            servers = routes_data.get('servers', {})
+            for i, (name, url) in enumerate(servers.items()):
+                # Try to detect provider type from URL patterns
+                provider_type = 'openai'  # Default assumption
+                if '/api/tags' in url or 'ollama' in url.lower():
+                    provider_type = 'ollama'
+
+                providers.append({
+                    'name': name,
+                    'type': provider_type,
+                    'url': url,
+                    'priority': i + 1,  # Default provider has priority 0
+                    'enabled': True
+                })
+
         return providers
     
     def _extract_provider_priorities(self, routes_data: Dict[str, Any]) -> Dict[str, int]:
@@ -333,19 +338,8 @@ class SmolRouterContainer:
     
     def _create_providers(self) -> List[IModelProvider]:
         """Create provider instances"""
-        providers = []
-        
-        for provider_config in self.config.providers:
-            try:
-                config = ProviderConfig(**provider_config)
-                if config.enabled:
-                    provider = ProviderFactory.create_provider(config)
-                    providers.append(provider)
-                    logger.info(f"Created provider: {config.name} ({config.type}) -> {config.url}")
-            except Exception as e:
-                logger.error(f"Failed to create provider from config {provider_config}: {e}")
-        
-        return providers
+        # Use the factory method which handles Google GenAI configs correctly
+        return ProviderFactory.create_providers_from_config(self.config.providers)
     
     def _create_mediator(self) -> ModelMediator:
         """Create model mediator"""
@@ -385,15 +379,26 @@ class SmolRouterContainer:
             headers=headers or {}
         )
     
+    async def route_request(self, source_ip: str, model: str, request_payload: Dict[str, Any],
+                           path: str, headers: Dict[str, str], timeout: float):
+        """
+        Route a request using the new architecture.
+
+        Returns: (response_data, status_code, upstream_used)
+        """
+        if not self._initialized:
+            await self.initialize()
+        return await self._mediator.route_request(source_ip, model, request_payload, path, headers, timeout)
+
     async def get_legacy_smart_router(self):
         """
         Get a legacy-compatible smart router for backward compatibility.
-        
+
         This allows existing app.py code to work with minimal changes.
         """
         if not self._initialized:
             await self.initialize()
-        
+
         # Create a wrapper that mimics the old SmartRouter interface
         return LegacySmartRouterAdapter(self._mediator, self.config)
     
@@ -443,27 +448,10 @@ class LegacySmartRouterAdapter:
                            path: str, headers: Dict[str, str], timeout: float):
         """
         Route a request using the new architecture.
-        
+
         Returns: (response_data, status_code, upstream_used)
         """
-        client = ClientContext(ip=source_ip, headers=headers)
-        
-        # Resolve the model
-        resolved_model = await self.mediator.resolve_model_for_request(model, client)
-        
-        if resolved_model is None:
-            return {
-                "error": "model_not_found",
-                "message": f"Model '{model}' not found or not accessible"
-            }, 404, "none"
-        
-        # Use the original routing logic for now (fallback to legacy system)
-        # This would need to be enhanced to actually make the HTTP requests
-        # For now, return a placeholder
-        return {
-            "error": "not_implemented",
-            "message": "Legacy adapter routing not fully implemented"
-        }, 501, resolved_model.endpoint
+        return await self.mediator.route_request(source_ip, model, request_payload, path, headers, timeout)
 
 
 # Global container instance
