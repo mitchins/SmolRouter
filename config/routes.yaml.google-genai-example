@@ -1,0 +1,119 @@
+# Example configuration for Google Generative AI support
+# This configuration demonstrates how to set up multiple Google GenAI API keys
+# with intelligent rotation and load balancing
+#
+# Usage:
+# - Use "genai://" prefix for Google GenAI models to avoid namespace conflicts
+# - Example: curl -X POST http://localhost:1234/v1/chat/completions \
+#   -H "Content-Type: application/json" \
+#   -d '{"model": "genai://gemini-2.5-flash", "messages": [{"role": "user", "content": "Hello"}]}'
+
+# Traditional routes (legacy system) - can still be used alongside new providers
+routes: []
+
+# New provider-based architecture configuration
+providers:
+  # Google Generative AI provider with multiple API keys
+  - name: "google-free-tier"
+    type: "google-genai"
+    enabled: true
+    priority: 10  # Lower priority than premium providers
+
+    # API keys can be provided directly (not recommended for production)
+    api_keys:
+      - "AIzaSy_EXAMPLE_KEY_NOT_REAL_12345678901234"  # Sample key for testing
+
+    # OR load API keys from a file (recommended)
+    # api_keys_file: "/path/to/google_api_keys.txt"
+
+    # Rate limiting configuration
+    max_requests_per_day: 1500  # Free tier limit
+    max_tokens_per_minute: 32000  # Free tier limit
+
+    # Provider configuration
+    timeout: 30.0
+
+    metadata:
+      description: "Google Generative AI free tier"
+      safety_settings: "most_permissive"
+
+  # Example of a second Google GenAI provider (e.g., for different API keys)
+  - name: "google-premium"
+    type: "google-genai"
+    enabled: false  # Disabled by default
+    priority: 5     # Higher priority than free tier
+
+    api_keys_file: "/etc/smolrouter/google_premium_keys.txt"
+    max_requests_per_day: 50000  # Higher limit for premium
+    max_tokens_per_minute: 128000
+    timeout: 30.0
+
+    metadata:
+      description: "Google Generative AI premium tier"
+
+# Model strategy configuration
+strategy:
+  type: "smart"
+  config:
+    # Model aliases - map provider-prefixed names to actual models
+    aliases:
+      "genai://gemini-flash": "gemini-1.5-flash"
+      "genai://gemini-pro": "gemini-1.5-pro"
+      "genai://gemini-2.5-flash": "gemini-2.0-flash-exp"
+      "genai://gemini-2.5-flash-lite": "gemini-2.0-flash-exp"
+
+    # Provider priority order for models
+    provider_priority:
+      "gemini-1.5-flash": ["google-premium", "google-free-tier"]
+      "gemini-1.5-pro": ["google-premium", "google-free-tier"]
+      "gemini-2.0-flash-exp": ["google-premium", "google-free-tier"]
+
+# Access control configuration
+access_control:
+  type: "basic"
+  config:
+    # Allow all models by default
+    default_access: true
+
+    # IP-based restrictions (optional)
+    ip_restrictions: {}
+
+    # Model restrictions (optional)
+    model_restrictions: {}
+
+# Caching configuration
+cache:
+  enabled: true
+  ttl: 300  # 5 minutes
+  max_entries: 1000
+
+# Container configuration
+container:
+  enabled: true
+
+  # Health check configuration
+  health_check:
+    enabled: true
+    interval: 60  # seconds
+    timeout: 10   # seconds
+
+  # Model refresh configuration
+  model_refresh:
+    enabled: true
+    interval: 300  # 5 minutes
+    on_startup: true
+
+# Usage statistics and monitoring
+monitoring:
+  enabled: true
+
+  # API key usage tracking
+  api_key_stats:
+    enabled: true
+    reset_time: "00:00 PST"  # Midnight Pacific (Google's reset time)
+
+  # Token usage tracking
+  token_stats:
+    enabled: true
+    per_model: true
+    per_provider: true

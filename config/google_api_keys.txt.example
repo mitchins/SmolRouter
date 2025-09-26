@@ -1,0 +1,13 @@
+# Google Generative AI API Keys
+# One key per line, comments supported
+# Keys will be rotated based on usage to stay within quotas
+
+# Free tier keys (1500 RPD limit each)
+AIzaSy_EXAMPLE_KEY_NOT_REAL_12345678901234
+
+# Additional keys for load balancing
+# AIzaSyExample2_Replace_With_Real_Key
+# AIzaSyExample3_Replace_With_Real_Key
+
+# Note: Requests per day (RPD) quotas reset at midnight Pacific time
+# The system will automatically select the key with lowest usage

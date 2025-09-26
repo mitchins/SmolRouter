@@ -7,7 +7,7 @@ interface for model operations.
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 from .interfaces import (
@@ -15,6 +15,7 @@ from .interfaces import (
 )
 from .caching import ModelAggregator, IModelCache
 from .providers import IModelProvider
+from .google_genai_provider import GoogleGenAIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,105 @@ class ModelMediator:
             logger.error(f"Error validating model request: {e}")
         
         return result
-    
+
+    async def route_request(self, source_ip: str, model: str, request_payload: Dict[str, Any],
+                           path: str, headers: Dict[str, str], timeout: float) -> Tuple[Dict[str, Any], int, str]:
+        """
+        Route a request to the appropriate provider and execute it.
+
+        This method handles the complete request lifecycle:
+        1. Resolve the requested model to a specific provider
+        2. Route the request to that provider
+        3. Handle provider-specific request/response transformations
+
+        Args:
+            source_ip: Client IP address
+            model: Requested model name
+            request_payload: OpenAI-format request payload
+            path: Request path (e.g., "/v1/chat/completions")
+            headers: Request headers
+            timeout: Request timeout
+
+        Returns:
+            Tuple of (response_data, status_code, upstream_used)
+        """
+        client = ClientContext(ip=source_ip, headers=headers)
+
+        try:
+            # Resolve the model to a specific provider
+            resolved_model = await self.resolve_model_for_request(model, client)
+
+            if resolved_model is None:
+                return {
+                    "error": {"type": "invalid_request_error", "message": f"Model '{model}' not found or not accessible"}
+                }, 404, "none"
+
+            # Get the provider for this model
+            provider = await self._get_provider_by_id(resolved_model.provider_id)
+            if not provider:
+                return {
+                    "error": {"type": "internal_server_error", "message": "Provider not available"}
+                }, 500, resolved_model.endpoint
+
+            # Handle Google GenAI provider requests
+            if isinstance(provider, GoogleGenAIProvider):
+                try:
+                    response_data = await provider.generate_completion(request_payload)
+                    return response_data, 200, f"google-genai:{resolved_model.provider_id}"
+                except Exception as e:
+                    error_msg = str(e)
+                    status_code = 500
+
+                    # Handle specific Google GenAI errors
+                    if "quota exhausted" in error_msg.lower() or "429" in error_msg:
+                        status_code = 429
+                    elif "permission denied" in error_msg.lower() or "403" in error_msg:
+                        status_code = 403
+                    elif "invalid argument" in error_msg.lower() or "400" in error_msg:
+                        status_code = 400
+
+                    return {
+                        "error": {
+                            "type": "api_error",
+                            "message": error_msg,
+                            "provider": "google-genai"
+                        }
+                    }, status_code, f"google-genai:{resolved_model.provider_id}"
+
+            # Handle OpenAI provider requests
+            if hasattr(provider, 'generate_completion') and resolved_model.provider_type == "openai":
+                try:
+                    response_data, status_code = await provider.generate_completion(request_payload, headers, path)
+                    return response_data, status_code, f"openai:{resolved_model.provider_id}"
+                except Exception as e:
+                    logger.error(f"OpenAI provider error: {e}")
+                    # Return OpenAI-compatible error response
+                    return {
+                        "error": {
+                            "type": "api_error",
+                            "message": str(e),
+                            "provider": "openai"
+                        }
+                    }, 500, f"openai:{resolved_model.provider_id}"
+
+            # For other providers, fall back to legacy HTTP routing
+            return {
+                "error": {"type": "not_implemented", "message": f"HTTP routing for {resolved_model.provider_type} not implemented in new architecture"}
+            }, 501, resolved_model.endpoint
+
+        except Exception as e:
+            logger.error(f"Error routing request: {e}")
+            return {
+                "error": {"type": "internal_server_error", "message": "Request routing failed"}
+            }, 500, "unknown"
+
+    async def _get_provider_by_id(self, provider_id: str) -> Optional[IModelProvider]:
+        """Get a provider instance by ID"""
+        for provider in self.aggregator.providers:
+            if provider.get_provider_id() == provider_id:
+                return provider
+        return None
+
     def close(self):
         """Clean shutdown of mediator"""
         self.aggregator.close()

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Settings - SmolRouter</title>
+    {% include 'navigation.html' %}
+</head>
+<body>
+    <div style="max-width: 1200px; margin: 2rem auto; padding: 0 2rem;">
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h1 style="margin: 0 0 1rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.75rem;">
+                <span class="material-icons" style="font-size: 2rem; color: #667eea;">settings</span>
+                System Configuration
+            </h1>
+            <p style="color: #718096; margin: 0;">Read-only view of all configurable parameters and runtime settings.</p>
+        </div>
+
+        <!-- Core Settings -->
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h2 style="margin: 0 0 1.5rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="material-icons" style="color: #667eea;">tune</span>
+                Core Settings
+            </h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Request Handling</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Request Timeout</span>
+                            <strong>{{ settings.request_timeout }}s</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Default Upstream</span>
+                            <strong>{{ settings.default_upstream }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Strip Thinking</span>
+                            <strong>{{ '✅' if settings.strip_thinking else '❌' }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Strip JSON Markdown</span>
+                            <strong>{{ '✅' if settings.strip_json_markdown else '❌' }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Disable Thinking</span>
+                            <strong>{{ '✅' if settings.disable_thinking else '❌' }}</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Logging & Storage</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Enable Logging</span>
+                            <strong>{{ '✅' if settings.enable_logging else '❌' }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Database File</span>
+                            <strong>{{ settings.database_file }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Blob Storage</span>
+                            <strong>{{ settings.blob_storage_path }}</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Provider Settings -->
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h2 style="margin: 0 0 1.5rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="material-icons" style="color: #667eea;">dns</span>
+                Provider Configurations
+            </h2>
+            {% for provider in providers %}
+            <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    <h3 style="margin: 0; color: #4a5568; font-size: 1.1rem;">{{ provider.name }}</h3>
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span style="padding: 0.25rem 0.75rem; border-radius: 12px; font-size: 0.875rem; font-weight: 500;
+                                   background: {{ '#d4edda' if provider.enabled else '#f8d7da' }};
+                                   color: {{ '#155724' if provider.enabled else '#721c24' }};">
+                            {{ 'Enabled' if provider.enabled else 'Disabled' }}
+                        </span>
+                        <span style="padding: 0.25rem 0.75rem; border-radius: 12px; font-size: 0.875rem; font-weight: 500; background: #e2e8f0; color: #4a5568;">
+                            Priority: {{ provider.priority }}
+                        </span>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
+                    <div>
+                        <span style="color: #718096;">Type</span><br>
+                        <strong>{{ provider.type }}</strong>
+                    </div>
+                    <div>
+                        <span style="color: #718096;">URL</span><br>
+                        <strong>{{ provider.url }}</strong>
+                    </div>
+                    <div>
+                        <span style="color: #718096;">Timeout</span><br>
+                        <strong>{{ provider.timeout }}s</strong>
+                    </div>
+                    <div>
+                        <span style="color: #718096;">API Key</span><br>
+                        <strong>{{ '✅ Configured' if provider.has_api_key else '❌ Not Set' }}</strong>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Security Settings -->
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h2 style="margin: 0 0 1.5rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="material-icons" style="color: #667eea;">security</span>
+                Security & Authentication
+            </h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Authentication</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">JWT Authentication</span>
+                            <strong>{{ '✅ Enabled' if security.jwt_enabled else '❌ Disabled' }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">WebUI Security Policy</span>
+                            <strong>{{ security.webui_policy }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Rate Limiting</span>
+                            <strong>{{ '✅ Enabled' if security.rate_limiting_enabled else '❌ Disabled' }}</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Access Control</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">IP Restrictions</span>
+                            <strong>{{ security.ip_restrictions_count }} rules</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Model Restrictions</span>
+                            <strong>{{ security.model_restrictions_count }} rules</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">User Restrictions</span>
+                            <strong>{{ security.user_restrictions_count }} rules</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Route Configuration -->
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h2 style="margin: 0 0 1.5rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="material-icons" style="color: #667eea;">alt_route</span>
+                Routing & Strategy
+            </h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem;">
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Strategy Configuration</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Strategy Type</span>
+                            <strong>{{ routing.strategy_type }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Model Aliases</span>
+                            <strong>{{ routing.aliases_count }} defined</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Route Rules</span>
+                            <strong>{{ routing.routes_count }} active</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Health Monitoring</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Health Check Interval</span>
+                            <strong>{{ routing.health_check_interval }}s</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Cache TTL</span>
+                            <strong>{{ routing.cache_ttl }}s</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Auto Refresh</span>
+                            <strong>{{ '✅ Enabled' if routing.auto_refresh else '❌ Disabled' }}</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Environment Info -->
+        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); padding: 2rem; margin-bottom: 2rem;">
+            <h2 style="margin: 0 0 1.5rem 0; color: #2d3748; display: flex; align-items: center; gap: 0.5rem;">
+                <span class="material-icons" style="color: #667eea;">info</span>
+                Environment Information
+            </h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; font-family: 'Courier New', monospace;">
+                <div>
+                    <span style="color: #718096;">Version</span><br>
+                    <strong>{{ env_info.version }}</strong>
+                </div>
+                <div>
+                    <span style="color: #718096;">Python Version</span><br>
+                    <strong>{{ env_info.python_version }}</strong>
+                </div>
+                <div>
+                    <span style="color: #718096;">Platform</span><br>
+                    <strong>{{ env_info.platform }}</strong>
+                </div>
+                <div>
+                    <span style="color: #718096;">Host</span><br>
+                    <strong>{{ env_info.host }}:{{ env_info.port }}</strong>
+                </div>
+                <div>
+                    <span style="color: #718096;">Started</span><br>
+                    <strong>{{ env_info.start_time }}</strong>
+                </div>
+                <div>
+                    <span style="color: #718096;">Uptime</span><br>
+                    <strong>{{ env_info.uptime }}</strong>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -18,6 +18,16 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Data files - ignore runtime data in any location
+*.db
+blob_storage/
+data/
+deploy-data/
+
+# Configuration - ignore actual configs with secrets
+config/routes.yaml
+config/google_api_keys.txt
 var/
 wheels/
 share/python-wheels/

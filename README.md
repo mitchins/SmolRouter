@@ -57,6 +57,19 @@ response = client.chat.completions.create(
 )
 ```
 
+### Using Google GenAI models
+
+To use Google Gemini models, simply use the model name directly:
+
+```python
+response = client.chat.completions.create(
+    model="gemini-2.0-flash-exp",  # Automatically routes to Google GenAI
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+Any model starting with `gemini-` automatically routes to Google GenAI when configured. See [Google GenAI Setup](docs/GOOGLE_GENAI.md) for details.
+
 <p align="center">
   <img src="images/main-ui.png" alt="SmolRouter Main UI" width="80%">
 </p>

@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google GenAI Status - SmolRouter</title>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .header-section {
+            background: white;
+            border-radius: 8px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-section h1 {
+            margin: 0 0 1rem 0;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .quota-reset-info {
+            background: #e3f2fd;
+            border: 1px solid #bbdefb;
+            border-radius: 6px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+
+        .quota-reset-info h3 {
+            margin: 0 0 0.5rem 0;
+            color: #1976d2;
+        }
+
+        .reset-time {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #1565c0;
+        }
+
+        .providers-section {
+            background: white;
+            border-radius: 8px;
+            padding: 2rem;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .provider-block {
+            margin-bottom: 2rem;
+        }
+
+        .provider-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .provider-name {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .provider-summary {
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        .models-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .models-table th,
+        .models-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .models-table th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+        }
+
+        .model-name {
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.9rem;
+            background: #f5f5f5;
+            padding: 0.25rem 0.5rem;
+            border-radius: 3px;
+        }
+
+        .key-status {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .key-indicator {
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+
+        .key-available {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+        }
+
+        .key-exhausted {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+
+        .key-invalid {
+            background-color: #fce4ec;
+            color: #ad1457;
+            font-weight: 600;
+        }
+
+        .usage-bar {
+            width: 100px;
+            height: 8px;
+            background-color: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .usage-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4caf50 0%, #ffeb3b 70%, #f44336 90%);
+            transition: width 0.3s ease;
+        }
+
+        .usage-text {
+            font-size: 0.8rem;
+            color: #666;
+            margin-left: 0.5rem;
+        }
+
+        .no-providers {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+        }
+
+        .refresh-button {
+            background: #1976d2;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .refresh-button:hover {
+            background: #1565c0;
+        }
+
+        .reset-progress-container {
+            background-color: #e3f2fd;
+            border-radius: 4px;
+            height: 8px;
+            margin-top: 0.5rem;
+            overflow: hidden;
+        }
+
+        .reset-progress-bar {
+            background: linear-gradient(to right, #2196f3, #1976d2);
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    {% set current_page = 'google-genai' %}
+    {% include 'navigation.html' %}
+
+    <div class="container">
+        <div class="header-section">
+            <h1>
+                <span class="material-icons">smart_toy</span>
+                Google GenAI Status
+            </h1>
+            <p>Monitor API key usage and quota status for Google Generative AI models</p>
+
+            <div class="quota-reset-info">
+                <h3>Quota Reset Schedule</h3>
+                <div class="reset-time" id="reset-time">
+                    Next reset: Loading...
+                </div>
+                <div class="reset-progress-container">
+                    <div class="reset-progress-bar" id="reset-progress"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="providers-section">
+            <div id="providers-content">
+                Loading provider status...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+
+        async function fetchStats() {
+            try {
+                const response = await fetch('/api/google-genai/stats');
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                console.error('Error fetching stats:', error);
+                return null;
+            }
+        }
+
+        function updateResetTime() {
+            const now = new Date();
+
+            // Get Pacific Time for quota reset calculation
+            const pacificFormatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/Los_Angeles',
+                year: 'numeric', month: 'numeric', day: 'numeric',
+                hour: 'numeric', minute: 'numeric', second: 'numeric',
+                hour12: false
+            });
+            const pacificParts = pacificFormatter.formatToParts(now);
+            const pacificTime = new Date(
+                pacificParts.find(p => p.type === 'year').value,
+                pacificParts.find(p => p.type === 'month').value - 1,
+                pacificParts.find(p => p.type === 'day').value,
+                pacificParts.find(p => p.type === 'hour').value,
+                pacificParts.find(p => p.type === 'minute').value,
+                pacificParts.find(p => p.type === 'second').value
+            );
+
+            // Calculate next midnight Pacific
+            const nextMidnightPacific = new Date(pacificTime);
+            if (pacificTime.getHours() >= 0) {
+                nextMidnightPacific.setDate(nextMidnightPacific.getDate() + 1);
+            }
+            nextMidnightPacific.setHours(0, 0, 0, 0);
+
+            // Calculate time until reset
+            const timeUntilReset = nextMidnightPacific.getTime() - pacificTime.getTime();
+
+            const resetTimeElement = document.getElementById('reset-time');
+            const progressElement = document.getElementById('reset-progress');
+
+            if (timeUntilReset > 0) {
+                const hours = Math.floor(timeUntilReset / (1000 * 60 * 60));
+                const minutes = Math.floor((timeUntilReset % (1000 * 60 * 60)) / (1000 * 60));
+
+                // Convert Pacific midnight to local time for display
+                const localResetTime = new Date(now);
+                localResetTime.setTime(now.getTime() + timeUntilReset);
+                const localTimeStr = localResetTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                if (resetTimeElement) {
+                    resetTimeElement.textContent = `${hours}h ${minutes}m until reset (${localTimeStr} local time)`;
+                }
+
+                // Update progress bar - inversely proportional to time remaining
+                if (progressElement) {
+                    const totalDayMs = 24 * 60 * 60 * 1000;
+                    const elapsedMs = totalDayMs - timeUntilReset;
+                    const progressPercent = (elapsedMs / totalDayMs) * 100;
+                    progressElement.style.width = `${Math.max(0, Math.min(100, progressPercent))}%`;
+                }
+            } else {
+                if (resetTimeElement) {
+                    resetTimeElement.textContent = `Quota resetting now...`;
+                }
+                if (progressElement) {
+                    progressElement.style.width = '100%';
+                }
+            }
+        }
+
+        function renderProviders(data) {
+            const container = document.getElementById('providers-content');
+
+            if (!data || !data.providers || Object.keys(data.providers).length === 0) {
+                container.innerHTML = `
+                    <div class="no-providers">
+                        <span class="material-icons" style="font-size: 3rem; color: #ccc;">smart_toy</span>
+                        <h3>No Google GenAI providers configured</h3>
+                        <p>Configure Google GenAI providers in your routes.yaml to see status here.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+
+            for (const [providerName, providerData] of Object.entries(data.providers)) {
+                const totalKeys = Object.keys(providerData).filter(key => key !== 'summary' && typeof providerData[key] === 'object').length;
+                const availableKeys = Object.values(providerData)
+                    .filter(keyData => typeof keyData === 'object' && keyData.models !== undefined)
+                    .filter(keyData => {
+                        // Count keys as available if:
+                        // 1. They have no models yet (unused keys are assumed available)
+                        // 2. OR they have at least one model with status 'available'
+                        const models = keyData.models || {};
+                        const modelCount = Object.keys(models).length;
+                        if (modelCount === 0) {
+                            return true; // Unused keys are available
+                        }
+                        return Object.values(models).some(model => model.status === 'available');
+                    }).length;
+
+                html += `
+                    <div class="provider-block">
+                        <div class="provider-header">
+                            <div class="provider-name">${providerName}</div>
+                            <div class="provider-summary">
+                                ${availableKeys}/${totalKeys} keys available
+                            </div>
+                        </div>
+
+                        <table class="models-table">
+                            <thead>
+                                <tr>
+                                    <th>Model</th>
+                                    <th>Key Status</th>
+                                    <th>Usage Today</th>
+                                    <th>Last Activity</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                // Collect all unique models across all keys
+                const allModels = new Set();
+                for (const keyData of Object.values(providerData)) {
+                    if (typeof keyData === 'object' && keyData.models) {
+                        Object.keys(keyData.models).forEach(model => allModels.add(model));
+                    }
+                }
+
+                // Render each model
+                for (const model of Array.from(allModels).sort()) {
+                    const modelStats = [];
+                    let totalRequests = 0;
+                    let totalTokens = 0;
+                    let availableCount = 0;
+                    let exhaustedCount = 0;
+                    let invalidCount = 0;
+                    let lastActivity = null;
+
+                    // Aggregate stats across all keys for this model
+                    for (const [keyName, keyData] of Object.entries(providerData)) {
+                        if (typeof keyData === 'object' && keyData.models && keyData.models[model]) {
+                            const modelData = keyData.models[model];
+                            totalRequests += modelData.requests_today;
+                            totalTokens += modelData.tokens_today;
+
+                            if (modelData.status === 'invalid') {
+                                invalidCount++;
+                            } else if (modelData.quota_exhausted) {
+                                exhaustedCount++;
+                            } else {
+                                availableCount++;
+                            }
+
+                            if (modelData.last_request) {
+                                const lastReq = new Date(modelData.last_request);
+                                if (!lastActivity || lastReq > lastActivity) {
+                                    lastActivity = lastReq;
+                                }
+                            }
+                        }
+                    }
+
+                    const usagePercentage = totalKeys > 0 ? (totalRequests / (totalKeys * (providerData[Object.keys(providerData)[0]]?.daily_limit_per_model || 5))) * 100 : 0;
+                    const lastActivityStr = lastActivity ? lastActivity.toLocaleString() : 'No activity';
+
+                    html += `
+                        <tr>
+                            <td><div class="model-name">${model}</div></td>
+                            <td>
+                                <div class="key-status">
+                                    <span class="key-indicator key-available">${availableCount} available</span>
+                                    ${exhaustedCount > 0 ? `<span class="key-indicator key-exhausted">${exhaustedCount} exhausted</span>` : ''}
+                                    ${invalidCount > 0 ? `<span class="key-indicator key-invalid">${invalidCount} invalid</span>` : ''}
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display: flex; align-items: center;">
+                                    <div class="usage-bar">
+                                        <div class="usage-fill" style="width: ${Math.min(usagePercentage, 100)}%"></div>
+                                    </div>
+                                    <span class="usage-text">${totalRequests} reqs, ${totalTokens} tokens</span>
+                                </div>
+                            </td>
+                            <td>${lastActivityStr}</td>
+                        </tr>
+                    `;
+                }
+
+                html += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        async function refreshData() {
+            const data = await fetchStats();
+            if (data) {
+                renderProviders(data);
+            }
+            updateResetTime();
+        }
+
+        // Initial load
+        refreshData();
+
+        // Set up auto-refresh
+        refreshInterval = setInterval(refreshData, 30000);
+
+        // Update reset time every minute
+        setInterval(updateResetTime, 60000);
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
