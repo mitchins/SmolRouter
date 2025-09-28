@@ -133,6 +133,8 @@ class ModelMediator:
                     await model_load_balancer.start_request(instance)
                     # Store instance for completion tracking
                     self._active_lb_instance = instance
+                    # Store the selected instance name for request mutation
+                    model._lb_selected_instance = instance.model_id
                     return model
 
         # Step 3: Fall back to strategy resolution (single model or no load balancing needed)
@@ -332,6 +334,16 @@ class ModelMediator:
                     404,
                     "none",
                 )
+
+            # Check if load balancer selected a specific instance and mutate request
+            if hasattr(resolved_model, "_lb_selected_instance"):
+                # Update the request payload to use the selected instance name
+                if "model" in request_payload:
+                    original_model = request_payload["model"]
+                    request_payload["model"] = resolved_model._lb_selected_instance
+                    logger.info(
+                        f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
+                    )
 
             # Get the provider for this model
             provider = await self._get_provider_by_id(resolved_model.provider_id)
