@@ -1674,6 +1674,33 @@ async def api_upstreams():
             # Get cache stats
             cache_stats = stats.get("aggregation", {}).get("cache_stats", {})
 
+            # Get load balancer stats
+            load_balancer_data = {}
+            try:
+                from smolrouter.load_balancer import model_load_balancer
+
+                lb_stats = model_load_balancer.get_stats()
+                lb_model_groups = model_load_balancer.get_model_groups()
+                lb_host_stats = model_load_balancer.get_host_stats()
+
+                load_balancer_data = {
+                    "enabled": True,
+                    "distribution_strategy": model_load_balancer.default_distribution_strategy.value,
+                    "total_requests": lb_stats.get("total_requests", 0),
+                    "success_rate": lb_stats.get("success_rate", 0),
+                    "model_groups": lb_model_groups,
+                    "host_stats": lb_host_stats,
+                    "instances_by_model": lb_stats.get("instances", {}),
+                    "summary": {
+                        "total_model_groups": len(lb_model_groups),
+                        "total_instances": sum(len(instances) for instances in lb_model_groups.values()),
+                        "active_hosts": len(lb_host_stats),
+                    },
+                }
+            except Exception as e:
+                logger.error(f"Failed to get load balancer stats: {e}")
+                load_balancer_data = {"enabled": False, "error": str(e)}
+
             return {
                 "upstreams": upstreams,
                 "summary": {
@@ -1684,6 +1711,7 @@ async def api_upstreams():
                     "cache_entries": cache_stats.get("total_entries", 0),
                 },
                 "cache_stats": cache_stats,
+                "load_balancer": load_balancer_data,
             }
 
         except Exception as e:
@@ -1716,19 +1744,11 @@ async def api_upstreams():
     }
 
 
-@app.get("/upstreams", response_class=HTMLResponse)
-async def upstreams_dashboard(request: Request):
-    """Web UI for viewing upstream providers and their models"""
-    # Check WebUI access security
-    get_webui_security().check_webui_access(request)
-
-    try:
-        return templates.TemplateResponse(
-            request, "upstreams.html", {"title": "Upstream Providers", "current_page": "upstreams"}
-        )
-    except Exception as e:
-        logger.error(f"Error loading upstreams dashboard: {e}")
-        return HTMLResponse(content="<h1>Error loading upstreams dashboard</h1>", status_code=500)
+@app.get("/upstreams")
+async def upstreams_data():
+    """Synchronous API endpoint for upstream providers data"""
+    # Return the same data as the API endpoint
+    return await api_upstreams()
 
 
 @app.get("/google-genai", response_class=HTMLResponse)
