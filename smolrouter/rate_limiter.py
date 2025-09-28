@@ -18,7 +18,6 @@ import os
 import time
 import logging
 from collections import deque
-from typing import Optional
 
 logger = logging.getLogger("model-rerouter")
 
@@ -26,18 +25,23 @@ logger = logging.getLogger("model-rerouter")
 GOOGLE_GENAI_MAX_CONCURRENT = int(os.getenv("GOOGLE_GENAI_MAX_CONCURRENT", "3"))
 GOOGLE_GENAI_MAX_REQUESTS_PER_WINDOW = int(os.getenv("GOOGLE_GENAI_MAX_REQUESTS_PER_WINDOW", "12"))
 GOOGLE_GENAI_WINDOW_MINUTES = int(os.getenv("GOOGLE_GENAI_WINDOW_MINUTES", "4"))
-GOOGLE_GENAI_RATE_LIMITING_ENABLED = os.getenv("GOOGLE_GENAI_RATE_LIMITING_ENABLED", "true").lower() in ("true", "1", "yes")
+GOOGLE_GENAI_RATE_LIMITING_ENABLED = os.getenv("GOOGLE_GENAI_RATE_LIMITING_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 
 class GoogleGenAIRequestFunnel:
     """Thread-safe request funnel for Google GenAI API rate limiting"""
 
-    def __init__(self,
-                 max_concurrent: int = GOOGLE_GENAI_MAX_CONCURRENT,
-                 max_requests_per_window: int = GOOGLE_GENAI_MAX_REQUESTS_PER_WINDOW,
-                 window_minutes: int = GOOGLE_GENAI_WINDOW_MINUTES,
-                 enabled: bool = GOOGLE_GENAI_RATE_LIMITING_ENABLED):
-
+    def __init__(
+        self,
+        max_concurrent: int = GOOGLE_GENAI_MAX_CONCURRENT,
+        max_requests_per_window: int = GOOGLE_GENAI_MAX_REQUESTS_PER_WINDOW,
+        window_minutes: int = GOOGLE_GENAI_WINDOW_MINUTES,
+        enabled: bool = GOOGLE_GENAI_RATE_LIMITING_ENABLED,
+    ):
         self.enabled = enabled
         if not self.enabled:
             logger.info("Google GenAI rate limiting is DISABLED")
@@ -59,8 +63,10 @@ class GoogleGenAIRequestFunnel:
         self._total_requests = 0
         self._total_waits = 0
 
-        logger.info(f"Google GenAI request funnel initialized: {max_concurrent} concurrent, "
-                   f"{max_requests_per_window} requests per {window_minutes}min window")
+        logger.info(
+            f"Google GenAI request funnel initialized: {max_concurrent} concurrent, "
+            f"{max_requests_per_window} requests per {window_minutes}min window"
+        )
 
     async def acquire_slot(self) -> None:
         """
@@ -98,8 +104,7 @@ class GoogleGenAIRequestFunnel:
                 now = time.time()
 
                 # Remove old timestamps outside window
-                while (self._request_timestamps and
-                       now - self._request_timestamps[0] > self._window_seconds):
+                while self._request_timestamps and now - self._request_timestamps[0] > self._window_seconds:
                     self._request_timestamps.popleft()
 
                 # Check if we can make a new request
@@ -114,8 +119,10 @@ class GoogleGenAIRequestFunnel:
                 self._total_waits += 1
 
                 if self._total_waits % 10 == 0:  # Log every 10th wait to avoid spam
-                    logger.info(f"Google GenAI rate limit: waiting {wait_time:.1f}s for rolling window slot "
-                              f"({len(self._request_timestamps)}/{self._max_requests_per_window} used)")
+                    logger.info(
+                        f"Google GenAI rate limit: waiting {wait_time:.1f}s for rolling window slot "
+                        f"({len(self._request_timestamps)}/{self._max_requests_per_window} used)"
+                    )
 
             # Wait outside the lock to avoid blocking other coroutines
             if wait_time > 0:
@@ -133,8 +140,11 @@ class GoogleGenAIRequestFunnel:
             "total_requests": self._total_requests,
             "total_waits": self._total_waits,
             "window_usage": f"{len(self._request_timestamps)}/{self._max_requests_per_window}",
-            "window_remaining_seconds": self._window_seconds - (time.time() - self._request_timestamps[0]) if self._request_timestamps else 0
+            "window_remaining_seconds": self._window_seconds - (time.time() - self._request_timestamps[0])
+            if self._request_timestamps
+            else 0,
         }
+
 
 # Global instance - shared across all Google GenAI providers
 google_genai_funnel = GoogleGenAIRequestFunnel()

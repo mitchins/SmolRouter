@@ -3,9 +3,9 @@ SmolRouter main entry point - allows running as module with: python -m smolroute
 """
 
 import os
-import sys
 import uvicorn
 from smolrouter.app import app
+
 
 def main():
     """Main entry point for SmolRouter"""
@@ -15,12 +15,8 @@ def main():
     reload = os.getenv("RELOAD", "false").lower() in ("true", "1", "yes")
 
     # Run the server
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-        reload=reload
-    )
+    uvicorn.run(app, host=host, port=port, reload=reload)
+
 
 if __name__ == "__main__":
     main()

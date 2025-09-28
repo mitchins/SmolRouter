@@ -8,9 +8,8 @@ with intelligent rotation based on requests-per-day (RPD) quotas.
 import logging
 import json
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
-from urllib.parse import urljoin
 from dataclasses import dataclass, field
 import pytz
 
@@ -18,7 +17,7 @@ import google.generativeai as genai
 from google.generativeai.types import GenerateContentResponse
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 
-from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ClientContext
+from .interfaces import IModelProvider, ModelInfo, ProviderConfig
 from .database import ApiKeyQuota
 from .rate_limiter import google_genai_funnel
 
@@ -28,6 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ApiKeyModelStats:
     """Statistics for a single API key + model combination"""
+
     api_key: str
     model: str
     requests_today: int = 0
@@ -45,20 +45,28 @@ class ApiKeyModelStats:
 
     def is_day_reset_needed(self) -> bool:
         """Check if we need to reset daily counters (Pacific timezone reset)"""
-        pacific_tz = pytz.timezone('US/Pacific')
+        pacific_tz = pytz.timezone("US/Pacific")
         now_pacific = datetime.now(pacific_tz)
         now_date = now_pacific.date()
 
         # Check against last request time
         if self.last_request:
-            last_request_pacific = self.last_request.replace(tzinfo=pacific_tz) if self.last_request.tzinfo is None else self.last_request.astimezone(pacific_tz)
+            last_request_pacific = (
+                self.last_request.replace(tzinfo=pacific_tz)
+                if self.last_request.tzinfo is None
+                else self.last_request.astimezone(pacific_tz)
+            )
             last_request_date = last_request_pacific.date()
             if now_date > last_request_date:
                 return True
 
         # Also check against quota exhaustion time (important for 429 recovery)
         if self.quota_exhausted_at:
-            exhausted_pacific = self.quota_exhausted_at.replace(tzinfo=pacific_tz) if self.quota_exhausted_at.tzinfo is None else self.quota_exhausted_at.astimezone(pacific_tz)
+            exhausted_pacific = (
+                self.quota_exhausted_at.replace(tzinfo=pacific_tz)
+                if self.quota_exhausted_at.tzinfo is None
+                else self.quota_exhausted_at.astimezone(pacific_tz)
+            )
             exhausted_date = exhausted_pacific.date()
             if now_date > exhausted_date:
                 return True
@@ -77,6 +85,7 @@ class ApiKeyModelStats:
 @dataclass
 class GoogleGenAIConfig(ProviderConfig):
     """Extended configuration for Google GenAI provider"""
+
     api_keys: List[str] = field(default_factory=list)
     api_keys_file: Optional[str] = None  # Path to file containing API keys
     max_requests_per_day: int = 1500  # Free tier limit
@@ -84,14 +93,14 @@ class GoogleGenAIConfig(ProviderConfig):
 
     def __init__(self, **kwargs):
         # Extract Google-specific fields before calling parent
-        self.api_keys = kwargs.pop('api_keys', [])
-        self.api_keys_file = kwargs.pop('api_keys_file', None)
-        self.max_requests_per_day = kwargs.pop('max_requests_per_day', 1500)
-        self.max_tokens_per_minute = kwargs.pop('max_tokens_per_minute', 32000)
+        self.api_keys = kwargs.pop("api_keys", [])
+        self.api_keys_file = kwargs.pop("api_keys_file", None)
+        self.max_requests_per_day = kwargs.pop("max_requests_per_day", 1500)
+        self.max_tokens_per_minute = kwargs.pop("max_tokens_per_minute", 32000)
 
         # Set required fields for base class
-        if 'url' not in kwargs:
-            kwargs['url'] = 'https://generativelanguage.googleapis.com'
+        if "url" not in kwargs:
+            kwargs["url"] = "https://generativelanguage.googleapis.com"
 
         # Call parent constructor
         super().__init__(**kwargs)
@@ -104,8 +113,8 @@ class GoogleGenAIConfig(ProviderConfig):
         # Load API keys from file if specified
         if self.api_keys_file:
             try:
-                with open(self.api_keys_file, 'r') as f:
-                    file_keys = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                with open(self.api_keys_file, "r") as f:
+                    file_keys = [line.strip() for line in f if line.strip() and not line.startswith("#")]
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
@@ -125,7 +134,7 @@ class GoogleGenAIProvider(IModelProvider):
     def __init__(self, config: GoogleGenAIConfig):
         if not isinstance(config, GoogleGenAIConfig):
             # Convert regular ProviderConfig to GoogleGenAIConfig
-            if hasattr(config, 'api_keys'):
+            if hasattr(config, "api_keys"):
                 config = GoogleGenAIConfig(**config.__dict__)
             else:
                 raise ValueError("GoogleGenAIProvider requires GoogleGenAIConfig")
@@ -153,17 +162,14 @@ class GoogleGenAIProvider(IModelProvider):
 
     def _get_pacific_date(self) -> str:
         """Get current date in Pacific timezone as YYYY-MM-DD string"""
-        pacific_tz = pytz.timezone('US/Pacific')
-        return datetime.now(pacific_tz).date().strftime('%Y-%m-%d')
+        pacific_tz = pytz.timezone("US/Pacific")
+        return datetime.now(pacific_tz).date().strftime("%Y-%m-%d")
 
     def _get_quota_record(self, api_key: str, model_name: str) -> ApiKeyQuota:
         """Get or create quota record for an API key + model combination"""
         pacific_date = self._get_pacific_date()
         quota, created = ApiKeyQuota.get_or_create_quota(
-            api_key=api_key,
-            provider_name=self.config.name,
-            model_name=model_name,
-            pacific_date=pacific_date
+            api_key=api_key, provider_name=self.config.name, model_name=model_name, pacific_date=pacific_date
         )
         return quota
 
@@ -188,8 +194,8 @@ class GoogleGenAIProvider(IModelProvider):
                 continue
 
             # Check if quota should be reset due to date change (defensive check)
-            pacific_tz = pytz.timezone('US/Pacific')
-            pacific_date = datetime.now(pacific_tz).strftime('%Y-%m-%d')
+            pacific_tz = pytz.timezone("US/Pacific")
+            pacific_date = datetime.now(pacific_tz).strftime("%Y-%m-%d")
 
             # If the quota hasn't been reset today, consider it fresh
             actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
@@ -197,7 +203,9 @@ class GoogleGenAIProvider(IModelProvider):
             # Check if key has hit daily limit for this model (either by count or 429 response)
             if actual_requests_today >= self.config.max_requests_per_day:
                 exhausted_keys.append(key)
-                logger.debug(f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{self.config.max_requests_per_day}) reset_date={quota.last_reset_date} today={pacific_date}")
+                logger.debug(
+                    f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{self.config.max_requests_per_day}) reset_date={quota.last_reset_date} today={pacific_date}"
+                )
                 continue
 
             # Skip keys with too many recent errors for this model
@@ -208,16 +216,20 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Check for recent quota errors for this model (even if not at limit)
             # But skip this check if quota should have reset today
-            if quota.last_error and self._is_quota_exhausted_error(quota.last_error) and quota.last_reset_date == pacific_date:
+            if (
+                quota.last_error
+                and self._is_quota_exhausted_error(quota.last_error)
+                and quota.last_reset_date == pacific_date
+            ):
                 # If the error was recent (within last hour) AND the quota hasn't reset, be cautious
                 if quota.quota_exhausted_at:
                     # quota_exhausted_at could be datetime object or string from database
-                    pacific_tz = pytz.timezone('US/Pacific')
+                    pacific_tz = pytz.timezone("US/Pacific")
 
                     if isinstance(quota.quota_exhausted_at, str):
                         # Parse datetime string from database
                         try:
-                            quota_exhausted_dt = datetime.fromisoformat(quota.quota_exhausted_at.replace('Z', '+00:00'))
+                            quota_exhausted_dt = datetime.fromisoformat(quota.quota_exhausted_at.replace("Z", "+00:00"))
                             if quota_exhausted_dt.tzinfo is None:
                                 quota_exhausted_pacific = pytz.utc.localize(quota_exhausted_dt).astimezone(pacific_tz)
                             else:
@@ -246,7 +258,7 @@ class GoogleGenAIProvider(IModelProvider):
             logger.error(f"   - Error-prone: {len(error_prone_keys)} keys")
 
             # Calculate seconds until quota reset (midnight Pacific time)
-            pacific_tz = pytz.timezone('US/Pacific')
+            pacific_tz = pytz.timezone("US/Pacific")
             now_pacific = datetime.now(pacific_tz)
             tomorrow_pacific = (now_pacific + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             seconds_until_reset = int((tomorrow_pacific - now_pacific).total_seconds())
@@ -255,13 +267,11 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Raise a specific exception that the container can catch and convert to 429
             from google.api_core.exceptions import ResourceExhausted
+
             raise ResourceExhausted(
                 f"All {total_keys} API keys exhausted for model {model_name}. "
                 f"Quota resets in {seconds_until_reset} seconds at midnight Pacific time.",
-                errors=[{
-                    'reason': 'QUOTA_EXHAUSTED',
-                    'retry_after_seconds': seconds_until_reset
-                }]
+                errors=[{"reason": "QUOTA_EXHAUSTED", "retry_after_seconds": seconds_until_reset}],
             )
 
         # Sort by request count, then by key name for consistent ordering
@@ -274,8 +284,10 @@ class GoogleGenAIProvider(IModelProvider):
         # Count how many keys have the same lowest usage
         equal_usage_count = sum(1 for _, count in available_keys if count == lowest_count)
 
-        logger.debug(f"Selected API key {best_key[:8]}... for {model_name} with {lowest_count} requests today "
-                    f"({equal_usage_count} keys at this usage level)")
+        logger.debug(
+            f"Selected API key {best_key[:8]}... for {model_name} with {lowest_count} requests today "
+            f"({equal_usage_count} keys at this usage level)"
+        )
 
         return best_key
 
@@ -287,15 +299,16 @@ class GoogleGenAIProvider(IModelProvider):
 
         if success:
             quota.mark_request_success(tokens=tokens)
-            logger.info(f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.config.max_requests_per_day} RPD, {tokens} tokens")
+            logger.info(
+                f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.config.max_requests_per_day} RPD, {tokens} tokens"
+            )
         else:
             # Check error type and handle appropriately
             if self._is_invalid_key_error(error):
                 # Mark invalid across all models for this key
                 key_hash = ApiKeyQuota.hash_api_key(api_key)
                 ApiKeyQuota.update(invalid_key=True).where(
-                    (ApiKeyQuota.api_key_hash == key_hash) &
-                    (ApiKeyQuota.provider_name == self.config.name)
+                    (ApiKeyQuota.api_key_hash == key_hash) & (ApiKeyQuota.provider_name == self.config.name)
                 ).execute()
                 logger.error(f"🚫 API key {api_key[:8]}... INVALID/EXPIRED: {error}")
 
@@ -303,7 +316,9 @@ class GoogleGenAIProvider(IModelProvider):
             elif self._is_quota_exhausted_error(error):
                 # Mark this key as exhausted for this model regardless of our internal counter
                 quota.mark_request_failure(error=error, quota_exhausted=True)
-                logger.error(f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted")
+                logger.error(
+                    f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted"
+                )
 
                 # Extract retry delay if available
                 retry_delay = self._extract_retry_delay(error)
@@ -320,9 +335,13 @@ class GoogleGenAIProvider(IModelProvider):
         # Log quota status if approaching limits for this model
         quota_percentage = (quota.requests_today / self.config.max_requests_per_day) * 100
         if quota_percentage >= 80:
-            logger.warning(f"API key {api_key[:8]}... / {model_name} approaching daily limit: {quota_percentage:.1f}% used ({quota.requests_today}/{self.config.max_requests_per_day})")
+            logger.warning(
+                f"API key {api_key[:8]}... / {model_name} approaching daily limit: {quota_percentage:.1f}% used ({quota.requests_today}/{self.config.max_requests_per_day})"
+            )
         elif quota_percentage >= 100:
-            logger.error(f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{self.config.max_requests_per_day}")
+            logger.error(
+                f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{self.config.max_requests_per_day}"
+            )
 
     def _is_invalid_key_error(self, error_msg: str) -> bool:
         """Check if error indicates invalid/expired API key"""
@@ -339,7 +358,7 @@ class GoogleGenAIProvider(IModelProvider):
             "forbidden",
             "invalid_argument",  # Often used for bad keys in Google APIs
             "credentials are missing or invalid",
-            "api key expired"
+            "api key expired",
         ]
         return any(indicator in error_lower for indicator in invalid_key_indicators)
 
@@ -356,7 +375,7 @@ class GoogleGenAIProvider(IModelProvider):
             "current quota",
             "quota.*exceeded",
             "requests per day",
-            "free_tier_requests"
+            "free_tier_requests",
         ]
 
         return any(indicator in error_lower for indicator in quota_indicators)
@@ -367,11 +386,12 @@ class GoogleGenAIProvider(IModelProvider):
             return None
 
         import re
+
         # Look for patterns like "retry in 20.915074628s" or "retryDelay': '20s'"
         patterns = [
-            r'retry in (\d+(?:\.\d+)?)s',
-            r'retryDelay.*?(\d+(?:\.\d+)?)s',
-            r'Please retry.*?(\d+(?:\.\d+)?).*?s'
+            r"retry in (\d+(?:\.\d+)?)s",
+            r"retryDelay.*?(\d+(?:\.\d+)?)s",
+            r"Please retry.*?(\d+(?:\.\d+)?).*?s",
         ]
 
         for pattern in patterns:
@@ -405,8 +425,7 @@ class GoogleGenAIProvider(IModelProvider):
     async def discover_models(self) -> List[ModelInfo]:
         """Discover available models from Google GenAI API or return static list"""
         # Check cache first
-        if (self._cached_models and self._cache_time and
-            datetime.now() - self._cache_time < self._cache_ttl):
+        if self._cached_models and self._cache_time and datetime.now() - self._cache_time < self._cache_ttl:
             return self._cached_models
 
         # Try to discover models using available API keys (live discovery)
@@ -417,8 +436,8 @@ class GoogleGenAIProvider(IModelProvider):
 
                 # List available models
                 for model in genai.list_models():
-                    if 'generateContent' in model.supported_generation_methods:
-                        model_name = model.name.split('/')[-1]  # Extract model name from full path
+                    if "generateContent" in model.supported_generation_methods:
+                        model_name = model.name.split("/")[-1]  # Extract model name from full path
 
                         # Create model info
                         model_info = ModelInfo(
@@ -429,13 +448,13 @@ class GoogleGenAIProvider(IModelProvider):
                             endpoint=self.get_endpoint(),
                             aliases=[model_name],
                             metadata={
-                                'full_name': model.name,
-                                'display_name': model.display_name,
-                                'description': getattr(model, 'description', ''),
-                                'supported_methods': model.supported_generation_methods,
-                                'input_token_limit': getattr(model, 'input_token_limit', None),
-                                'output_token_limit': getattr(model, 'output_token_limit', None)
-                            }
+                                "full_name": model.name,
+                                "display_name": model.display_name,
+                                "description": getattr(model, "description", ""),
+                                "supported_methods": model.supported_generation_methods,
+                                "input_token_limit": getattr(model, "input_token_limit", None),
+                                "output_token_limit": getattr(model, "output_token_limit", None),
+                            },
                         )
                         models.append(model_info)
                         logger.debug(f"Discovered Google GenAI model: {model_info.id}")
@@ -457,8 +476,6 @@ class GoogleGenAIProvider(IModelProvider):
 
     def _get_static_google_genai_models(self) -> List[ModelInfo]:
         """Return static list of Google GenAI models from JSON file"""
-        import json
-        import os
         from pathlib import Path
 
         try:
@@ -470,19 +487,19 @@ class GoogleGenAIProvider(IModelProvider):
                 logger.error(f"Static Google GenAI models file not found: {models_file}")
                 return []
 
-            with open(models_file, 'r') as f:
+            with open(models_file, "r") as f:
                 data = json.load(f)
 
             models = []
-            for model_data in data.get('models', []):
+            for model_data in data.get("models", []):
                 # Only include models that support text generation
-                supported_methods = model_data.get('supportedGenerationMethods', [])
-                if 'generateContent' not in supported_methods:
+                supported_methods = model_data.get("supportedGenerationMethods", [])
+                if "generateContent" not in supported_methods:
                     continue  # Skip embedding and other non-text generation models
 
                 # Extract model name from full path (models/model-name -> model-name)
-                full_name = model_data.get('name', '')
-                model_name = full_name.split('/')[-1] if '/' in full_name else full_name
+                full_name = model_data.get("name", "")
+                model_name = full_name.split("/")[-1] if "/" in full_name else full_name
 
                 # Create model info
                 model_info = ModelInfo(
@@ -493,19 +510,19 @@ class GoogleGenAIProvider(IModelProvider):
                     endpoint=self.get_endpoint(),
                     aliases=[model_name],
                     metadata={
-                        'full_name': full_name,
-                        'display_name': model_data.get('displayName', model_name),
-                        'description': model_data.get('description', ''),
-                        'supported_methods': supported_methods,
-                        'input_token_limit': model_data.get('inputTokenLimit'),
-                        'output_token_limit': model_data.get('outputTokenLimit'),
-                        'version': model_data.get('version'),
-                        'temperature': model_data.get('temperature'),
-                        'top_p': model_data.get('topP'),
-                        'top_k': model_data.get('topK'),
-                        'max_temperature': model_data.get('maxTemperature'),
-                        'thinking': model_data.get('thinking', False)
-                    }
+                        "full_name": full_name,
+                        "display_name": model_data.get("displayName", model_name),
+                        "description": model_data.get("description", ""),
+                        "supported_methods": supported_methods,
+                        "input_token_limit": model_data.get("inputTokenLimit"),
+                        "output_token_limit": model_data.get("outputTokenLimit"),
+                        "version": model_data.get("version"),
+                        "temperature": model_data.get("temperature"),
+                        "top_p": model_data.get("topP"),
+                        "top_k": model_data.get("topK"),
+                        "max_temperature": model_data.get("maxTemperature"),
+                        "thinking": model_data.get("thinking", False),
+                    },
                 )
                 models.append(model_info)
                 logger.debug(f"Static Google GenAI model: {model_info.id}")
@@ -519,84 +536,75 @@ class GoogleGenAIProvider(IModelProvider):
 
     def _convert_openai_to_genai_request(self, openai_request: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Convert OpenAI request format to Google GenAI format"""
-        model_name = self._normalize_model_name(openai_request.get('model', ''))
+        model_name = self._normalize_model_name(openai_request.get("model", ""))
 
         # Extract messages
-        messages = openai_request.get('messages', [])
+        messages = openai_request.get("messages", [])
         if not messages:
             raise ValueError("No messages provided in request")
 
         # Convert messages to Google GenAI format
         contents = []
         for message in messages:
-            role = message.get('role', 'user')
-            content = message.get('content', '')
+            role = message.get("role", "user")
+            content = message.get("content", "")
 
             # Map OpenAI roles to Google GenAI roles
-            if role == 'system':
+            if role == "system":
                 # System messages can be added as user messages with special formatting
-                contents.append({'role': 'user', 'parts': [{'text': f"System: {content}"}]})
-            elif role == 'assistant':
-                contents.append({'role': 'model', 'parts': [{'text': content}]})
+                contents.append({"role": "user", "parts": [{"text": f"System: {content}"}]})
+            elif role == "assistant":
+                contents.append({"role": "model", "parts": [{"text": content}]})
             else:  # user
-                contents.append({'role': 'user', 'parts': [{'text': content}]})
+                contents.append({"role": "user", "parts": [{"text": content}]})
 
         # Build generation config
         generation_config = {}
 
         # Map common parameters
-        if 'temperature' in openai_request:
-            generation_config['temperature'] = openai_request['temperature']
-        if 'max_tokens' in openai_request:
-            generation_config['max_output_tokens'] = openai_request['max_tokens']
-        if 'top_p' in openai_request:
-            generation_config['top_p'] = openai_request['top_p']
+        if "temperature" in openai_request:
+            generation_config["temperature"] = openai_request["temperature"]
+        if "max_tokens" in openai_request:
+            generation_config["max_output_tokens"] = openai_request["max_tokens"]
+        if "top_p" in openai_request:
+            generation_config["top_p"] = openai_request["top_p"]
 
         # Google GenAI doesn't support streaming in the same way, so we'll handle that separately
-        genai_request = {
-            'contents': contents,
-            'generation_config': generation_config
-        }
+        genai_request = {"contents": contents, "generation_config": generation_config}
 
         return model_name, genai_request
 
-    def _convert_genai_to_openai_response(self, genai_response: GenerateContentResponse,
-                                        original_model: str) -> Dict[str, Any]:
+    def _convert_genai_to_openai_response(
+        self, genai_response: GenerateContentResponse, original_model: str
+    ) -> Dict[str, Any]:
         """Convert Google GenAI response to OpenAI format"""
         try:
             # Extract text content
             text_content = ""
             if genai_response.candidates:
                 for part in genai_response.candidates[0].content.parts:
-                    if hasattr(part, 'text'):
+                    if hasattr(part, "text"):
                         text_content += part.text
 
             # Extract usage information
             usage = {}
-            if hasattr(genai_response, 'usage_metadata') and genai_response.usage_metadata:
+            if hasattr(genai_response, "usage_metadata") and genai_response.usage_metadata:
                 usage = {
-                    'prompt_tokens': getattr(genai_response.usage_metadata, 'prompt_token_count', 0),
-                    'completion_tokens': getattr(genai_response.usage_metadata, 'candidates_token_count', 0),
-                    'total_tokens': getattr(genai_response.usage_metadata, 'total_token_count', 0)
+                    "prompt_tokens": getattr(genai_response.usage_metadata, "prompt_token_count", 0),
+                    "completion_tokens": getattr(genai_response.usage_metadata, "candidates_token_count", 0),
+                    "total_tokens": getattr(genai_response.usage_metadata, "total_token_count", 0),
                 }
 
             # Build OpenAI-compatible response
             openai_response = {
-                'id': f"chatcmpl-{datetime.now().timestamp()}",
-                'object': 'chat.completion',
-                'created': int(datetime.now().timestamp()),
-                'model': original_model,
-                'choices': [
-                    {
-                        'index': 0,
-                        'message': {
-                            'role': 'assistant',
-                            'content': text_content
-                        },
-                        'finish_reason': 'stop'
-                    }
+                "id": f"chatcmpl-{datetime.now().timestamp()}",
+                "object": "chat.completion",
+                "created": int(datetime.now().timestamp()),
+                "model": original_model,
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": text_content}, "finish_reason": "stop"}
                 ],
-                'usage': usage
+                "usage": usage,
             }
 
             return openai_response
@@ -607,7 +615,7 @@ class GoogleGenAIProvider(IModelProvider):
 
     async def generate_completion(self, openai_request: Dict[str, Any]) -> Dict[str, Any]:
         """Generate completion using Google GenAI API"""
-        original_model = openai_request.get('model', '')
+        original_model = openai_request.get("model", "")
 
         try:
             # Convert request format
@@ -627,8 +635,8 @@ class GoogleGenAIProvider(IModelProvider):
                 # Generate content
                 response = await asyncio.to_thread(
                     model.generate_content,
-                    genai_request['contents'],
-                    generation_config=genai_request['generation_config']
+                    genai_request["contents"],
+                    generation_config=genai_request["generation_config"],
                 )
             finally:
                 # Always release slot, even on error
@@ -638,7 +646,7 @@ class GoogleGenAIProvider(IModelProvider):
             openai_response = self._convert_genai_to_openai_response(response, original_model)
 
             # Update API key statistics
-            tokens_used = openai_response.get('usage', {}).get('total_tokens', 0)
+            tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
             self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
 
             return openai_response
@@ -646,15 +654,15 @@ class GoogleGenAIProvider(IModelProvider):
         except ResourceExhausted as e:
             error_msg = f"Google GenAI quota exhausted: {e}"
             # Don't update stats if this is our own "all keys exhausted" exception
-            if 'api_key' in locals() and 'model_name' in locals():
+            if "api_key" in locals() and "model_name" in locals():
                 self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
 
             # Check if this ResourceExhausted has retry timing info
             retry_after_seconds = None
-            if hasattr(e, 'errors') and e.errors:
+            if hasattr(e, "errors") and e.errors:
                 for error_detail in e.errors:
-                    if isinstance(error_detail, dict) and 'retry_after_seconds' in error_detail:
-                        retry_after_seconds = error_detail['retry_after_seconds']
+                    if isinstance(error_detail, dict) and "retry_after_seconds" in error_detail:
+                        retry_after_seconds = error_detail["retry_after_seconds"]
                         break
 
             # Create a custom exception that the container can handle with proper HTTP response
@@ -671,7 +679,7 @@ class GoogleGenAIProvider(IModelProvider):
             raise Exception(error_msg)
         except Exception as e:
             error_msg = f"Google GenAI error: {e}"
-            if 'api_key' in locals() and 'model_name' in locals():
+            if "api_key" in locals() and "model_name" in locals():
                 self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
             raise Exception(error_msg)
 
@@ -680,9 +688,7 @@ class GoogleGenAIProvider(IModelProvider):
         stats = {}
 
         # Get all quota records for this provider
-        quotas = ApiKeyQuota.select().where(
-            ApiKeyQuota.provider_name == self.config.name
-        )
+        quotas = ApiKeyQuota.select().where(ApiKeyQuota.provider_name == self.config.name)
 
         # Group stats by API key
         for quota in quotas:
@@ -692,32 +698,42 @@ class GoogleGenAIProvider(IModelProvider):
 
             if key_display not in stats:
                 stats[key_display] = {
-                    'models': {},
-                    'total_requests_today': 0,
-                    'total_tokens_today': 0,
-                    'total_errors': 0,
-                    'daily_limit_per_model': self.config.max_requests_per_day
+                    "models": {},
+                    "total_requests_today": 0,
+                    "total_tokens_today": 0,
+                    "total_errors": 0,
+                    "daily_limit_per_model": self.config.max_requests_per_day,
                 }
 
             quota_percentage = (quota.requests_today / self.config.max_requests_per_day) * 100
-            is_exhausted = quota.requests_today >= self.config.max_requests_per_day or quota.quota_exhausted_at is not None
+            is_exhausted = (
+                quota.requests_today >= self.config.max_requests_per_day or quota.quota_exhausted_at is not None
+            )
 
-            stats[key_display]['models'][model] = {
-                'requests_today': quota.requests_today,
-                'tokens_today': quota.tokens_today,
-                'error_count': quota.error_count,
-                'last_request': quota.updated_at.isoformat() if quota.updated_at and hasattr(quota.updated_at, 'isoformat') else str(quota.updated_at) if quota.updated_at else None,
-                'last_error': quota.last_error,
-                'quota_percentage': quota_percentage,
-                'quota_exhausted': is_exhausted,
-                'quota_exhausted_at': quota.quota_exhausted_at.isoformat() if quota.quota_exhausted_at and hasattr(quota.quota_exhausted_at, 'isoformat') else str(quota.quota_exhausted_at) if quota.quota_exhausted_at else None,
-                'status': 'invalid' if quota.invalid_key else ('exhausted' if is_exhausted else 'available')
+            stats[key_display]["models"][model] = {
+                "requests_today": quota.requests_today,
+                "tokens_today": quota.tokens_today,
+                "error_count": quota.error_count,
+                "last_request": quota.updated_at.isoformat()
+                if quota.updated_at and hasattr(quota.updated_at, "isoformat")
+                else str(quota.updated_at)
+                if quota.updated_at
+                else None,
+                "last_error": quota.last_error,
+                "quota_percentage": quota_percentage,
+                "quota_exhausted": is_exhausted,
+                "quota_exhausted_at": quota.quota_exhausted_at.isoformat()
+                if quota.quota_exhausted_at and hasattr(quota.quota_exhausted_at, "isoformat")
+                else str(quota.quota_exhausted_at)
+                if quota.quota_exhausted_at
+                else None,
+                "status": "invalid" if quota.invalid_key else ("exhausted" if is_exhausted else "available"),
             }
 
             # Aggregate totals for this API key
-            stats[key_display]['total_requests_today'] += quota.requests_today
-            stats[key_display]['total_tokens_today'] += quota.tokens_today
-            stats[key_display]['total_errors'] += quota.error_count
+            stats[key_display]["total_requests_today"] += quota.requests_today
+            stats[key_display]["total_tokens_today"] += quota.tokens_today
+            stats[key_display]["total_errors"] += quota.error_count
 
         # Add unused API keys (those not yet used with any model)
         # This ensures we show total capacity, not just used keys
@@ -730,14 +746,14 @@ class GoogleGenAIProvider(IModelProvider):
             if key_hash not in used_key_hashes:
                 key_display = f"{key_hash[:8]}..."
                 stats[key_display] = {
-                    'models': {},
-                    'total_requests_today': 0,
-                    'total_tokens_today': 0,
-                    'total_errors': 0,
-                    'daily_limit_per_model': self.config.max_requests_per_day
+                    "models": {},
+                    "total_requests_today": 0,
+                    "total_tokens_today": 0,
+                    "total_errors": 0,
+                    "daily_limit_per_model": self.config.max_requests_per_day,
                 }
 
         # Add rate limiter statistics
-        stats['_rate_limiter'] = google_genai_funnel.stats
+        stats["_rate_limiter"] = google_genai_funnel.stats
 
         return stats

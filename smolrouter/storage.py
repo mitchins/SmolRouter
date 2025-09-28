@@ -91,7 +91,7 @@ class FilesystemBlobStorage(BlobStorage):
                 logger.warning(f"Total storage limit exceeded, running cleanup before storing blob {key}")
                 self._cleanup_for_space(len(data))
 
-            with open(blob_path, 'wb') as f:
+            with open(blob_path, "wb") as f:
                 f.write(data)
             logger.debug(f"Stored blob {key} ({len(data)} bytes)")
         else:
@@ -108,7 +108,7 @@ class FilesystemBlobStorage(BlobStorage):
 
         try:
             if blob_path.exists():
-                with open(blob_path, 'rb') as f:
+                with open(blob_path, "rb") as f:
                     data = f.read()
                 logger.debug(f"Retrieved blob {key} ({len(data)} bytes)")
                 return data
@@ -121,9 +121,9 @@ class FilesystemBlobStorage(BlobStorage):
         """Delete data by key"""
         if not key:
             return False
-        
+
         blob_path = self._get_blob_path(key, record_id)
-        
+
         try:
             if blob_path.exists():
                 blob_path.unlink()
@@ -131,22 +131,22 @@ class FilesystemBlobStorage(BlobStorage):
                 return True
         except Exception as e:
             logger.error(f"Failed to delete blob {key}: {e}")
-        
+
         return False
-    
+
     def exists(self, key: str, record_id: Optional[int] = None) -> bool:
         """Check if key exists"""
         if not key:
             return False
         return self._get_blob_path(key, record_id).exists()
-    
+
     def cleanup_old(self, max_age_days: int) -> int:
         """Remove blobs older than max_age_days"""
         import time
-        
+
         cutoff_time = time.time() - (max_age_days * 24 * 60 * 60)
         deleted_count = 0
-        
+
         try:
             for blob_file in self.base_path.rglob("*.blob"):
                 if blob_file.stat().st_mtime < cutoff_time:
@@ -155,7 +155,7 @@ class FilesystemBlobStorage(BlobStorage):
                         deleted_count += 1
                     except Exception as e:
                         logger.error(f"Failed to delete old blob {blob_file}: {e}")
-            
+
             # Clean up empty subdirectories
             for subdir in self.base_path.iterdir():
                 if subdir.is_dir() and not any(subdir.iterdir()):
@@ -163,15 +163,15 @@ class FilesystemBlobStorage(BlobStorage):
                         subdir.rmdir()
                     except Exception:
                         pass  # Ignore errors removing empty dirs
-            
+
             if deleted_count > 0:
                 logger.info(f"Cleaned up {deleted_count} old blob files")
-                
+
         except Exception as e:
             logger.error(f"Failed to cleanup old blobs: {e}")
-        
+
         return deleted_count
-    
+
     def _check_storage_limit(self, additional_bytes: int) -> bool:
         """Check if adding additional_bytes would exceed storage limit"""
         try:
@@ -180,7 +180,7 @@ class FilesystemBlobStorage(BlobStorage):
         except Exception as e:
             logger.error(f"Failed to check storage limit: {e}")
             return True  # Allow storage if we can't check
-    
+
     def _cleanup_for_space(self, needed_bytes: int):
         """Remove oldest blobs to make space for needed_bytes"""
         try:
@@ -192,43 +192,44 @@ class FilesystemBlobStorage(BlobStorage):
                     blob_files.append((blob_file, stat.st_mtime, stat.st_size))
                 except Exception:
                     continue
-            
+
             # Sort by modification time (oldest first)
             blob_files.sort(key=lambda x: x[1])
-            
+
             freed_space = 0
             deleted_count = 0
-            
+
             for blob_file, mtime, size in blob_files:
                 try:
                     blob_file.unlink()
                     freed_space += size
                     deleted_count += 1
-                    
+
                     # Check if we've freed enough space
                     if freed_space >= needed_bytes:
                         break
-                        
+
                 except Exception as e:
                     logger.error(f"Failed to delete blob {blob_file}: {e}")
-            
+
             logger.info(f"Cleaned up {deleted_count} old blobs, freed {freed_space} bytes")
-            
+
         except Exception as e:
             logger.error(f"Failed to cleanup for space: {e}")
 
+
 class InMemoryBlobStorage(BlobStorage):
     """In-memory blob storage for testing/development"""
-    
+
     def __init__(self):
         self._storage: Dict[str, bytes] = {}
         self._timestamps: Dict[str, float] = {}
         logger.info("Initialized in-memory blob storage")
-    
+
     def _generate_key(self, data: bytes) -> str:
         """Generate a SHA256 hash key for the data"""
         return hashlib.sha256(data).hexdigest()
-    
+
     def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
         # content_type is accepted for API compatibility but not used here
@@ -251,76 +252,76 @@ class InMemoryBlobStorage(BlobStorage):
 
         self._storage[key] = data
         import time
+
         self._timestamps[key] = time.time()
 
         logger.debug(f"Stored blob {key} in memory ({len(data)} bytes)")
         return key
-    
+
     def retrieve(self, key: str, record_id: Optional[int] = None) -> Optional[bytes]:
         """Retrieve data by key"""
         if not key:
             return None
-        
+
         data = self._storage.get(key)
         if data:
             logger.debug(f"Retrieved blob {key} from memory ({len(data)} bytes)")
         return data
-    
+
     def delete(self, key: str, record_id: Optional[int] = None) -> bool:
         """Delete data by key"""
         if not key:
             return False
-        
+
         if key in self._storage:
             del self._storage[key]
             self._timestamps.pop(key, None)
             logger.debug(f"Deleted blob {key} from memory")
             return True
         return False
-    
+
     def exists(self, key: str, record_id: Optional[int] = None) -> bool:
         """Check if key exists"""
         return key in self._storage
-    
+
     def cleanup_old(self, max_age_days: int) -> int:
         """Remove blobs older than max_age_days"""
         import time
+
         cutoff_time = time.time() - (max_age_days * 24 * 60 * 60)
-        
-        old_keys = [
-            key for key, timestamp in self._timestamps.items()
-            if timestamp < cutoff_time
-        ]
-        
+
+        old_keys = [key for key, timestamp in self._timestamps.items() if timestamp < cutoff_time]
+
         for key in old_keys:
             self.delete(key)
-        
+
         if old_keys:
             logger.info(f"Cleaned up {len(old_keys)} old blob entries from memory")
-        
+
         return len(old_keys)
-    
+
     def _cleanup_for_space(self, needed_bytes: int):
         """Remove oldest blobs to make space for needed_bytes"""
-        
-        # Sort by timestamp (oldest first) 
+
+        # Sort by timestamp (oldest first)
         items_by_age = sorted(self._timestamps.items(), key=lambda x: x[1])
-        
+
         freed_space = 0
         deleted_count = 0
-        
+
         for key, timestamp in items_by_age:
             if key in self._storage:
                 blob_size = len(self._storage[key])
                 self.delete(key)
                 freed_space += blob_size
                 deleted_count += 1
-                
+
                 # Check if we've freed enough space
                 if freed_space >= needed_bytes:
                     break
-        
+
         logger.info(f"Cleaned up {deleted_count} old memory blobs, freed {freed_space} bytes")
+
 
 def create_blob_storage(storage_type: str = "filesystem", **kwargs) -> BlobStorage:
     """Factory function to create blob storage instances"""
@@ -331,8 +332,10 @@ def create_blob_storage(storage_type: str = "filesystem", **kwargs) -> BlobStora
     else:
         raise ValueError(f"Unknown storage type: {storage_type}")
 
+
 # Global blob storage instance
 _blob_storage: Optional[BlobStorage] = None
+
 
 def get_blob_storage() -> BlobStorage:
     """Get the global blob storage instance"""
@@ -342,6 +345,7 @@ def get_blob_storage() -> BlobStorage:
         storage_path = os.getenv("BLOB_STORAGE_PATH", "blob_storage")
         _blob_storage = create_blob_storage(storage_type, base_path=storage_path)
     return _blob_storage
+
 
 def init_blob_storage():
     """Initialize blob storage (called at startup)"""

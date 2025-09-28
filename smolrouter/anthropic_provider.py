@@ -9,19 +9,20 @@ Provides OpenAI-compatible access to Anthropic Claude models with:
 """
 
 import httpx
-import json
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from smolrouter.interfaces import IModelProvider, ProviderConfig, ModelInfo
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class AnthropicConfig(ProviderConfig):
     """Configuration for Anthropic provider"""
+
     api_keys: List[str] = None  # Will be initialized in __post_init__ if None
     api_keys_file: Optional[str] = None
     max_requests_per_day: Optional[int] = None  # Not used for rotation, just monitoring
@@ -35,22 +36,25 @@ class AnthropicConfig(ProviderConfig):
 
         if self.api_keys_file:
             try:
-                with open(self.api_keys_file, 'r') as f:
+                with open(self.api_keys_file, "r") as f:
                     file_keys = [line.strip() for line in f if line.strip()]
                     self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
                 logger.error(f"Failed to load API keys from {self.api_keys_file}: {e}")
 
+
 @dataclass
 class ModelStats:
     """Statistics for a single model"""
+
     model: str
     requests_today: int = 0
     tokens_today: int = 0
     last_request: Optional[datetime] = None
     last_error: Optional[str] = None
     error_count: int = 0
+
 
 class AnthropicProvider(IModelProvider):
     """Anthropic Claude provider with API key passthrough support"""
@@ -76,7 +80,7 @@ class AnthropicProvider(IModelProvider):
             "claude-3-haiku-20240307",
             "claude-2.1",
             "claude-2.0",
-            "claude-instant-1.2"
+            "claude-instant-1.2",
         ]
 
         return [
@@ -85,7 +89,7 @@ class AnthropicProvider(IModelProvider):
                 model_name=model,
                 aliases=[model],
                 provider_id=self.get_provider_id(),
-                endpoint=self.get_endpoint()
+                endpoint=self.get_endpoint(),
             )
             for model in models
         ]
@@ -105,7 +109,7 @@ class AnthropicProvider(IModelProvider):
     async def make_request(self, request_data: dict, client_headers: dict) -> dict:
         """Make request to Anthropic API with OpenAI compatibility"""
 
-        model = request_data.get('model', '')
+        model = request_data.get("model", "")
 
         # Get or create model stats
         if model not in self.model_stats:
@@ -121,18 +125,12 @@ class AnthropicProvider(IModelProvider):
         # Convert OpenAI format to Anthropic format
         anthropic_request = self._convert_openai_to_anthropic(request_data)
 
-        headers = {
-            'Content-Type': 'application/json',
-            'x-api-key': api_key,
-            'anthropic-version': '2023-06-01'
-        }
+        headers = {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"}
 
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 response = await client.post(
-                    'https://api.anthropic.com/v1/messages',
-                    headers=headers,
-                    json=anthropic_request
+                    "https://api.anthropic.com/v1/messages", headers=headers, json=anthropic_request
                 )
 
                 if response.status_code != 200:
@@ -148,9 +146,9 @@ class AnthropicProvider(IModelProvider):
                 stats.last_request = datetime.now()
 
                 # Extract token usage
-                if 'usage' in anthropic_response:
-                    input_tokens = anthropic_response['usage'].get('input_tokens', 0)
-                    output_tokens = anthropic_response['usage'].get('output_tokens', 0)
+                if "usage" in anthropic_response:
+                    input_tokens = anthropic_response["usage"].get("input_tokens", 0)
+                    output_tokens = anthropic_response["usage"].get("output_tokens", 0)
                     stats.tokens_today += input_tokens + output_tokens
 
                 # Convert Anthropic response to OpenAI format
@@ -165,9 +163,9 @@ class AnthropicProvider(IModelProvider):
         """Get API key from client headers or fallback to configured keys"""
 
         # Check for client-provided API key
-        auth_header = client_headers.get('authorization', '')
-        if auth_header.startswith('Bearer sk-ant-'):
-            return auth_header.replace('Bearer ', '')
+        auth_header = client_headers.get("authorization", "")
+        if auth_header.startswith("Bearer sk-ant-"):
+            return auth_header.replace("Bearer ", "")
 
         # Fallback to first configured key if available
         if self.config.api_keys:
@@ -178,34 +176,34 @@ class AnthropicProvider(IModelProvider):
     def _convert_openai_to_anthropic(self, openai_request: dict) -> dict:
         """Convert OpenAI format to Anthropic format"""
 
-        messages = openai_request.get('messages', [])
+        messages = openai_request.get("messages", [])
 
         # Extract system message if present
         system_message = None
         user_messages = []
 
         for msg in messages:
-            if msg.get('role') == 'system':
-                system_message = msg.get('content', '')
+            if msg.get("role") == "system":
+                system_message = msg.get("content", "")
             else:
                 user_messages.append(msg)
 
         anthropic_request = {
-            'model': openai_request.get('model', 'claude-3-sonnet-20240229'),
-            'messages': user_messages,
-            'max_tokens': openai_request.get('max_tokens', 1024)
+            "model": openai_request.get("model", "claude-3-sonnet-20240229"),
+            "messages": user_messages,
+            "max_tokens": openai_request.get("max_tokens", 1024),
         }
 
         # Add system message if present
         if system_message:
-            anthropic_request['system'] = system_message
+            anthropic_request["system"] = system_message
 
         # Map optional parameters
-        if 'temperature' in openai_request:
-            anthropic_request['temperature'] = openai_request['temperature']
+        if "temperature" in openai_request:
+            anthropic_request["temperature"] = openai_request["temperature"]
 
-        if 'top_p' in openai_request:
-            anthropic_request['top_p'] = openai_request['top_p']
+        if "top_p" in openai_request:
+            anthropic_request["top_p"] = openai_request["top_p"]
 
         return anthropic_request
 
@@ -214,41 +212,36 @@ class AnthropicProvider(IModelProvider):
 
         # Extract content from Anthropic response
         content = ""
-        if 'content' in anthropic_response and anthropic_response['content']:
+        if "content" in anthropic_response and anthropic_response["content"]:
             # Anthropic returns content as a list of content blocks
-            for block in anthropic_response['content']:
-                if block.get('type') == 'text':
-                    content += block.get('text', '')
+            for block in anthropic_response["content"]:
+                if block.get("type") == "text":
+                    content += block.get("text", "")
 
         # Determine finish reason
-        finish_reason = 'stop'
-        if anthropic_response.get('stop_reason') == 'max_tokens':
-            finish_reason = 'length'
-        elif anthropic_response.get('stop_reason') == 'stop_sequence':
-            finish_reason = 'stop'
+        finish_reason = "stop"
+        if anthropic_response.get("stop_reason") == "max_tokens":
+            finish_reason = "length"
+        elif anthropic_response.get("stop_reason") == "stop_sequence":
+            finish_reason = "stop"
 
         # Build OpenAI-compatible response
         openai_response = {
-            'id': f"chatcmpl-{int(time.time())}.{int(time.time() * 1000) % 1000:06d}",
-            'object': 'chat.completion',
-            'created': int(time.time()),
-            'model': model,
-            'choices': [{
-                'index': 0,
-                'message': {
-                    'role': 'assistant',
-                    'content': content
-                },
-                'finish_reason': finish_reason
-            }],
-            'usage': {
-                'prompt_tokens': anthropic_response.get('usage', {}).get('input_tokens', 0),
-                'completion_tokens': anthropic_response.get('usage', {}).get('output_tokens', 0),
-                'total_tokens': (
-                    anthropic_response.get('usage', {}).get('input_tokens', 0) +
-                    anthropic_response.get('usage', {}).get('output_tokens', 0)
-                )
-            }
+            "id": f"chatcmpl-{int(time.time())}.{int(time.time() * 1000) % 1000:06d}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": finish_reason}
+            ],
+            "usage": {
+                "prompt_tokens": anthropic_response.get("usage", {}).get("input_tokens", 0),
+                "completion_tokens": anthropic_response.get("usage", {}).get("output_tokens", 0),
+                "total_tokens": (
+                    anthropic_response.get("usage", {}).get("input_tokens", 0)
+                    + anthropic_response.get("usage", {}).get("output_tokens", 0)
+                ),
+            },
         }
 
         return openai_response
@@ -268,18 +261,18 @@ class AnthropicProvider(IModelProvider):
     def get_stats(self) -> dict:
         """Get provider statistics (simplified format)"""
         return {
-            'provider_type': 'anthropic',
-            'models': {
+            "provider_type": "anthropic",
+            "models": {
                 model: {
-                    'requests_today': stats.requests_today,
-                    'tokens_today': stats.tokens_today,
-                    'last_request': stats.last_request.isoformat() if stats.last_request else None,
-                    'last_error': stats.last_error,
-                    'error_count': stats.error_count
+                    "requests_today": stats.requests_today,
+                    "tokens_today": stats.tokens_today,
+                    "last_request": stats.last_request.isoformat() if stats.last_request else None,
+                    "last_error": stats.last_error,
+                    "error_count": stats.error_count,
                 }
                 for model, stats in self.model_stats.items()
             },
-            'total_configured_keys': len(self.config.api_keys)
+            "total_configured_keys": len(self.config.api_keys),
         }
 
     def get_api_key_stats(self) -> dict:
@@ -295,12 +288,12 @@ class AnthropicProvider(IModelProvider):
                         "last_request": model_stats.last_request.isoformat() if model_stats.last_request else None,
                         "last_error": model_stats.last_error,
                         "error_count": model_stats.error_count,
-                        "status": "error" if model_stats.error_count > 5 else "available"
+                        "status": "error" if model_stats.error_count > 5 else "available",
                     }
                     for model, model_stats in self.model_stats.items()
                 },
                 "total_configured_keys": len(self.config.api_keys),
-                "passthrough_mode": True  # Indicates this provider uses passthrough
+                "passthrough_mode": True,  # Indicates this provider uses passthrough
             }
         }
         return stats
