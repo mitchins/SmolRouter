@@ -1,7 +1,14 @@
 import pytest
 import httpx
 from httpx import AsyncClient
-from smolrouter.app import app, rewrite_model, strip_think_chain_from_text, strip_json_markdown_from_text, MODEL_MAP, validate_url
+from smolrouter.app import (
+    app,
+    rewrite_model,
+    strip_think_chain_from_text,
+    strip_json_markdown_from_text,
+    MODEL_MAP,
+    validate_url,
+)
 import json
 import respx
 
@@ -14,23 +21,20 @@ def load_mock_json(filename):
 @pytest.fixture
 def mock_openai_upstream():
     with respx.mock as respx_mock:
+        # Mock cloud OpenAI models at localhost:8000
         respx_mock.post("http://localhost:8000/v1/chat/completions").mock(
-            return_value=httpx.Response(
-                200,
-                json=load_mock_json("openai_chat_completion_non_streaming.json")
-            )
+            return_value=httpx.Response(200, json=load_mock_json("openai_chat_completion_non_streaming.json"))
         )
         respx_mock.post("http://localhost:8000/v1/completions").mock(
-            return_value=httpx.Response(
-                200,
-                json=load_mock_json("openai_completion_non_streaming.json")
-            )
+            return_value=httpx.Response(200, json=load_mock_json("openai_completion_non_streaming.json"))
         )
         respx_mock.get("http://localhost:8000/v1/models").mock(
-            return_value=httpx.Response(
-                200,
-                json=load_mock_json("openai_list_models.json")
-            )
+            return_value=httpx.Response(200, json=load_mock_json("openai_list_models.json"))
+        )
+
+        # Mock local LM Studio models at localhost:11434
+        respx_mock.get("http://localhost:11434/v1/models").mock(
+            return_value=httpx.Response(200, json=load_mock_json("lm_studio_list_models.json"))
         )
         yield respx_mock
 
@@ -39,10 +43,7 @@ def mock_openai_upstream():
 def mock_ollama_upstream():
     with respx.mock as respx_mock:
         respx_mock.get("http://localhost:11434/api/tags").mock(
-            return_value=httpx.Response(
-                200,
-                json=load_mock_json("ollama_list_models.json")
-            )
+            return_value=httpx.Response(200, json=load_mock_json("ollama_list_models.json"))
         )
         yield respx_mock
 
@@ -52,11 +53,7 @@ async def test_openai_chat_completions_non_streaming(mock_openai_upstream, disab
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/v1/chat/completions",
-            json={
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "stream": False
-            }
+            json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
         )
     assert response.status_code == 200
     data = response.json()
@@ -68,12 +65,7 @@ async def test_openai_chat_completions_non_streaming(mock_openai_upstream, disab
 async def test_openai_completions_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/v1/completions",
-            json={
-                "model": "text-davinci-003",
-                "prompt": "Hello",
-                "stream": False
-            }
+            "/v1/completions", json={"model": "text-davinci-003", "prompt": "Hello", "stream": False}
         )
     assert response.status_code == 200
     data = response.json()
@@ -85,12 +77,7 @@ async def test_openai_completions_non_streaming(mock_openai_upstream, disable_lo
 async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/generate",
-            json={
-                "model": "llama2",
-                "prompt": "Tell me a joke.",
-                "stream": False
-            }
+            "/api/generate", json={"model": "llama2", "prompt": "Tell me a joke.", "stream": False}
         )
     assert response.status_code == 200
     data = response.json()
@@ -104,12 +91,7 @@ async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_loggi
 async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/chat",
-            json={
-                "model": "mistral",
-                "messages": [{"role": "user", "content": "Hello"}],
-                "stream": False
-            }
+            "/api/chat", json={"model": "mistral", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
         )
     assert response.status_code == 200
     data = response.json()
@@ -164,17 +146,17 @@ def test_model_mapping_with_environment_variables():
     """Test that model mapping works with environment variable configuration"""
     # This tests the core model mapping logic without mocking the environment
     original_model_map = MODEL_MAP.copy()
-    
+
     # Test exact mapping
     MODEL_MAP.update({"gpt-4": "claude-3-opus", "gpt-3.5-turbo": "claude-3-sonnet"})
     assert rewrite_model("gpt-4") == "claude-3-opus"
     assert rewrite_model("gpt-3.5-turbo") == "claude-3-sonnet"
     assert rewrite_model("unmapped") == "unmapped"
-    
+
     # Test regex mapping
     MODEL_MAP.update({"/gpt-(.*)/": "claude-3-\\1"})
     assert rewrite_model("gpt-4o") == "claude-3-4o"
-    
+
     MODEL_MAP.clear()
     MODEL_MAP.update(original_model_map)
 
@@ -186,11 +168,11 @@ def test_think_chain_stripping_edge_cases():
     result = strip_think_chain_from_text(nested)
     assert "<think>" not in result
     assert "Text" in result and "end." in result
-    
+
     # Test empty content after stripping
     only_think = "<think>all content</think>"
     assert strip_think_chain_from_text(only_think) == ""
-    
+
     # Test malformed tags
     malformed = "Text <think>unclosed tag"
     assert strip_think_chain_from_text(malformed) == "Text <think>unclosed tag"
@@ -201,18 +183,18 @@ def test_url_validation():
     # Test normal URLs
     assert validate_url("http://localhost:8000", "TEST") == "http://localhost:8000"
     assert validate_url("https://api.openai.com", "TEST") == "https://api.openai.com"
-    
+
     # Test URLs without protocol
     assert validate_url("localhost:8000", "TEST") == "http://localhost:8000"
-    
+
     # Test double protocol (the original issue that caused the user's problem)
     assert validate_url("http://http://localhost:8000", "TEST") == "http://localhost:8000"
     assert validate_url("https://https://api.openai.com", "TEST") == "https://api.openai.com"
-    
+
     # Test invalid URLs
     with pytest.raises(ValueError, match="cannot be empty"):
         validate_url("", "TEST")
-    
+
     with pytest.raises(ValueError, match="must use http or https"):
         validate_url("ftp://example.com", "TEST")
 
@@ -221,15 +203,16 @@ def test_timeout_configuration():
     """Test that timeout configuration works with environment variables"""
     import os
     from unittest.mock import patch
-    
+
     # Test default timeout
     with patch.dict(os.environ, {}, clear=True):
         # Reimport to get fresh config
         import importlib
         from smolrouter import app
+
         importlib.reload(app)
         assert app.REQUEST_TIMEOUT == 3000.0
-    
+
     # Test custom timeout
     with patch.dict(os.environ, {"REQUEST_TIMEOUT": "45.5"}, clear=True):
         importlib.reload(app)
@@ -240,23 +223,23 @@ def test_timeout_configuration():
 def test_strip_json_markdown_from_text():
     """Test JSON markdown scrubbing functionality"""
     # Basic JSON block
-    text_with_json = '''Here is the response:
+    text_with_json = """Here is the response:
 ```json
 {
   "commit_type": "refactor",
   "description": "Updated code"
 }
 ```
-That's the result.'''
-    
-    expected = '''Here is the response:
+That's the result."""
+
+    expected = """Here is the response:
 { "commit_type": "refactor", "description": "Updated code" }
-That's the result.'''
-    
+That's the result."""
+
     assert strip_json_markdown_from_text(text_with_json) == expected
-    
+
     # Multiple JSON blocks
-    multiple_json = '''First:
+    multiple_json = """First:
 ```json
 {"status": "success"}
 ```
@@ -264,22 +247,22 @@ Second:
 ```json
 {"error": null}
 ```
-Done.'''
-    
-    expected_multiple = '''First:
+Done."""
+
+    expected_multiple = """First:
 {"status": "success"}
 Second:
 {"error": null}
-Done.'''
-    
+Done."""
+
     assert strip_json_markdown_from_text(multiple_json) == expected_multiple
-    
+
     # No JSON blocks
     no_json = "Just regular text with no JSON blocks here."
     assert strip_json_markdown_from_text(no_json) == no_json
-    
+
     # Complex nested JSON
-    complex_json = '''Result:
+    complex_json = """Result:
 ```json
 {
   "items": [
@@ -289,12 +272,12 @@ Done.'''
   "count": 2
 }
 ```
-Finished.'''
-    
-    expected_complex = '''Result:
+Finished."""
+
+    expected_complex = """Result:
 { "items": [ {"id": 1, "name": "test"}, {"id": 2, "name": "demo"} ], "count": 2 }
-Finished.'''
-    
+Finished."""
+
     assert strip_json_markdown_from_text(complex_json) == expected_complex
 
 
@@ -302,19 +285,20 @@ def test_json_markdown_environment_variable():
     """Test that JSON markdown scrubbing can be controlled via environment variable"""
     import os
     from unittest.mock import patch
-    
+
     # Test disabled by default
     with patch.dict(os.environ, {}, clear=True):
         import importlib
         from smolrouter import app
+
         importlib.reload(app)
         assert app.STRIP_JSON_MARKDOWN is False
-    
+
     # Test enabled
     with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": "true"}, clear=True):
         importlib.reload(app)
         assert app.STRIP_JSON_MARKDOWN is True
-    
+
     # Test various true values
     for true_value in ["1", "TRUE", "yes", "Yes"]:
         with patch.dict(os.environ, {"STRIP_JSON_MARKDOWN": true_value}, clear=True):
