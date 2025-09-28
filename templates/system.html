@@ -199,6 +199,43 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Load Balancing -->
+                {% if routing.load_balancing %}
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem;">Load Balancing</h3>
+                    <div style="space-y: 0.75rem;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Status</span>
+                            <strong>{{ '✅ Enabled' if routing.load_balancing.enabled else '❌ Disabled' }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Distribution Strategy</span>
+                            <strong>{{ routing.load_balancing.distribution_strategy }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Model Groups</span>
+                            <strong>{{ routing.load_balancing.model_groups }} groups</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Total Instances</span>
+                            <strong>{{ routing.load_balancing.total_instances }} instances</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Active Hosts</span>
+                            <strong>{{ routing.load_balancing.active_hosts }} hosts</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #718096;">Total Requests</span>
+                            <strong>{{ routing.load_balancing.total_requests }}</strong>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span style="color: #718096;">Success Rate</span>
+                            <strong>{{ routing.load_balancing.success_rate }}</strong>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
 
