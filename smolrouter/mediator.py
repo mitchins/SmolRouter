@@ -14,6 +14,7 @@ from .interfaces import IModelStrategy, IAccessControl, ModelInfo, ClientContext
 from .caching import ModelAggregator, IModelCache
 from .providers import IModelProvider
 from .google_genai_provider import GoogleGenAIProvider
+from .load_balancer import model_load_balancer
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ class ModelMediator:
         self.strategy = strategy
         self.access_control = access_control
         self._last_refresh = {}
+        self._models_registered_in_lb = False
+        self._active_lb_instance = None  # Track active load balanced instance
 
     async def get_available_models(
         self, client: ClientContext, force_refresh: bool = False, include_unhealthy: bool = False
@@ -71,6 +74,20 @@ class ModelMediator:
 
         return filtered_models
 
+    async def _register_models_in_load_balancer(self, models: List[ModelInfo]) -> None:
+        """Register discovered models with the load balancer for instance distribution."""
+        if self._models_registered_in_lb:
+            return
+
+        for model in models:
+            # Register each model instance with its provider information
+            model_load_balancer.register_model_instance(
+                model_id=model.id, provider_id=model.provider_id, provider_url=model.endpoint
+            )
+
+        self._models_registered_in_lb = True
+        logger.info(f"Registered {len(models)} models in load balancer")
+
     async def resolve_model_for_request(
         self, requested_model: str, client: ClientContext, force_refresh: bool = False
     ) -> Optional[ModelInfo]:
@@ -100,7 +117,24 @@ class ModelMediator:
             logger.warning(f"No models available for client {client.ip}")
             return None
 
-        # Step 2: Use strategy to resolve the request
+        # Register models in load balancer if not already done
+        await self._register_models_in_load_balancer(available_models)
+
+        # Step 2: Check if load balancing is needed (multiple instances of the same base model)
+        instance = await model_load_balancer.select_instance(requested_model)
+        if instance:
+            # Load balancer found multiple instances - use the selected one
+            logger.info(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
+            # Find the corresponding ModelInfo for the selected instance
+            for model in available_models:
+                if model.id == instance.model_id and model.endpoint == instance.provider_url:
+                    # Mark request start for load tracking
+                    await model_load_balancer.start_request(instance)
+                    # Store instance for completion tracking
+                    self._active_lb_instance = instance
+                    return model
+
+        # Step 3: Fall back to strategy resolution (single model or no load balancing needed)
         resolved_model = await self.strategy.resolve_model_request(requested_model, available_models)
 
         if resolved_model is None:

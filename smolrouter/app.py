@@ -1426,6 +1426,35 @@ async def api_inflight():
         return JSONResponse(content={"error": "Failed to get inflight requests"}, status_code=500)
 
 
+@app.get("/api/load-balancer")
+async def api_load_balancer():
+    """API endpoint for load balancer statistics and configuration"""
+    try:
+        from smolrouter.load_balancer import model_load_balancer
+
+        stats = model_load_balancer.get_stats()
+        model_groups = model_load_balancer.get_model_groups()
+        host_stats = model_load_balancer.get_host_stats()
+
+        return {
+            "enabled": True,
+            "distribution_strategy": model_load_balancer.default_distribution_strategy.value,
+            "stats": stats,
+            "model_groups": model_groups,
+            "host_stats": host_stats,
+            "summary": {
+                "total_model_groups": len(model_groups),
+                "total_instances": sum(len(instances) for instances in model_groups.values()),
+                "active_hosts": len(host_stats),
+                "total_requests": stats.get("total_requests", 0),
+                "success_rate": stats.get("success_rate", 0),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error getting load balancer stats: {e}")
+        return JSONResponse(content={"error": "Failed to get load balancer stats"}, status_code=500)
+
+
 @app.get("/api/performance")
 async def api_performance(limit: int = 1000, hours: int = 24, model: str = None, service_type: str = None):
     """Get performance analytics data for scatter plot visualization.
@@ -1773,6 +1802,27 @@ async def system_dashboard(request: Request):
             "user_restrictions_count": 0,  # Placeholder
         }
 
+        # Load balancing configuration and stats
+        from smolrouter.load_balancer import model_load_balancer
+
+        lb_stats = model_load_balancer.get_stats()
+        lb_model_groups = model_load_balancer.get_model_groups()
+        lb_host_stats = model_load_balancer.get_host_stats()
+
+        load_balancing = {
+            "enabled": True,
+            "distribution_strategy": model_load_balancer.default_distribution_strategy.value,
+            "total_requests": lb_stats.get("total_requests", 0),
+            "successful_requests": lb_stats.get("successful_requests", 0),
+            "failed_requests": lb_stats.get("failed_requests", 0),
+            "success_rate": f"{lb_stats.get('success_rate', 0) * 100:.1f}%",
+            "model_groups": len(lb_model_groups),
+            "total_instances": sum(len(instances) for instances in lb_model_groups.values()),
+            "active_hosts": len(lb_host_stats),
+            "hosts": lb_host_stats,
+            "instances_by_model": lb_stats.get("instances", {}),
+        }
+
         # Routing configuration
         routing = {
             "strategy_type": "smart" if container else "unknown",
@@ -1781,6 +1831,7 @@ async def system_dashboard(request: Request):
             "health_check_interval": 60,  # Default health check interval
             "cache_ttl": 300,  # Default cache TTL
             "auto_refresh": True,
+            "load_balancing": load_balancing,
         }
 
         # Environment information
