@@ -81,8 +81,9 @@ class ModelMediator:
 
         for model in models:
             # Register each model instance with its provider information
+            # Use model.name (raw) instead of model.id (tagged) for proper load balancing
             model_load_balancer.register_model_instance(
-                model_id=model.id, provider_id=model.provider_id, provider_url=model.endpoint
+                model_id=model.name, provider_id=model.provider_id, provider_url=model.endpoint
             )
 
         self._models_registered_in_lb = True
@@ -127,7 +128,7 @@ class ModelMediator:
             logger.info(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
             # Find the corresponding ModelInfo for the selected instance
             for model in available_models:
-                if model.id == instance.model_id and model.endpoint == instance.provider_url:
+                if model.name == instance.model_id and model.endpoint == instance.provider_url:
                     # Mark request start for load tracking
                     await model_load_balancer.start_request(instance)
                     # Store instance for completion tracking
