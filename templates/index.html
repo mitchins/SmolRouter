@@ -491,18 +491,21 @@
         }
 
         function handleWebSocketMessage(data) {
+            console.log('WebSocket message received:', data.type, data);
             switch (data.type) {
                 case 'dashboard_update':
                     updateStats(data.stats);
                     updateRequestsTable(data.logs);
                     break;
                 case 'new_request':
+                    console.log('Adding new request to table:', data.data);
                     // Add new request to top of table
-                    addNewRequestToTable(data.request);
+                    addNewRequestToTable(data.data);
                     break;
                 case 'request_completed':
+                    console.log('Updating completed request:', data.data);
                     // Update existing request in table
-                    updateRequestInTable(data.request);
+                    updateRequestInTable(data.data);
                     break;
                 case 'stats_update':
                     updateStats(data.stats);

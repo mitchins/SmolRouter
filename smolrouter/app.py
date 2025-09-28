@@ -525,9 +525,10 @@ def start_request_log(
         import asyncio
 
         try:
+            logger.info(f"Broadcasting new_request event for request {request_id}")
             asyncio.create_task(broadcast_request_event("new_request", log_entry))
         except Exception as e:
-            logger.debug(f"Failed to broadcast new request event: {e}")
+            logger.error(f"Failed to broadcast new request event: {e}")
 
         return log_entry
     except Exception as e:
@@ -614,16 +615,17 @@ def complete_request_log(
 
         log_entry.save()
 
+        # Enhanced completion logging with request ID
+        request_id = getattr(log_entry, "request_id", "unknown")
+
         # Broadcast request completion event (fire and forget)
         import asyncio
 
         try:
+            logger.info(f"Broadcasting request_completed event for request {request_id}")
             asyncio.create_task(broadcast_request_event("request_completed", log_entry))
         except Exception as e:
-            logger.debug(f"Failed to broadcast request completion event: {e}")
-
-        # Enhanced completion logging with request ID
-        request_id = getattr(log_entry, "request_id", "unknown")
+            logger.error(f"Failed to broadcast request completion event: {e}")
         logger.info(
             f"[{request_id}] Request completed: {duration_ms}ms, {response_data.get('status_code', 'unknown')} status, "
             f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}"
@@ -1883,6 +1885,9 @@ manager = ConnectionManager()
 async def broadcast_request_event(event_type: str, log_entry=None):
     """Broadcast request events to WebSocket clients"""
     try:
+        logger.info(
+            f"broadcast_request_event called: {event_type}, connected clients: {len(manager.active_connections)}"
+        )
         if event_type == "new_request" and log_entry:
             # Calculate real-time duration for pending requests
             duration_ms = log_entry.duration_ms
@@ -1897,7 +1902,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
                     "timestamp": log_entry.timestamp.isoformat(),
                     "source_ip": log_entry.source_ip,
                     "user_agent": log_entry.user_agent or "Unknown",
-                    "request_path": log_entry.request_path,
+                    "path": log_entry.path,
                     "method": log_entry.method,
                     "original_model": log_entry.original_model,
                     "mapped_model": log_entry.mapped_model,
@@ -1922,7 +1927,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
                     "timestamp": log_entry.timestamp.isoformat(),
                     "source_ip": log_entry.source_ip,
                     "user_agent": log_entry.user_agent or "Unknown",
-                    "request_path": log_entry.request_path,
+                    "path": log_entry.path,
                     "method": log_entry.method,
                     "original_model": log_entry.original_model,
                     "mapped_model": log_entry.mapped_model,
