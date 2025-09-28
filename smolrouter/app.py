@@ -1751,6 +1751,20 @@ async def upstreams_data():
     return await api_upstreams()
 
 
+@app.get("/upstreams-ui", response_class=HTMLResponse)
+async def upstreams_dashboard(request: Request):
+    """Web UI for viewing upstream providers and their models"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+    try:
+        return templates.TemplateResponse(
+            request, "upstreams.html", {"title": "Upstream Providers", "current_page": "upstreams"}
+        )
+    except Exception as e:
+        logger.error(f"Error loading upstreams dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading upstreams dashboard</h1>", status_code=500)
+
+
 @app.get("/google-genai", response_class=HTMLResponse)
 async def google_genai_dashboard(request: Request):
     """Web UI for viewing Google GenAI provider status and quota usage"""
