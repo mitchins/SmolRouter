@@ -1356,6 +1356,8 @@ async def api_stats():
 @app.get("/api/dashboard")
 async def api_dashboard(limit: int = 100):
     """Combined API endpoint for dashboard data (logs + stats)"""
+    from datetime import datetime
+
     try:
         logs = get_recent_logs(limit=limit)
         stats = get_log_stats()
@@ -1367,8 +1369,6 @@ async def api_dashboard(limit: int = 100):
             duration_ms = log.duration_ms
             if duration_ms is None and log.status_code is None:
                 # Pending request - calculate elapsed time
-                from datetime import datetime
-
                 elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
                 duration_ms = int(elapsed_seconds * 1000)
 
