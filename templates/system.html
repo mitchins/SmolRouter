@@ -209,6 +209,12 @@
                             <span style="color: #718096;">Status</span>
                             <strong>{{ '✅ Enabled' if routing.load_balancing.enabled else '❌ Disabled' }}</strong>
                         </div>
+                        {% if routing.load_balancing.error %}
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
+                            <span style="color: #e53e3e;">Error</span>
+                            <strong style="color: #e53e3e;">{{ routing.load_balancing.error }}</strong>
+                        </div>
+                        {% endif %}
                         <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem;">
                             <span style="color: #718096;">Distribution Strategy</span>
                             <strong>{{ routing.load_balancing.distribution_strategy }}</strong>

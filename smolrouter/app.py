@@ -1803,25 +1803,40 @@ async def system_dashboard(request: Request):
         }
 
         # Load balancing configuration and stats
-        from smolrouter.load_balancer import model_load_balancer
+        load_balancing = None
+        try:
+            from smolrouter.load_balancer import model_load_balancer
 
-        lb_stats = model_load_balancer.get_stats()
-        lb_model_groups = model_load_balancer.get_model_groups()
-        lb_host_stats = model_load_balancer.get_host_stats()
+            lb_stats = model_load_balancer.get_stats()
+            lb_model_groups = model_load_balancer.get_model_groups()
+            lb_host_stats = model_load_balancer.get_host_stats()
 
-        load_balancing = {
-            "enabled": True,
-            "distribution_strategy": model_load_balancer.default_distribution_strategy.value,
-            "total_requests": lb_stats.get("total_requests", 0),
-            "successful_requests": lb_stats.get("successful_requests", 0),
-            "failed_requests": lb_stats.get("failed_requests", 0),
-            "success_rate": f"{lb_stats.get('success_rate', 0) * 100:.1f}%",
-            "model_groups": len(lb_model_groups),
-            "total_instances": sum(len(instances) for instances in lb_model_groups.values()),
-            "active_hosts": len(lb_host_stats),
-            "hosts": lb_host_stats,
-            "instances_by_model": lb_stats.get("instances", {}),
-        }
+            load_balancing = {
+                "enabled": True,
+                "distribution_strategy": model_load_balancer.default_distribution_strategy.value,
+                "total_requests": lb_stats.get("total_requests", 0),
+                "successful_requests": lb_stats.get("successful_requests", 0),
+                "failed_requests": lb_stats.get("failed_requests", 0),
+                "success_rate": f"{lb_stats.get('success_rate', 0) * 100:.1f}%",
+                "model_groups": len(lb_model_groups),
+                "total_instances": sum(len(instances) for instances in lb_model_groups.values()),
+                "active_hosts": len(lb_host_stats),
+                "hosts": lb_host_stats,
+                "instances_by_model": lb_stats.get("instances", {}),
+            }
+            logger.info(f"Load balancer stats: {load_balancing}")
+        except Exception as e:
+            logger.error(f"Failed to load load balancer stats: {e}")
+            load_balancing = {
+                "enabled": False,
+                "error": str(e),
+                "distribution_strategy": "unknown",
+                "total_requests": 0,
+                "model_groups": 0,
+                "total_instances": 0,
+                "active_hosts": 0,
+                "success_rate": "0%",
+            }
 
         # Routing configuration
         routing = {
