@@ -707,15 +707,14 @@
             if (provider.type === 'google-genai') {
                 return `
                     <div class="quota-section" id="quota-${provider.id}">
-                        <div class="provider-stat-label">Daily Quota Usage</div>
-                        <div class="quota-bar">
-                            <div class="quota-fill" style="width: 0%"></div>
-                        </div>
+                        <div class="provider-stat-label">Per-Model Quota Usage</div>
                         <div class="quota-text">
-                            <span>Loading...</span>
-                            <span id="api-key-info-${provider.id}" style="display: none;"></span>
+                            <span>Loading model usage...</span>
+                            <span><button onclick="toggleApiKeyInfo('${provider.id}')" style="background: none; border: none; color: #667eea; cursor: pointer; font-size: 0.85rem;">Show API Key Details</button></span>
                         </div>
-                        <div id="model-quotas-${provider.id}" class="model-quotas" style="margin-top: 1rem; display: none;">
+                        <div id="model-quotas-${provider.id}" class="model-quotas" style="margin-top: 1rem;">
+                        </div>
+                        <div id="api-key-info-${provider.id}" style="display: none; margin-top: 1rem;">
                         </div>
                     </div>
                 `;
@@ -944,6 +943,39 @@
                             <span class="material-icons">vpn_key</span>
                             <span>${workingKeys}/${totalKeys} keys active (${workingPercent}% operational)</span>
                         `;
+
+                        // Update per-model quota display
+                        if (modelQuotasDiv) {
+                            // Sort models by usage (used models first, then by request count)
+                            const sortedModels = Object.entries(modelUsage)
+                                .sort(([a, usageA], [b, usageB]) => {
+                                    if (usageA.requests > 0 && usageB.requests === 0) return -1;
+                                    if (usageA.requests === 0 && usageB.requests > 0) return 1;
+                                    return usageB.requests - usageA.requests;
+                                });
+
+                            modelQuotasDiv.innerHTML = sortedModels.map(([modelName, usage]) => {
+                                const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
+                                const isUsed = usage.requests > 0;
+                                let barClass = 'quota-fill';
+                                if (usagePercent > 80) barClass += ' danger';
+                                else if (usagePercent > 60) barClass += ' warning';
+
+                                return `
+                                    <div class="model-quota-item" style="${isUsed ? 'border-left: 3px solid #10b981;' : ''}">
+                                        <div>
+                                            <div class="model-quota-name">${modelName}${isUsed ? ' ●' : ''}</div>
+                                            <div class="quota-bar" style="width: 150px; height: 12px; margin-top: 4px;">
+                                                <div class="${barClass}" style="width: ${usagePercent}%"></div>
+                                            </div>
+                                        </div>
+                                        <div class="model-quota-usage">
+                                            ${usage.requests}/${usage.limit} requests
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('');
+                        }
 
                         // Update models list with new usage data
                         const modelsList = document.getElementById(`models-${providerId}`);
