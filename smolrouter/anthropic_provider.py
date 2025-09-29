@@ -85,10 +85,11 @@ class AnthropicProvider(IModelProvider):
 
         return [
             ModelInfo(
-                model_id=model,
-                model_name=model,
+                id=f"{model}@{self.get_provider_id()}",
+                name=model,
                 aliases=[model],
                 provider_id=self.get_provider_id(),
+                provider_type=self.get_provider_type(),
                 endpoint=self.get_endpoint(),
             )
             for model in models
