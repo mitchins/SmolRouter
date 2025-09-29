@@ -2,6 +2,7 @@ import os
 import logging
 import re
 import hashlib
+import asyncio
 from datetime import datetime, timedelta
 from peewee import (
     AutoField,
@@ -19,10 +20,20 @@ logger = logging.getLogger("model-rerouter")
 
 # Database configuration
 DB_PATH = os.getenv("DB_PATH", "requests.db")
-MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))
+MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))  # Auto-purge logs older than N days (0 = disabled)
 
-# Initialize database
-db = SqliteDatabase(DB_PATH)
+# Initialize database with performance optimizations
+db = SqliteDatabase(
+    DB_PATH,
+    pragmas={
+        "journal_mode": "wal",  # Enable WAL mode for concurrent reads during writes
+        "synchronous": "normal",  # Faster than 'full', still crash-safe
+        "cache_size": -64 * 1000,  # 64MB cache (negative = KB)
+        "foreign_keys": 1,  # Enable foreign key constraints
+        "ignore_check_constraints": 0,  # Enable check constraints
+        "temp_store": "memory",  # Store temp tables in memory
+    },
+)
 
 
 def estimate_token_count(text: str) -> int:
@@ -368,9 +379,16 @@ def get_recent_logs(limit=100, service_type=None):
 
 
 def get_inflight_requests():
-    """Get currently inflight (incomplete) requests"""
+    """Get currently inflight (incomplete) requests from the last 60 minutes"""
     try:
-        return list(RequestLog.select().where(RequestLog.completed_at.is_null()).order_by(RequestLog.timestamp.desc()))
+        # Only check requests from the last 60 minutes to avoid performance issues
+        # Truly stuck requests should resolve within minutes, not hours
+        sixty_minutes_ago = datetime.now() - timedelta(minutes=60)
+        return list(
+            RequestLog.select()
+            .where((RequestLog.completed_at.is_null()) & (RequestLog.timestamp > sixty_minutes_ago))
+            .order_by(RequestLog.timestamp.desc())
+        )
     except Exception as e:
         logger.error(f"Failed to get inflight requests: {e}")
         return []
@@ -416,3 +434,55 @@ def get_log_stats():
             "recent_requests": 0,
             "inflight_requests": 0,
         }
+
+
+# Background cleanup system
+_cleanup_task = None
+
+
+async def background_cleanup_task():
+    """Background task that runs cleanup periodically"""
+    while True:
+        try:
+            if MAX_AGE_DAYS > 0:  # Only run if cleanup is enabled
+                await asyncio.sleep(24 * 60 * 60)  # Sleep 24 hours
+                logger.info("Running automatic database cleanup...")
+                cleanup_old_logs()
+                vacuum_database()
+                logger.info("Automatic cleanup completed")
+            else:
+                # If disabled, sleep for a longer period and check again
+                await asyncio.sleep(60 * 60)  # Check every hour if setting changed
+        except asyncio.CancelledError:
+            logger.info("Background cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in background cleanup task: {e}")
+            await asyncio.sleep(60 * 60)  # Wait 1 hour before retry
+
+
+def start_background_cleanup():
+    """Start the background cleanup task"""
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        if MAX_AGE_DAYS > 0:
+            try:
+                _cleanup_task = asyncio.create_task(background_cleanup_task())
+                logger.info(
+                    f"Started background cleanup task (will run every 24h, purging logs older than {MAX_AGE_DAYS} days)"
+                )
+            except RuntimeError:
+                # No event loop running, this is fine - task will start when FastAPI starts
+                logger.info(
+                    f"Background cleanup will start with event loop (purging logs older than {MAX_AGE_DAYS} days)"
+                )
+        else:
+            logger.info("Background cleanup disabled (MAX_LOG_AGE_DAYS=0)")
+
+
+def stop_background_cleanup():
+    """Stop the background cleanup task"""
+    global _cleanup_task
+    if _cleanup_task and not _cleanup_task.done():
+        _cleanup_task.cancel()
+        logger.info("Stopped background cleanup task")

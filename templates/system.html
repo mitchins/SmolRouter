@@ -243,6 +243,50 @@
                 </div>
                 {% endif %}
             </div>
+
+            <!-- Proxy Configuration -->
+            {% if routing.proxy_mappings %}
+            <div style="margin-top: 2rem;">
+                <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <span class="material-icons" style="color: #667eea;">swap_horiz</span>
+                    Proxy Configuration
+                </h3>
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
+                    <div style="margin-bottom: 1rem; color: #718096; font-size: 0.95rem;">
+                        Showing {{ routing.proxy_mappings|length }} proxy configuration{{ 's' if routing.proxy_mappings|length != 1 else '' }} in use
+                    </div>
+                    {% for proxy in routing.proxy_mappings %}
+                    <div style="margin-bottom: 1.5rem; padding: 1rem; background: #f7fafc; border-radius: 6px; border-left: 4px solid #667eea;">
+                        <div style="margin-bottom: 0.75rem;">
+                            <strong style="color: #2d3748; font-family: 'Courier New', monospace;">{{ proxy.url }}</strong>
+                            <span style="margin-left: 0.75rem; padding: 0.25rem 0.5rem; border-radius: 12px; font-size: 0.875rem; background: #e2e8f0; color: #4a5568;">
+                                {{ proxy.model_count }} model{{ 's' if proxy.model_count != 1 else '' }}
+                            </span>
+                        </div>
+                        <div style="color: #718096; font-size: 0.9rem;">
+                            <strong>Models using this proxy:</strong>
+                            <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                                {% for model in proxy.models %}
+                                <span style="padding: 0.25rem 0.5rem; background: white; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.85rem;">{{ model }}</span>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% else %}
+            <div style="margin-top: 2rem;">
+                <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <span class="material-icons" style="color: #667eea;">swap_horiz</span>
+                    Proxy Configuration
+                </h3>
+                <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem; text-align: center; color: #718096;">
+                    <span class="material-icons" style="font-size: 3rem; color: #cbd5e0; margin-bottom: 1rem; display: block;">check_circle</span>
+                    No proxy configurations in use - all requests go direct
+                </div>
+            </div>
+            {% endif %}
         </div>
 
         <!-- Environment Info -->

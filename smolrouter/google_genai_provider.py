@@ -8,18 +8,18 @@ with intelligent rotation based on requests-per-day (RPD) quotas.
 import logging
 import json
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import pytz
 
-import google.generativeai as genai
-from google.generativeai.types import GenerateContentResponse
+from google import genai
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 
-from .interfaces import IModelProvider, ModelInfo, ProviderConfig
+from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
 from .database import ApiKeyQuota
-from .rate_limiter import google_genai_funnel
+from .rate_limiter import GoogleGenAIRequestFunnel
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +91,30 @@ class GoogleGenAIConfig(ProviderConfig):
     max_requests_per_day: int = 1500  # Free tier limit
     max_tokens_per_minute: int = 32000  # Free tier limit
 
+    # Rate limiting configuration (defaults to disabled)
+    rate_limiting_enabled: bool = False
+    max_concurrent_requests: int = 3
+    max_requests_per_window: int = 12
+    window_minutes: int = 4
+
+    # Predictive 429 configuration (defaults to disabled)
+    predictive_429_enabled: bool = False
+
     def __init__(self, **kwargs):
         # Extract Google-specific fields before calling parent
         self.api_keys = kwargs.pop("api_keys", [])
         self.api_keys_file = kwargs.pop("api_keys_file", None)
         self.max_requests_per_day = kwargs.pop("max_requests_per_day", 1500)
         self.max_tokens_per_minute = kwargs.pop("max_tokens_per_minute", 32000)
+
+        # Rate limiting configuration (defaults to disabled)
+        self.rate_limiting_enabled = kwargs.pop("rate_limiting_enabled", False)
+        self.max_concurrent_requests = kwargs.pop("max_concurrent_requests", 3)
+        self.max_requests_per_window = kwargs.pop("max_requests_per_window", 12)
+        self.window_minutes = kwargs.pop("window_minutes", 4)
+
+        # Predictive 429 configuration (defaults to disabled)
+        self.predictive_429_enabled = kwargs.pop("predictive_429_enabled", False)
 
         # Set required fields for base class
         if "url" not in kwargs:
@@ -146,10 +164,64 @@ class GoogleGenAIProvider(IModelProvider):
 
         # Cache for discovered models
         self._cached_models: Optional[List[ModelInfo]] = None
-        self._cache_time: Optional[datetime] = None
-        self._cache_ttl = timedelta(minutes=30)
+
+        # Create provider-specific rate limiter instance
+        self._rate_limiter = GoogleGenAIRequestFunnel(
+            max_concurrent=self.config.max_concurrent_requests,
+            max_requests_per_window=self.config.max_requests_per_window,
+            window_minutes=self.config.window_minutes,
+            enabled=self.config.rate_limiting_enabled,
+        )
 
         logger.info(f"Initialized GoogleGenAI provider with {len(self.config.api_keys)} API keys")
+        logger.info(f"Rate limiting: {'enabled' if self.config.rate_limiting_enabled else 'disabled'}")
+        logger.info(f"Predictive 429: {'enabled' if self.config.predictive_429_enabled else 'disabled'}")
+
+    def get_model_daily_limit(self, model_name: str) -> int:
+        """Get the daily request limit for a specific model based on Google's current quotas"""
+        model_lower = model_name.lower()
+
+        # Experimental/Preview models have very low limits
+        if any(keyword in model_lower for keyword in ["exp", "experimental", "preview"]):
+            return 5
+
+        # Gemini Pro models have lower limits
+        if "pro" in model_lower:
+            if "2.5" in model_lower or "2.0" in model_lower:
+                return 50  # Current Gemini 2.x Pro limit
+            else:
+                return 15  # Gemini 1.5 Pro limit
+
+        # Flash models have more generous limits
+        if "flash" in model_lower:
+            if "lite" in model_lower:
+                return 1500  # Flash Lite has highest free limit
+            else:
+                return 1000  # Regular Flash models
+
+        # Default to conservative limit for unknown models
+        return self.config.max_requests_per_day
+
+    def _create_proxy_transport(self, proxy_config: Optional[ProxyConfig] = None):
+        """Create httpx proxies mapping for the Google GenAI client"""
+        # Use provided proxy config or fall back to default
+        config_to_use = proxy_config or self.config.proxy_config
+
+        if config_to_use and config_to_use.to_httpx_proxy():
+            proxy_url = config_to_use.to_httpx_proxy()
+            logger.info(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
+
+            # httpx expects proxies to be configured on the Client, not on the Transport.
+            # Provide both http and https mappings to be explicit across versions.
+            proxies = {
+                "http://": proxy_url,
+                "https://": proxy_url,
+                "all://": proxy_url,
+            }
+            return proxies
+
+        logger.debug(f"🚫 No proxy configured (proxy_config={proxy_config}, default={self.config.proxy_config})")
+        return None
 
     def get_provider_id(self) -> str:
         return self.config.name
@@ -201,10 +273,11 @@ class GoogleGenAIProvider(IModelProvider):
             actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
 
             # Check if key has hit daily limit for this model (either by count or 429 response)
-            if actual_requests_today >= self.config.max_requests_per_day:
+            model_limit = self.get_model_daily_limit(model_name)
+            if actual_requests_today >= model_limit:
                 exhausted_keys.append(key)
                 logger.debug(
-                    f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{self.config.max_requests_per_day}) reset_date={quota.last_reset_date} today={pacific_date}"
+                    f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
                 )
                 continue
 
@@ -265,14 +338,22 @@ class GoogleGenAIProvider(IModelProvider):
 
             logger.error(f"⏰ All API keys exhausted. Quota resets in {seconds_until_reset}s at midnight Pacific")
 
-            # Raise a specific exception that the container can catch and convert to 429
-            from google.api_core.exceptions import ResourceExhausted
+            # Only raise predictive 429 if enabled
+            if self.config.predictive_429_enabled:
+                # Raise a specific exception that the container can catch and convert to 429
+                from google.api_core.exceptions import ResourceExhausted
 
-            raise ResourceExhausted(
-                f"All {total_keys} API keys exhausted for model {model_name}. "
-                f"Quota resets in {seconds_until_reset} seconds at midnight Pacific time.",
-                errors=[{"reason": "QUOTA_EXHAUSTED", "retry_after_seconds": seconds_until_reset}],
-            )
+                raise ResourceExhausted(
+                    f"All {total_keys} API keys exhausted for model {model_name}. "
+                    f"Quota resets in {seconds_until_reset} seconds at midnight Pacific time.",
+                    errors=[{"reason": "QUOTA_EXHAUSTED", "retry_after_seconds": seconds_until_reset}],
+                )
+            else:
+                # Predictive 429 disabled - fall back to first key and let API handle the error
+                logger.warning(
+                    "⚠️ Predictive 429 disabled - using first API key despite quota tracking showing exhaustion"
+                )
+                return self.config.api_keys[0]
 
         # Sort by request count, then by key name for consistent ordering
         available_keys.sort(key=lambda x: (x[1], x[0]))
@@ -300,7 +381,7 @@ class GoogleGenAIProvider(IModelProvider):
         if success:
             quota.mark_request_success(tokens=tokens)
             logger.info(
-                f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.config.max_requests_per_day} RPD, {tokens} tokens"
+                f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.get_model_daily_limit(model_name)} RPD, {tokens} tokens"
             )
         else:
             # Check error type and handle appropriately
@@ -333,14 +414,15 @@ class GoogleGenAIProvider(IModelProvider):
             logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error}")
 
         # Log quota status if approaching limits for this model
-        quota_percentage = (quota.requests_today / self.config.max_requests_per_day) * 100
+        model_limit = self.get_model_daily_limit(model_name)
+        quota_percentage = (quota.requests_today / model_limit) * 100
         if quota_percentage >= 80:
             logger.warning(
-                f"API key {api_key[:8]}... / {model_name} approaching daily limit: {quota_percentage:.1f}% used ({quota.requests_today}/{self.config.max_requests_per_day})"
+                f"API key {api_key[:8]}... / {model_name} approaching daily limit: {quota_percentage:.1f}% used ({quota.requests_today}/{model_limit})"
             )
         elif quota_percentage >= 100:
             logger.error(
-                f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{self.config.max_requests_per_day}"
+                f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
             )
 
     def _is_invalid_key_error(self, error_msg: str) -> bool:
@@ -385,8 +467,6 @@ class GoogleGenAIProvider(IModelProvider):
         if not error_msg:
             return None
 
-        import re
-
         # Look for patterns like "retry in 20.915074628s" or "retryDelay': '20s'"
         patterns = [
             r"retry in (\d+(?:\.\d+)?)s",
@@ -412,13 +492,27 @@ class GoogleGenAIProvider(IModelProvider):
         """Check if at least one API key is working"""
         for api_key in self.config.api_keys:
             try:
-                genai.configure(api_key=api_key)
+                # Create client with proxy transport
+                proxy_config = self.config.get_proxy_for_model("health-check")
+                proxies = self._create_proxy_transport(proxy_config)
+
+                from google.genai import types
+
+                if proxies:
+                    http_options = types.HttpOptions(
+                        client_args={"proxies": proxies, "trust_env": False},
+                        async_client_args={"proxies": proxies, "trust_env": False},
+                    )
+                    client = genai.Client(api_key=api_key, http_options=http_options)
+                else:
+                    client = genai.Client(api_key=api_key)
+
                 # Try to list models as a health check
-                models = genai.list_models()
+                models = await asyncio.to_thread(client.models.list)
                 list(models)  # Force evaluation
                 return True
             except Exception as e:
-                logger.debug(f"Health check failed for API key {api_key[:8]}...: {e}")
+                logger.debug(f"Health check failed for key {api_key[:8]}...: {e}")
                 continue
         return False
 
@@ -431,12 +525,29 @@ class GoogleGenAIProvider(IModelProvider):
         # Try to discover models using available API keys (live discovery)
         for api_key in self.config.api_keys:
             try:
-                genai.configure(api_key=api_key)
+                # Create client with proxy transport
+                proxy_config = self.config.get_proxy_for_model("model-discovery")
+                proxies = self._create_proxy_transport(proxy_config)
+
+                from google.genai import types
+
+                if proxies:
+                    http_options = types.HttpOptions(
+                        client_args={"proxies": proxies, "trust_env": False},
+                        async_client_args={"proxies": proxies, "trust_env": False},
+                    )
+                    client = genai.Client(api_key=api_key, http_options=http_options)
+                else:
+                    client = genai.Client(api_key=api_key)
+
                 models = []
 
                 # List available models
-                for model in genai.list_models():
-                    if "generateContent" in model.supported_generation_methods:
+                model_list = await asyncio.to_thread(client.models.list)
+                for model in model_list:
+                    # New API uses 'supported_actions' instead of 'supported_generation_methods'
+                    supported_actions = getattr(model, "supported_actions", [])
+                    if "generateContent" in supported_actions:
                         model_name = model.name.split("/")[-1]  # Extract model name from full path
 
                         # Create model info
@@ -449,9 +560,9 @@ class GoogleGenAIProvider(IModelProvider):
                             aliases=[model_name],
                             metadata={
                                 "full_name": model.name,
-                                "display_name": model.display_name,
+                                "display_name": getattr(model, "display_name", model_name),
                                 "description": getattr(model, "description", ""),
-                                "supported_methods": model.supported_generation_methods,
+                                "supported_methods": supported_actions,  # Use new supported_actions
                                 "input_token_limit": getattr(model, "input_token_limit", None),
                                 "output_token_limit": getattr(model, "output_token_limit", None),
                             },
@@ -574,14 +685,15 @@ class GoogleGenAIProvider(IModelProvider):
 
         return model_name, genai_request
 
-    def _convert_genai_to_openai_response(
-        self, genai_response: GenerateContentResponse, original_model: str
-    ) -> Dict[str, Any]:
+    def _convert_genai_to_openai_response(self, genai_response: Any, original_model: str) -> Dict[str, Any]:
         """Convert Google GenAI response to OpenAI format"""
         try:
-            # Extract text content
+            # Extract text content - new SDK provides direct .text attribute
             text_content = ""
-            if genai_response.candidates:
+            if hasattr(genai_response, "text") and genai_response.text:
+                text_content = genai_response.text
+            elif genai_response.candidates:
+                # Fallback to candidates structure for compatibility
                 for part in genai_response.candidates[0].content.parts:
                     if hasattr(part, "text"):
                         text_content += part.text
@@ -623,24 +735,41 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Select best API key
             api_key = self._select_best_api_key(model_name)
-            genai.configure(api_key=api_key)
 
-            # Initialize the model
-            model = genai.GenerativeModel(model_name)
+            # Create client with proxy transport
+            proxy_config = self.config.get_proxy_for_model(model_name)
+            logger.info(f"🔍 Checking proxy for model '{model_name}': config={proxy_config}")
+            proxies = self._create_proxy_transport(proxy_config)
+
+            from google.genai import types
+
+            if proxies:
+                http_options = types.HttpOptions(
+                    client_args={"proxies": proxies, "trust_env": False},
+                    async_client_args={"proxies": proxies, "trust_env": False},
+                )
+                client = genai.Client(api_key=api_key, http_options=http_options)
+                logger.debug(f"httpx proxies active: {bool(proxies)}; proxies={proxies}")
+                logger.debug("httpx trust_env disabled via HttpOptions: True")
+            else:
+                client = genai.Client(api_key=api_key)
+                logger.debug(f"httpx proxies active: {bool(proxies)}; proxies={proxies}")
+                logger.debug("httpx trust_env disabled via HttpOptions: True")
 
             # Acquire rate limiting slot (blocks if needed)
-            await google_genai_funnel.acquire_slot()
+            await self._rate_limiter.acquire_slot()
 
             try:
-                # Generate content
+                # Generate content using new API
                 response = await asyncio.to_thread(
-                    model.generate_content,
-                    genai_request["contents"],
-                    generation_config=genai_request["generation_config"],
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=genai_request["contents"],
+                    config=genai_request["generation_config"],
                 )
             finally:
                 # Always release slot, even on error
-                google_genai_funnel.release_slot()
+                self._rate_limiter.release_slot()
 
             # Convert response back to OpenAI format
             openai_response = self._convert_genai_to_openai_response(response, original_model)
@@ -702,13 +831,12 @@ class GoogleGenAIProvider(IModelProvider):
                     "total_requests_today": 0,
                     "total_tokens_today": 0,
                     "total_errors": 0,
-                    "daily_limit_per_model": self.config.max_requests_per_day,
+                    "daily_limit_per_model": self.get_model_daily_limit(model),
                 }
 
-            quota_percentage = (quota.requests_today / self.config.max_requests_per_day) * 100
-            is_exhausted = (
-                quota.requests_today >= self.config.max_requests_per_day or quota.quota_exhausted_at is not None
-            )
+            model_limit = self.get_model_daily_limit(model)
+            quota_percentage = (quota.requests_today / model_limit) * 100
+            is_exhausted = quota.requests_today >= model_limit or quota.quota_exhausted_at is not None
 
             stats[key_display]["models"][model] = {
                 "requests_today": quota.requests_today,
@@ -750,10 +878,10 @@ class GoogleGenAIProvider(IModelProvider):
                     "total_requests_today": 0,
                     "total_tokens_today": 0,
                     "total_errors": 0,
-                    "daily_limit_per_model": self.config.max_requests_per_day,
+                    "daily_limit_per_model": self.get_model_daily_limit(model),
                 }
 
         # Add rate limiter statistics
-        stats["_rate_limiter"] = google_genai_funnel.stats
+        stats["_rate_limiter"] = self._rate_limiter.stats
 
         return stats

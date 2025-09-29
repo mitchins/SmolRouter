@@ -1,0 +1,87 @@
+# Example configuration showing per-model proxy support
+# NOTE: Example values are intentionally empty/null to avoid detect-secrets false positives.
+# Provide real credentials via environment variables or a private, untracked config file.
+
+routes: []
+
+providers:
+  - name: "anthropic-with-proxy"
+    type: "anthropic"
+    enabled: true
+    priority: 2
+    url: "https://api.anthropic.com"
+    api_keys: []
+    # Example: set ANTHROPIC_API_KEY via environment; do not commit keys here.
+    timeout: 30.0
+    # Default proxy for all models
+    proxy_config:
+      https_proxy: null
+      username: null
+      password: null
+    # Per-model proxy overrides
+    per_model_proxy:
+      "claude-3-5-sonnet-20241022":
+        https_proxy: null
+        username: null
+        password: null
+
+  - name: "google-test-with-proxy"
+    type: "google-genai"
+    enabled: true
+    priority: 1
+    api_keys: []
+    # Example: set GOOGLE_API_KEY via environment; do not commit keys here.
+    max_requests_per_day: 5
+    timeout: 30.0
+    # Advanced Google GenAI features (disabled by default)
+    rate_limiting_enabled: false  # Enable IP-based rate limiting
+    predictive_429_enabled: false  # Enable predictive 429 based on quota tracking
+    # Rate limiting configuration (only used if rate_limiting_enabled: true)
+    max_concurrent_requests: 3
+    max_requests_per_window: 12
+    window_minutes: 4
+    # Default proxy for all Google GenAI models
+    proxy_config:
+      https_proxy: null
+    # Per-model proxy overrides
+    per_model_proxy:
+      "gemini-1.5-flash":
+        https_proxy: null
+      "gemini-1.5-pro":
+        https_proxy: null
+
+  - name: "openai-with-proxy"
+    type: "openai"
+    enabled: true
+    priority: 3
+    url: "https://api.openai.com"
+    api_key: null  # Client must provide API key via Authorization header
+    timeout: 600.0
+    # Default proxy for all OpenAI models
+    proxy_config:
+      https_proxy: null
+      username: null
+      password: null
+    # Per-model proxy overrides
+    per_model_proxy:
+      "gpt-4":
+        https_proxy: null
+        username: null
+        password: null
+
+strategy:
+  type: "smart"
+  config:
+    aliases: {}
+
+access_control:
+  type: "basic"
+  config:
+    default_access: true
+
+cache:
+  enabled: true
+  ttl: 300
+
+container:
+  enabled: true

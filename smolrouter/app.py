@@ -10,7 +10,7 @@ from typing import AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import httpx
@@ -257,6 +257,28 @@ async def init_new_architecture():
     except Exception as e:
         logger.error(f"Failed to initialize new architecture: {e}")
         logger.warning("Falling back to legacy architecture only")
+
+
+# FastAPI event handlers
+@app.on_event("startup")
+async def startup_event():
+    """FastAPI startup event - initialize background tasks"""
+    if ENABLE_LOGGING:
+        # Start background cleanup task now that event loop is running
+        from smolrouter.database import start_background_cleanup
+
+        start_background_cleanup()
+
+    await init_new_architecture()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """FastAPI shutdown event - cleanup background tasks"""
+    if ENABLE_LOGGING:
+        from smolrouter.database import stop_background_cleanup
+
+        stop_background_cleanup()
 
 
 # Initialize on startup
@@ -1753,31 +1775,32 @@ async def upstreams_data():
 
 @app.get("/upstreams-ui", response_class=HTMLResponse)
 async def upstreams_dashboard(request: Request):
-    """Web UI for viewing upstream providers and their models"""
+    """Redirect to unified providers page"""
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(url="/providers", status_code=301)
+
+
+@app.get("/providers", response_class=HTMLResponse)
+async def providers_dashboard(request: Request):
+    """Unified providers management page"""
     # Check WebUI access security
     get_webui_security().check_webui_access(request)
     try:
         return templates.TemplateResponse(
-            request, "upstreams.html", {"title": "Upstream Providers", "current_page": "upstreams"}
+            request, "providers.html", {"title": "Provider Management", "current_page": "providers"}
         )
     except Exception as e:
-        logger.error(f"Error loading upstreams dashboard: {e}")
-        return HTMLResponse(content="<h1>Error loading upstreams dashboard</h1>", status_code=500)
+        logger.error(f"Error loading providers dashboard: {e}")
+        return HTMLResponse(content="<h1>Error loading providers dashboard</h1>", status_code=500)
 
 
 @app.get("/google-genai", response_class=HTMLResponse)
 async def google_genai_dashboard(request: Request):
-    """Web UI for viewing Google GenAI provider status and quota usage"""
-    # Check WebUI access security
-    get_webui_security().check_webui_access(request)
+    """Redirect to unified providers page"""
+    from fastapi.responses import RedirectResponse
 
-    try:
-        return templates.TemplateResponse(
-            request, "google_genai.html", {"title": "Google GenAI Status", "current_page": "google-genai"}
-        )
-    except Exception as e:
-        logger.error(f"Error loading Google GenAI dashboard: {e}")
-        return HTMLResponse(content="<h1>Error loading Google GenAI dashboard</h1>", status_code=500)
+    return RedirectResponse(url="/providers", status_code=301)
 
 
 @app.get("/system", response_class=HTMLResponse)
@@ -1802,6 +1825,11 @@ async def system_dashboard(request: Request):
             "database_file": "requests.db",
             "blob_storage_path": "blob_storage",
         }
+
+        # Initialize container if not already done
+        global container
+        if container is None:
+            await init_new_architecture()
 
         # Provider configurations
         providers = []
@@ -1872,6 +1900,63 @@ async def system_dashboard(request: Request):
                 "success_rate": "0%",
             }
 
+        # Proxy configuration analysis
+        proxy_mappings = []
+        if container:
+            try:
+                # Collect all proxy configurations from providers
+                proxy_to_models = {}  # Maps proxy URL to list of models
+
+                providers_list = container.get_providers()
+                logger.info(f"DEBUG: Found {len(providers_list)} providers for proxy analysis")
+
+                for provider in providers_list:
+                    provider_config = provider.config
+                    logger.info(f"DEBUG: Analyzing provider {provider.get_provider_id()}")
+                    logger.info(f"DEBUG: Has proxy_config: {hasattr(provider_config, 'proxy_config')}")
+                    logger.info(f"DEBUG: Has per_model_proxy: {hasattr(provider_config, 'per_model_proxy')}")
+
+                    # Check default proxy for all models from this provider
+                    default_proxy = getattr(provider_config, "proxy_config", None)
+                    if default_proxy and default_proxy.to_httpx_proxy():
+                        proxy_url = default_proxy.to_httpx_proxy()
+                        if proxy_url not in proxy_to_models:
+                            proxy_to_models[proxy_url] = []
+                        # Add all models from this provider to the default proxy
+                        try:
+                            provider_models = provider.get_models()
+                            for model in provider_models:
+                                proxy_to_models[proxy_url].append(f"{model.name} [{provider.get_provider_id()}]")
+                        except Exception:
+                            # If we can't get models, just add a generic entry
+                            proxy_to_models[proxy_url].append(f"All models [{provider.get_provider_id()}]")
+
+                    # Check per-model proxy overrides
+                    per_model_proxy = getattr(provider_config, "per_model_proxy", {})
+                    if per_model_proxy:
+                        for model_name, proxy_config in per_model_proxy.items():
+                            if proxy_config and proxy_config.to_httpx_proxy():
+                                proxy_url = proxy_config.to_httpx_proxy()
+                                if proxy_url not in proxy_to_models:
+                                    proxy_to_models[proxy_url] = []
+                                proxy_to_models[proxy_url].append(f"{model_name} [{provider.get_provider_id()}]")
+
+                # Convert to list format for template
+                for proxy_url, models in proxy_to_models.items():
+                    proxy_mappings.append(
+                        {
+                            "url": proxy_url,
+                            "models": sorted(list(set(models))),  # Remove duplicates and sort
+                            "model_count": len(set(models)),
+                        }
+                    )
+
+                # Sort by model count (most used proxies first)
+                proxy_mappings.sort(key=lambda x: x["model_count"], reverse=True)
+
+            except Exception as e:
+                logger.warning(f"Could not analyze proxy configurations: {e}")
+
         # Routing configuration
         routing = {
             "strategy_type": "smart" if container else "unknown",
@@ -1881,6 +1966,7 @@ async def system_dashboard(request: Request):
             "cache_ttl": 300,  # Default cache TTL
             "auto_refresh": True,
             "load_balancing": load_balancing,
+            "proxy_mappings": proxy_mappings,
         }
 
         # Environment information
@@ -1939,28 +2025,240 @@ async def request_detail(request_id: int, request: Request):
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load request details: {e}</p>", status_code=500)
 
 
+@app.get("/api/requests/{request_id}")
+async def get_request_details(request_id: int, request: Request):
+    """API endpoint for request details with JSON response"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        log_entry = RequestLog.get_by_id(request_id)
+
+        return {
+            "id": log_entry.id,
+            "timestamp": log_entry.timestamp.isoformat(),
+            "source_ip": log_entry.source_ip,
+            "path": log_entry.path,
+            "original_model": log_entry.original_model,
+            "mapped_model": log_entry.mapped_model,
+            "service_type": log_entry.service_type,
+            "status_code": log_entry.status_code,
+            "duration_ms": log_entry.duration_ms,
+            "request_size": log_entry.request_size,
+            "response_size": log_entry.response_size,
+            "upstream_url": log_entry.upstream_url,
+            "error_message": log_entry.error_message,
+            "request_body": log_entry.request_body.decode("utf-8") if log_entry.request_body else None,
+            "response_body": log_entry.response_body.decode("utf-8") if log_entry.response_body else None,
+        }
+    except RequestLog.DoesNotExist:
+        raise HTTPException(status_code=404, detail="Request not found")
+    except Exception as e:
+        logger.error(f"Error fetching request details: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/clients/{client_ip}", response_class=HTMLResponse)
+async def client_dashboard(client_ip: str, request: Request):
+    """Client-specific dashboard page"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        return templates.TemplateResponse(
+            request,
+            "client_dashboard.html",
+            {"client_ip": client_ip, "current_page": "client"},
+        )
+    except Exception as e:
+        logger.error(f"Error loading client dashboard for {client_ip}: {e}")
+        return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load client dashboard: {e}</p>", status_code=500)
+
+
+@app.get("/testing", response_class=HTMLResponse)
+async def testing_page(request: Request):
+    """Testing page with chat UI and validation tools"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        return templates.TemplateResponse(
+            request,
+            "testing.html",
+            {"current_page": "testing"},
+        )
+    except Exception as e:
+        logger.error(f"Error loading testing page: {e}")
+        return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load testing page: {e}</p>", status_code=500)
+
+
+@app.get("/api/testing/models")
+async def get_available_models_for_testing(request: Request):
+    """API endpoint to get available models for testing UI"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        # Actually fetch models using container architecture
+        global container
+        if container is None:
+            await init_new_architecture()
+
+        if container is not None:
+            source_ip = request.client.host if request.client else "unknown"
+            auth_payload = None
+            try:
+                auth_payload = verify_request_auth(request)
+            except Exception:
+                pass
+            client_context = container.create_client_context(
+                ip=source_ip, auth_payload=auth_payload, headers=dict(request.headers)
+            )
+            mediator = await container.get_mediator()
+            models = await mediator.get_available_models(client_context)
+        else:
+            models = []
+
+        # Sort models alphabetically by provider group, then by model name
+        sorted_models = sorted(models, key=lambda m: (m.provider_id, m.name))
+
+        # Return simplified model list for dropdown
+        model_list = [
+            {"id": model.id, "name": model.name, "display_name": model.display_name, "provider": model.provider_id}
+            for model in sorted_models
+        ]
+
+        return {"models": model_list}
+
+    except Exception as e:
+        logger.error(f"Error fetching models for testing: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch available models")
+
+
+@app.get("/api/clients/{client_ip}")
+async def get_client_data(client_ip: str, request: Request, limit: int = 100):
+    """API endpoint for client-specific data"""
+    # Check WebUI access security
+    get_webui_security().check_webui_access(request)
+
+    try:
+        # Get client-specific logs
+        logs = list(
+            RequestLog.select()
+            .where(RequestLog.source_ip == client_ip)
+            .order_by(RequestLog.timestamp.desc())
+            .limit(limit)
+        )
+
+        # Calculate client-specific stats
+        total_requests = RequestLog.select().where(RequestLog.source_ip == client_ip).count()
+
+        successful_requests = (
+            RequestLog.select()
+            .where(
+                (RequestLog.source_ip == client_ip) & (RequestLog.status_code >= 200) & (RequestLog.status_code < 400)
+            )
+            .count()
+        )
+
+        # Recent requests (last 24 hours)
+        from datetime import datetime, timedelta
+
+        since_24h = datetime.now() - timedelta(hours=24)
+        recent_requests = (
+            RequestLog.select().where((RequestLog.source_ip == client_ip) & (RequestLog.timestamp >= since_24h)).count()
+        )
+
+        # Inflight requests
+        inflight_requests = (
+            RequestLog.select().where((RequestLog.source_ip == client_ip) & (RequestLog.completed_at.is_null())).count()
+        )
+
+        # Get unique models used by this client
+        models_used = list(
+            RequestLog.select(RequestLog.original_model)
+            .where((RequestLog.source_ip == client_ip) & (RequestLog.original_model.is_null(False)))
+            .distinct()
+            .limit(50)
+        )
+
+        # Convert logs to dict format
+        logs_data = []
+        for log in logs:
+            # Calculate duration for pending requests
+            duration_ms = log.duration_ms
+            if duration_ms is None and log.status_code is None:
+                # Pending request - calculate elapsed time
+                elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
+                duration_ms = int(elapsed_seconds * 1000)
+
+            logs_data.append(
+                {
+                    "id": log.id,
+                    "timestamp": log.timestamp.isoformat(),
+                    "source_ip": log.source_ip,
+                    "path": log.path,
+                    "original_model": log.original_model,
+                    "mapped_model": log.mapped_model,
+                    "service_type": log.service_type,
+                    "status_code": log.status_code,
+                    "duration_ms": duration_ms,
+                    "request_size": log.request_size,
+                    "response_size": log.response_size,
+                    "upstream_url": log.upstream_url,
+                }
+            )
+
+        stats = {
+            "total_requests": total_requests,
+            "successful_requests": successful_requests,
+            "recent_requests": recent_requests,
+            "inflight_requests": inflight_requests,
+            "models_used": [model.original_model for model in models_used],
+        }
+
+        return {
+            "client_ip": client_ip,
+            "stats": stats,
+            "logs": logs_data,
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching client data for {client_ip}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 # WebSocket connection manager for real-time updates
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: list[WebSocket] = []
+        # Store connections with their client filter (if any)
+        self.active_connections: list[tuple[WebSocket, Optional[str]]] = []
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, client_filter: Optional[str] = None):
         await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+        self.active_connections.append((websocket, client_filter))
+        filter_info = f" (filtering for {client_filter})" if client_filter else ""
+        logger.info(f"WebSocket connected{filter_info}. Total connections: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+        # Find and remove the connection
+        for i, (conn, _) in enumerate(self.active_connections):
+            if conn == websocket:
+                del self.active_connections[i]
+                break
         logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
 
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
+    async def broadcast(self, message: dict, source_ip: Optional[str] = None):
+        """Broadcast message to relevant connected clients"""
         if not self.active_connections:
             return
 
         disconnected = []
-        for connection in self.active_connections:
+        for connection, client_filter in self.active_connections:
+            # Skip if this connection is filtered for a different client
+            if client_filter and source_ip and client_filter != source_ip:
+                continue
+
             try:
                 await connection.send_text(json.dumps(message))
             except Exception:
@@ -2017,7 +2315,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
                     "total_tokens": log_entry.total_tokens or 0,
                 },
             }
-            await manager.broadcast(event_data)
+            await manager.broadcast(event_data, source_ip=log_entry.source_ip)
 
         elif event_type == "request_completed" and log_entry:
             event_data = {
@@ -2042,7 +2340,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
                     "total_tokens": log_entry.total_tokens or 0,
                 },
             }
-            await manager.broadcast(event_data)
+            await manager.broadcast(event_data, source_ip=log_entry.source_ip)
 
         elif event_type == "dashboard_update":
             # Send updated dashboard stats
@@ -2115,6 +2413,120 @@ async def websocket_dashboard(websocket: WebSocket):
                 break
             except Exception as e:
                 logger.error(f"WebSocket error: {e}")
+                break
+
+    finally:
+        manager.disconnect(websocket)
+
+
+@app.websocket("/ws/clients/{client_ip}")
+async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
+    """WebSocket endpoint for client-specific real-time updates"""
+    await manager.connect(websocket, client_filter=client_ip)
+
+    try:
+        # Send initial client-specific data
+        try:
+            # Get client-specific logs
+            logs = list(
+                RequestLog.select()
+                .where(RequestLog.source_ip == client_ip)
+                .order_by(RequestLog.timestamp.desc())
+                .limit(100)
+            )
+
+            # Calculate client-specific stats
+            total_requests = RequestLog.select().where(RequestLog.source_ip == client_ip).count()
+
+            successful_requests = (
+                RequestLog.select()
+                .where(
+                    (RequestLog.source_ip == client_ip)
+                    & (RequestLog.status_code >= 200)
+                    & (RequestLog.status_code < 400)
+                )
+                .count()
+            )
+
+            # Recent requests (last 24 hours)
+            from datetime import datetime, timedelta
+
+            since_24h = datetime.now() - timedelta(hours=24)
+            recent_requests = (
+                RequestLog.select()
+                .where((RequestLog.source_ip == client_ip) & (RequestLog.timestamp >= since_24h))
+                .count()
+            )
+
+            # Inflight requests
+            inflight_requests = (
+                RequestLog.select()
+                .where((RequestLog.source_ip == client_ip) & (RequestLog.completed_at.is_null()))
+                .count()
+            )
+
+            # Format logs with real-time duration calculation
+            formatted_logs = []
+            for log in logs:
+                duration_ms = log.duration_ms
+                if duration_ms is None and log.status_code is None:
+                    # Pending request - calculate elapsed time
+                    elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
+                    duration_ms = int(elapsed_seconds * 1000)
+
+                formatted_logs.append(
+                    {
+                        "id": log.id,
+                        "timestamp": log.timestamp.isoformat(),
+                        "source_ip": log.source_ip,
+                        "path": log.path,
+                        "original_model": log.original_model,
+                        "mapped_model": log.mapped_model,
+                        "service_type": log.service_type,
+                        "status_code": log.status_code,
+                        "duration_ms": duration_ms,
+                        "request_size": log.request_size,
+                        "response_size": log.response_size,
+                        "upstream_url": log.upstream_url,
+                    }
+                )
+
+            stats = {
+                "total_requests": total_requests,
+                "successful_requests": successful_requests,
+                "recent_requests": recent_requests,
+                "inflight_requests": inflight_requests,
+            }
+
+            initial_data = {
+                "type": "client_dashboard_update",
+                "logs": formatted_logs,
+                "stats": stats,
+                "client_ip": client_ip,
+            }
+            await manager.send_personal_message(initial_data, websocket)
+
+        except Exception as e:
+            logger.error(f"Failed to send initial client dashboard data for {client_ip}: {e}")
+
+        # Keep connection alive and handle pings
+        while True:
+            try:
+                # Wait for ping or other messages from client
+                data = await websocket.receive_text()
+                message = json.loads(data)
+
+                if message.get("type") == "ping":
+                    await manager.send_personal_message({"type": "pong"}, websocket)
+                elif message.get("type") == "refresh":
+                    # Client requested refresh - send current data
+                    # (Same logic as initial data - could be refactored)
+                    pass
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error for client {client_ip}: {e}")
                 break
 
     finally:

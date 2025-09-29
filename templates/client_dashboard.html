@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SmolRouter - Dashboard</title>
+    <title>SmolRouter - Client Dashboard ({{ client_ip }})</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <style>
@@ -69,6 +69,26 @@
             margin: 0;
             color: #333;
             font-size: 1.25rem;
+        }
+
+        .client-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .client-header h1 {
+            margin: 0 0 0.5rem 0;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .client-header .client-ip {
+            font-size: 1.25rem;
+            font-family: 'Monaco', 'Menlo', monospace;
+            opacity: 0.9;
         }
 
         .action-buttons {
@@ -182,7 +202,6 @@
             font-weight: 500;
         }
 
-        /* Loading states */
         .loading {
             opacity: 0.5;
             pointer-events: none;
@@ -203,7 +222,7 @@
             margin-left: 1rem;
         }
 
-        /* JSON Formatting Styles */
+        /* JSON Formatting Styles (reused from main dashboard) */
         .json-container {
             background: #f8f9fa;
             border: 1px solid #e9ecef;
@@ -285,6 +304,21 @@
             transform: rotate(90deg);
         }
 
+        .breadcrumb {
+            background: #e9ecef;
+            padding: 1rem 2rem;
+            font-size: 0.9rem;
+        }
+
+        .breadcrumb a {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+
         @media (max-width: 768px) {
             .stats {
                 grid-template-columns: repeat(2, 1fr);
@@ -319,6 +353,17 @@
     <!-- Keep existing navigation -->
     {% include 'navigation.html' %}
 
+    <!-- Breadcrumb -->
+    <div class="breadcrumb">
+        <a href="/">Dashboard</a> > Client {{ client_ip }}
+    </div>
+
+    <!-- Client Header -->
+    <div class="client-header">
+        <h1>Client Dashboard</h1>
+        <div class="client-ip">{{ client_ip }}</div>
+    </div>
+
     <!-- Stats Section -->
     <div class="stats">
         <div class="stat-card">
@@ -327,7 +372,7 @@
         </div>
         <div class="stat-card">
             <div class="number" style="color: #388e3c;" id="successful-requests">-</div>
-            <div class="label">Processed</div>
+            <div class="label">Successful</div>
         </div>
         <div class="stat-card">
             <div class="number" style="color: #f57c00;" id="requests-24h">-</div>
@@ -343,7 +388,7 @@
     <div class="container">
         <div class="table-container">
             <div class="table-header">
-                <h2>Recent Requests</h2>
+                <h2>Recent Requests for {{ client_ip }}</h2>
                 <div class="action-buttons">
                     <button class="action-btn secondary" onclick="refreshData()">
                         <span class="material-icons" style="font-size: 1rem;">refresh</span>
@@ -360,7 +405,6 @@
                     <tr>
                         <th></th>
                         <th>Time</th>
-                        <th>Source</th>
                         <th>Service</th>
                         <th>Path</th>
                         <th>Model</th>
@@ -371,7 +415,7 @@
                 </thead>
                 <tbody id="requests-tbody">
                     <tr>
-                        <td colspan="9" class="no-data">
+                        <td colspan="8" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">hourglass_empty</span>
                             Loading requests...
                         </td>
@@ -382,31 +426,29 @@
     </div>
 
     <script>
+        const CLIENT_IP = '{{ client_ip }}';
         let websocket = null;
         let reconnectAttempts = 0;
         const MAX_RECONNECT_ATTEMPTS = 5;
-        const RECONNECT_INTERVAL = 3000; // 3 seconds
+        const RECONNECT_INTERVAL = 3000;
 
-        // Format timestamp for display
+        // Reuse all the formatting functions from main dashboard
         function formatTimestamp(isoString) {
             const date = new Date(isoString);
             return date.toLocaleTimeString();
         }
 
-        // Format file size
         function formatSize(bytes) {
             if (!bytes) return '-';
             return (bytes / 1024).toFixed(1) + ' KB';
         }
 
-        // Format duration
         function formatDuration(ms) {
             if (ms === null || ms === undefined || ms === 0) return '-';
-            if (ms < 0) return '-'; // Handle negative values from pending requests
+            if (ms < 0) return '-';
             return ms + 'ms';
         }
 
-        // Format status code
         function formatStatus(statusCode) {
             if (!statusCode) {
                 return '<span class="status" style="background: #f0f0f0; color: #666;">PENDING</span>';
@@ -415,7 +457,6 @@
             return `<span class="status status-${category}">${statusCode}</span>`;
         }
 
-        // Format model info
         function formatModel(originalModel, mappedModel) {
             if (mappedModel && mappedModel !== originalModel) {
                 return `
@@ -433,7 +474,7 @@
             }
         }
 
-        // Format JSON with syntax highlighting
+        // JSON formatting functions (same as main dashboard)
         function formatJSON(jsonString, maxLines = 20) {
             if (!jsonString) return '<span style="color: #666; font-style: italic;">No data</span>';
 
@@ -442,19 +483,16 @@
                 const formatted = JSON.stringify(parsed, null, 2);
                 const lines = formatted.split('\n');
 
-                // Truncate if too long
                 const truncated = lines.length > maxLines;
                 const displayLines = truncated ? lines.slice(0, maxLines) : lines;
                 const truncatedText = truncated ? `\n... (${lines.length - maxLines} more lines)` : '';
 
                 return highlightJSON(displayLines.join('\n') + truncatedText);
             } catch (e) {
-                // If not valid JSON, show as plain text
                 return `<span style="color: #666;">${escapeHtml(jsonString)}</span>`;
             }
         }
 
-        // Add JSON syntax highlighting
         function highlightJSON(json) {
             return json
                 .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")\s*:/g, '<span class="json-key">$1</span>:')
@@ -464,14 +502,12 @@
                 .replace(/: (null)/g, ': <span class="json-null">$1</span>');
         }
 
-        // Escape HTML
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
 
-        // Create JSON display component
         function createJSONDisplay(title, content, id) {
             if (!content) return '';
 
@@ -489,7 +525,6 @@
             `;
         }
 
-        // Toggle JSON visibility
         function toggleJSON(elementId) {
             const element = document.getElementById(elementId);
             const button = element.parentElement.querySelector('.json-toggle');
@@ -503,7 +538,6 @@
             }
         }
 
-        // Toggle row expansion
         function toggleRowExpansion(requestId) {
             const detailsRow = document.getElementById(`details-${requestId}`);
             const expandIcon = document.querySelector(`[onclick="toggleRowExpansion('${requestId}')"] .expand-icon`);
@@ -511,7 +545,6 @@
             if (detailsRow.style.display === 'none') {
                 detailsRow.style.display = '';
                 expandIcon.classList.add('expanded');
-                // Load request details if not already loaded
                 loadRequestDetails(requestId);
             } else {
                 detailsRow.style.display = 'none';
@@ -519,10 +552,9 @@
             }
         }
 
-        // Load detailed request/response data
         async function loadRequestDetails(requestId) {
             const detailsCell = document.getElementById(`details-content-${requestId}`);
-            if (detailsCell.dataset.loaded === 'true') return; // Already loaded
+            if (detailsCell.dataset.loaded === 'true') return;
 
             try {
                 detailsCell.innerHTML = '<div style="text-align: center; padding: 1rem; color: #666;">Loading details...</div>';
@@ -536,17 +568,14 @@
 
                 let detailsHTML = '';
 
-                // Request details
                 if (data.request_body) {
                     detailsHTML += createJSONDisplay('Request Body', data.request_body, requestId);
                 }
 
-                // Response details
                 if (data.response_body) {
                     detailsHTML += createJSONDisplay('Response Body', data.response_body, requestId);
                 }
 
-                // Additional metadata
                 const metadata = {
                     upstream_url: data.upstream_url,
                     error_message: data.error_message
@@ -573,24 +602,22 @@
             }
         }
 
-        // Update stats display
         function updateStats(stats) {
             document.getElementById('total-requests').textContent = stats.total_requests || 0;
-            document.getElementById('successful-requests').textContent = (stats.openai_requests || 0) + (stats.ollama_requests || 0);
+            document.getElementById('successful-requests').textContent = stats.successful_requests || 0;
             document.getElementById('requests-24h').textContent = stats.recent_requests || 0;
             document.getElementById('inflight-requests').textContent = stats.inflight_requests || 0;
         }
 
-        // Update requests table
         function updateRequestsTable(logs) {
             const tbody = document.getElementById('requests-tbody');
 
             if (!logs || logs.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="9" class="no-data">
+                        <td colspan="8" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
-                            No requests logged yet
+                            No requests logged yet for this client
                         </td>
                     </tr>
                 `;
@@ -603,7 +630,6 @@
                         <span class="material-icons expand-icon">chevron_right</span>
                     </td>
                     <td class="timestamp">${formatTimestamp(log.timestamp)}</td>
-                    <td><a href="/clients/${log.source_ip}" style="color: #007bff; text-decoration: none;">${log.source_ip || '-'}</a></td>
                     <td>
                         <span class="service-badge service-${log.service_type}">
                             ${log.service_type || 'unknown'}
@@ -616,14 +642,13 @@
                     <td>${formatStatus(log.status_code)}</td>
                 </tr>
                 <tr class="row-details" id="details-${log.id}" style="display: none;">
-                    <td colspan="9" id="details-content-${log.id}">
+                    <td colspan="8" id="details-content-${log.id}">
                         <!-- Details loaded on expand -->
                     </td>
                 </tr>
             `).join('');
         }
 
-        // Show error message
         function showError(message) {
             const errorContainer = document.getElementById('error-container');
             errorContainer.innerHTML = `
@@ -633,19 +658,17 @@
             `;
         }
 
-        // Clear error message
         function clearError() {
             document.getElementById('error-container').innerHTML = '';
         }
 
-        // Fetch and update dashboard data
         async function refreshData() {
             const table = document.getElementById('requests-table');
             table.classList.add('loading');
             clearError();
 
             try {
-                const response = await fetch('/api/dashboard?limit=100');
+                const response = await fetch(`/api/clients/${CLIENT_IP}?limit=100`);
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
@@ -654,12 +677,11 @@
                 updateStats(data.stats);
                 updateRequestsTable(data.logs);
 
-                // Update last refresh time
                 const now = new Date().toLocaleTimeString();
-                console.log(`Dashboard refreshed at ${now}`);
+                console.log(`Client dashboard refreshed at ${now}`);
 
             } catch (error) {
-                console.error('Failed to refresh dashboard:', error);
+                console.error('Failed to refresh client dashboard:', error);
                 showError(`Failed to refresh data: ${error.message}`);
             } finally {
                 table.classList.remove('loading');
@@ -669,13 +691,13 @@
         // WebSocket connection management
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/dashboard`;
+            const wsUrl = `${protocol}//${window.location.host}/ws/clients/${CLIENT_IP}`;
 
             try {
                 websocket = new WebSocket(wsUrl);
 
                 websocket.onopen = function(event) {
-                    console.log('WebSocket connected');
+                    console.log('Client WebSocket connected');
                     reconnectAttempts = 0;
                     updateConnectionStatus('🟢 Live', 'Connected - Real-time updates');
                 };
@@ -690,10 +712,9 @@
                 };
 
                 websocket.onclose = function(event) {
-                    console.log('WebSocket closed');
+                    console.log('Client WebSocket closed');
                     updateConnectionStatus('🔴 Disconnected', 'Connection lost');
 
-                    // Attempt to reconnect
                     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                         reconnectAttempts++;
                         updateConnectionStatus('🟡 Reconnecting...', `Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
@@ -705,12 +726,12 @@
                 };
 
                 websocket.onerror = function(error) {
-                    console.error('WebSocket error:', error);
+                    console.error('Client WebSocket error:', error);
                     updateConnectionStatus('🔴 Error', 'Connection error');
                 };
 
             } catch (error) {
-                console.error('Failed to create WebSocket connection:', error);
+                console.error('Failed to create client WebSocket connection:', error);
                 updateConnectionStatus('🔴 Failed', 'Cannot connect');
             }
         }
@@ -722,41 +743,37 @@
         }
 
         function handleWebSocketMessage(data) {
-            console.log('WebSocket message received:', data.type, data);
+            console.log('Client WebSocket message received:', data.type, data);
             switch (data.type) {
-                case 'dashboard_update':
+                case 'client_dashboard_update':
                     updateStats(data.stats);
                     updateRequestsTable(data.logs);
                     break;
                 case 'new_request':
-                    console.log('Adding new request to table:', data.data);
-                    // Add new request to top of table
-                    addNewRequestToTable(data.data);
+                    if (data.data.source_ip === CLIENT_IP) {
+                        console.log('Adding new request to client table:', data.data);
+                        addNewRequestToTable(data.data);
+                    }
                     break;
                 case 'request_completed':
-                    console.log('Updating completed request:', data.data);
-                    // Update existing request in table
-                    updateRequestInTable(data.data);
-                    break;
-                case 'stats_update':
-                    updateStats(data.stats);
+                    if (data.data.source_ip === CLIENT_IP) {
+                        console.log('Updating completed request in client table:', data.data);
+                        updateRequestInTable(data.data);
+                    }
                     break;
                 default:
-                    console.log('Unknown WebSocket message type:', data.type);
+                    console.log('Unknown client WebSocket message type:', data.type);
             }
         }
 
-        // Add helper functions for live updates
         function addNewRequestToTable(request) {
             const tbody = document.getElementById('requests-tbody');
             const existingRows = tbody.querySelectorAll('tr');
 
-            // Remove "no data" row if present
             if (existingRows.length === 1 && existingRows[0].querySelector('.no-data')) {
                 tbody.innerHTML = '';
             }
 
-            // Create new row
             const newRow = document.createElement('tr');
             newRow.className = 'expandable-row';
             newRow.onclick = () => toggleRowExpansion(request.id);
@@ -765,7 +782,6 @@
                     <span class="material-icons expand-icon">chevron_right</span>
                 </td>
                 <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                <td><a href="/clients/${request.source_ip}" style="color: #007bff; text-decoration: none;">${request.source_ip || '-'}</a></td>
                 <td>
                     <span class="service-badge service-${request.service_type}">
                         ${request.service_type || 'unknown'}
@@ -778,23 +794,20 @@
                 <td>${formatStatus(request.status_code)}</td>
             `;
 
-            // Create details row
             const detailsRow = document.createElement('tr');
             detailsRow.className = 'row-details';
             detailsRow.id = `details-${request.id}`;
             detailsRow.style.display = 'none';
             detailsRow.innerHTML = `
-                <td colspan="9" id="details-content-${request.id}">
+                <td colspan="8" id="details-content-${request.id}">
                     <!-- Details loaded on expand -->
                 </td>
             `;
 
-            // Add both rows to top of table
             tbody.insertBefore(detailsRow, tbody.firstChild);
             tbody.insertBefore(newRow, tbody.firstChild);
 
-            // Remove excess rows (keep last 100 request pairs)
-            while (tbody.children.length > 200) { // 200 because each request has 2 rows
+            while (tbody.children.length > 200) {
                 tbody.removeChild(tbody.lastChild);
                 tbody.removeChild(tbody.lastChild);
             }
@@ -806,13 +819,11 @@
 
             for (const row of rows) {
                 if (row.onclick && row.onclick.toString().includes(request.id)) {
-                    // Update the row
                     row.innerHTML = `
                         <td>
                             <span class="material-icons expand-icon">chevron_right</span>
                         </td>
                         <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                        <td><a href="/clients/${request.source_ip}" style="color: #007bff; text-decoration: none;">${request.source_ip || '-'}</a></td>
                         <td>
                             <span class="service-badge service-${request.service_type}">
                                 ${request.service_type || 'unknown'}
@@ -825,7 +836,6 @@
                         <td>${formatStatus(request.status_code)}</td>
                     `;
 
-                    // Restore click handler
                     row.onclick = () => toggleRowExpansion(request.id);
                     break;
                 }
@@ -834,16 +844,12 @@
 
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
-            console.log('Real-time dashboard loaded');
+            console.log(`Client dashboard loaded for ${CLIENT_IP}`);
 
-            // Initial data load
             refreshData();
-
-            // Connect WebSocket for real-time updates
             connectWebSocket();
         });
 
-        // Cleanup on page unload
         window.addEventListener('beforeunload', function() {
             if (websocket) {
                 websocket.close();

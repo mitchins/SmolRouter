@@ -1,16 +1,16 @@
 # SmolRouter
 
-SmolRouter is a lightweight, observable proxy for routing AI model traffic. It keeps your existing OpenAI-compatible clients working while you experiment with different local or hosted model providers.
+SmolRouter is a lightweight proxy for AI model traffic. Drop-in replacement that keeps your existing OpenAI clients working while routing to any provider.
 
 [![PyPI version](https://badge.fury.io/py/SmolRouter.svg)](https://badge.fury.io/py/SmolRouter)
 [![codecov](https://codecov.io/gh/mitchins/smolrouter/branch/main/graph/badge.svg)](https://codecov.io/gh/mitchins/smolrouter)
 
-## TL;DR
+## What it does
 
-- Acts as a drop-in replacement for OpenAI and Ollama endpoints (`http://localhost:1234` by default).
-- Routes requests by model name, source host, or custom aliases with automatic failover.
-- Logs every request to SQLite with a built-in dashboard for live metrics and request inspection.
-- Ships with security controls (JWT auth, reverse-proxy detection) but is intended to run behind your own proxy.
+1. **Model remapping** - `gpt-4` → `llama3-70b` (your existing code works unchanged)
+2. **Debug proxy** - Live dashboard with request/response inspection and JSON formatting
+3. **Load balancing** - Distribute requests across multiple instances with automatic failover
+4. **Cloud converter** - Route different models to different providers (local, OpenAI, Anthropic, Google)
 
 ## Quick Start
 
@@ -18,13 +18,9 @@ SmolRouter is a lightweight, observable proxy for routing AI model traffic. It k
 
 ```bash
 docker build -t smolrouter .
-docker run -d \
-  --name smolrouter \
-  --restart unless-stopped \
-  -p 1234:1234 \
-  -e DEFAULT_UPSTREAM="http://localhost:8000" \
-  -e MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}' \
-  -v ./routes.yaml:/app/routes.yaml \
+docker run -d -p 1234:1234 \
+  -e DEFAULT_UPSTREAM="http://host.docker.internal:8000" \
+  -e MODEL_MAP='{"gpt-4":"llama3-70b"}' \
   smolrouter
 ```
 
@@ -32,30 +28,28 @@ docker run -d \
 
 ```bash
 pip install smolrouter
-
 export DEFAULT_UPSTREAM="http://localhost:8000"
-export MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}'
+export MODEL_MAP='{"gpt-4":"llama3-70b"}'
 smolrouter
-
-# Alternate entrypoint if you need to change the listen port
-LISTEN_PORT=8080 python -m smolrouter.app
 ```
 
 ### Point clients at SmolRouter
 
 ```python
 import openai
+import os
 
 client = openai.OpenAI(
     base_url="http://localhost:1234/v1",
-    api_key="your-api-key"  # forwarded to the upstream server
+    api_key=os.environ["OPENAI_API_KEY"]  # supplied via env; not committed
 )
 
 response = client.chat.completions.create(
-    model="gpt-3.5-turbo",  # transparently remapped to "llama3-8b"
+    model="gpt-4",  # → llama3-70b on your local server
     messages=[{"role": "user", "content": "Hello!"}]
 )
-```
+# Your code unchanged, model remapped, works immediately
+```here:
 
 ### Using Google GenAI models
 

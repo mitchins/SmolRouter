@@ -1,0 +1,52 @@
+# Test configuration for unit tests
+# NOTE: Example secrets removed to satisfy detect-secrets. Use env vars or private config for real keys.
+# Tests that require keys should read from environment (e.g., GOOGLE_API_KEY, OPENAI_API_KEY).
+routes: []
+
+providers:
+  - name: "google-test"
+    type: "google-genai"
+    enabled: true
+    priority: 1
+    api_keys: []
+    # set GOOGLE_API_KEY in env for tests; leave empty in repo
+    max_requests_per_day: 5
+    timeout: 30.0
+
+  - name: "lm-studio-test"
+    type: "openai"
+    enabled: true
+    priority: 1
+    url: "http://localhost:11434"  # For local model mocking
+    api_key: null  # local mock; no key committed
+    timeout: 30.0
+    metadata:
+      description: "Test local LM Studio server"
+      models_available: ["llama3-8b-local", "mistral-7b-local"]
+
+  - name: "openai-test"
+    type: "openai"
+    enabled: true
+    priority: 2
+    url: "http://localhost:8000"  # For cloud model mocking
+    api_key: null  # set OPENAI_API_KEY in env if needed
+    timeout: 30.0
+    metadata:
+      description: "Test OpenAI cloud models"
+
+strategy:
+  type: "smart"
+  config:
+    aliases: {}
+
+access_control:
+  type: "basic"
+  config:
+    default_access: true
+
+cache:
+  enabled: true
+  ttl: 300
+
+container:
+  enabled: true
