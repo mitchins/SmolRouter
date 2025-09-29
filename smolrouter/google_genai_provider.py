@@ -831,7 +831,6 @@ class GoogleGenAIProvider(IModelProvider):
                     "total_requests_today": 0,
                     "total_tokens_today": 0,
                     "total_errors": 0,
-                    "daily_limit_per_model": self.get_model_daily_limit(model),
                 }
 
             model_limit = self.get_model_daily_limit(model)
@@ -878,7 +877,6 @@ class GoogleGenAIProvider(IModelProvider):
                     "total_requests_today": 0,
                     "total_tokens_today": 0,
                     "total_errors": 0,
-                    "daily_limit_per_model": self.get_model_daily_limit(model),
                 }
 
         # Add rate limiter statistics
