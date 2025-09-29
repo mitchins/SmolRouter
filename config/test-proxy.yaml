@@ -1,0 +1,33 @@
+# Test configuration for gemini-2.5-flash-lite with Charles proxy
+routes: []
+
+providers:
+  - name: "google-test-with-charles-proxy"
+    type: "google-genai"
+    enabled: true
+    priority: 1
+    api_keys:
+      - "foo-bar"
+    max_requests_per_day: 1500
+    timeout: 30.0
+    # Per-model proxy configuration for Charles proxy
+    per_model_proxy:
+      "gemini-2.5-flash-lite":
+        https_proxy: "http://127.0.0.1:8888"
+
+strategy:
+  type: "smart"
+  config:
+    aliases: {}
+
+access_control:
+  type: "basic"
+  config:
+    default_access: true
+
+cache:
+  enabled: true
+  ttl: 300
+
+container:
+  enabled: true

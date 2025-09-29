@@ -374,19 +374,46 @@ class ProviderFactory:
         return provider_class(config)
 
     @classmethod
+    def _convert_proxy_configs(cls, provider_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert dictionary proxy configurations to ProxyConfig objects"""
+        from .interfaces import ProxyConfig
+
+        # Create a copy to avoid modifying the original
+        config = provider_config.copy()
+
+        # Convert proxy_config dict to ProxyConfig object
+        if "proxy_config" in config and isinstance(config["proxy_config"], dict):
+            config["proxy_config"] = ProxyConfig(**config["proxy_config"])
+
+        # Convert per_model_proxy dict values to ProxyConfig objects
+        if "per_model_proxy" in config and isinstance(config["per_model_proxy"], dict):
+            per_model_proxy = {}
+            for model_name, proxy_dict in config["per_model_proxy"].items():
+                if isinstance(proxy_dict, dict):
+                    per_model_proxy[model_name] = ProxyConfig(**proxy_dict)
+                else:
+                    per_model_proxy[model_name] = proxy_dict
+            config["per_model_proxy"] = per_model_proxy
+
+        return config
+
+    @classmethod
     def create_providers_from_config(cls, providers_config: List[Dict[str, Any]]) -> List[IModelProvider]:
         """Create multiple providers from configuration list"""
         providers = []
 
         for provider_config in providers_config:
             try:
+                # Convert proxy configurations from dicts to ProxyConfig objects
+                processed_config = cls._convert_proxy_configs(provider_config)
+
                 # Handle special provider configs
-                if provider_config.get("type") == "google-genai":
-                    config = GoogleGenAIConfig(**provider_config)
-                elif provider_config.get("type") == "anthropic":
-                    config = AnthropicConfig(**provider_config)
+                if processed_config.get("type") == "google-genai":
+                    config = GoogleGenAIConfig(**processed_config)
+                elif processed_config.get("type") == "anthropic":
+                    config = AnthropicConfig(**processed_config)
                 else:
-                    config = ProviderConfig(**provider_config)
+                    config = ProviderConfig(**processed_config)
 
                 if config.enabled:
                     provider = cls.create_provider(config)

@@ -8,13 +8,13 @@ Provides OpenAI-compatible access to Anthropic Claude models with:
 - OpenAI to Anthropic format translation
 """
 
-import httpx
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 from smolrouter.interfaces import IModelProvider, ProviderConfig, ModelInfo
+from smolrouter.http_client import http_client_factory
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,13 @@ class AnthropicProvider(IModelProvider):
         """Check if Anthropic API is reachable"""
         try:
             # Try a simple request to check connectivity
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                response = await client.get("https://api.anthropic.com/v1/health")
-                # Anthropic doesn't have a health endpoint, so we'll just check if the base URL is reachable
-                return response.status_code in [200, 404]  # 404 is expected for /health
+            proxy_config = self.config.get_proxy_for_model("health-check")
+            client = http_client_factory.get_client_for_model(
+                provider_name=self.get_provider_id(), model_name="health-check", timeout=5.0, proxy_config=proxy_config
+            )
+            response = await client.get("https://api.anthropic.com/v1/health")
+            # Anthropic doesn't have a health endpoint, so we'll just check if the base URL is reachable
+            return response.status_code in [200, 404]  # 404 is expected for /health
         except Exception as e:
             logger.warning(f"Anthropic health check failed: {e}")
             return False
@@ -128,31 +131,39 @@ class AnthropicProvider(IModelProvider):
         headers = {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"}
 
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                response = await client.post(
-                    "https://api.anthropic.com/v1/messages", headers=headers, json=anthropic_request
-                )
+            # Get model-specific proxy configuration
+            model_name = request_data.get("model", "unknown")
+            proxy_config = self.config.get_proxy_for_model(model_name)
+            client = http_client_factory.get_client_for_model(
+                provider_name=self.get_provider_id(),
+                model_name=model_name,
+                timeout=self.config.timeout,
+                proxy_config=proxy_config,
+            )
+            response = await client.post(
+                "https://api.anthropic.com/v1/messages", headers=headers, json=anthropic_request
+            )
 
-                if response.status_code != 200:
-                    error_msg = f"Anthropic API error {response.status_code}: {response.text}"
-                    stats.last_error = error_msg
-                    stats.error_count += 1
-                    raise Exception(error_msg)
+            if response.status_code != 200:
+                error_msg = f"Anthropic API error {response.status_code}: {response.text}"
+                stats.last_error = error_msg
+                stats.error_count += 1
+                raise Exception(error_msg)
 
-                anthropic_response = response.json()
+            anthropic_response = response.json()
 
-                # Update statistics
-                stats.requests_today += 1
-                stats.last_request = datetime.now()
+            # Update statistics
+            stats.requests_today += 1
+            stats.last_request = datetime.now()
 
-                # Extract token usage
-                if "usage" in anthropic_response:
-                    input_tokens = anthropic_response["usage"].get("input_tokens", 0)
-                    output_tokens = anthropic_response["usage"].get("output_tokens", 0)
-                    stats.tokens_today += input_tokens + output_tokens
+            # Extract token usage
+            if "usage" in anthropic_response:
+                input_tokens = anthropic_response["usage"].get("input_tokens", 0)
+                output_tokens = anthropic_response["usage"].get("output_tokens", 0)
+                stats.tokens_today += input_tokens + output_tokens
 
-                # Convert Anthropic response to OpenAI format
-                return self._convert_anthropic_to_openai(anthropic_response, model)
+            # Convert Anthropic response to OpenAI format
+            return self._convert_anthropic_to_openai(anthropic_response, model)
 
         except Exception as e:
             stats.last_error = str(e)

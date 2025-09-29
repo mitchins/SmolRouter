@@ -171,6 +171,60 @@ class IModelCache(ABC):
 
 
 @dataclass
+class ProxyConfig:
+    """Configuration for HTTP proxy settings"""
+
+    http_proxy: Optional[str] = None
+    https_proxy: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    def to_httpx_proxy(self) -> Optional[str]:
+        """Convert to httpx proxy format (single URL)"""
+        # httpx expects a single proxy URL, prioritize HTTPS proxy
+        if self.https_proxy:
+            proxy_url = self.https_proxy
+            if self.username and self.password:
+                # Insert auth into URL
+                if "://" in proxy_url:
+                    scheme, rest = proxy_url.split("://", 1)
+                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
+            return proxy_url
+        elif self.http_proxy:
+            proxy_url = self.http_proxy
+            if self.username and self.password:
+                # Insert auth into URL
+                if "://" in proxy_url:
+                    scheme, rest = proxy_url.split("://", 1)
+                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
+            return proxy_url
+        return None
+
+    def to_httpx_proxies(self) -> Dict[str, str]:
+        """Convert to httpx proxy format (for backward compatibility)"""
+        proxies = {}
+        if self.http_proxy:
+            proxy_url = self.http_proxy
+            if self.username and self.password:
+                # Insert auth into URL
+                if "://" in proxy_url:
+                    scheme, rest = proxy_url.split("://", 1)
+                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
+            proxies["http://"] = proxy_url
+
+        if self.https_proxy:
+            proxy_url = self.https_proxy
+            if self.username and self.password:
+                # Insert auth into URL
+                if "://" in proxy_url:
+                    scheme, rest = proxy_url.split("://", 1)
+                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
+            proxies["https://"] = proxy_url
+
+        return proxies
+
+
+@dataclass
 class ProviderConfig:
     """Configuration for a model provider"""
 
@@ -182,10 +236,22 @@ class ProviderConfig:
     enabled: bool = True
     priority: int = 0  # Lower numbers have higher priority
     metadata: Dict[str, Any] = None
+    proxy_config: Optional[ProxyConfig] = None  # Default proxy for all models
+    per_model_proxy: Dict[str, ProxyConfig] = None  # Model-specific proxy overrides
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.per_model_proxy is None:
+            self.per_model_proxy = {}
+
+    def get_proxy_for_model(self, model_name: str) -> Optional[ProxyConfig]:
+        """Get proxy configuration for a specific model"""
+        # Check for model-specific proxy first
+        if model_name in self.per_model_proxy:
+            return self.per_model_proxy[model_name]
+        # Fall back to default proxy
+        return self.proxy_config
 
 
 @dataclass

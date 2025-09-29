@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmolRouter - Providers</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .page-header {
+            margin-bottom: 2rem;
+        }
+
+        .page-header h1 {
+            margin: 0 0 0.5rem 0;
+            color: #333;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .page-header p {
+            color: #666;
+            font-size: 1.1rem;
+            margin: 0;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .stat-meta {
+            color: #999;
+            font-size: 0.85rem;
+            margin-top: 0.25rem;
+        }
+
+        .providers-container {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .provider-card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .provider-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+        }
+
+        .provider-header {
+            padding: 1.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .provider-header.google {
+            background: linear-gradient(135deg, #4285f4 0%, #ea4335 100%);
+        }
+
+        .provider-header.anthropic {
+            background: linear-gradient(135deg, #d4a574 0%, #8b6239 100%);
+        }
+
+        .provider-header.openai {
+            background: linear-gradient(135deg, #10a37f 0%, #1a7f64 100%);
+        }
+
+        .provider-header.local {
+            background: linear-gradient(135deg, #6b7280 0%, #374151 100%);
+        }
+
+        .provider-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .provider-icon {
+            font-size: 2rem;
+        }
+
+        .provider-name {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .provider-type {
+            font-size: 0.85rem;
+            opacity: 0.9;
+            margin-top: 0.25rem;
+        }
+
+        .provider-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(255,255,255,0.2);
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #22c55e;
+        }
+
+        .status-indicator.unhealthy {
+            background: #ef4444;
+        }
+
+        .provider-content {
+            padding: 1.5rem;
+        }
+
+        .provider-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .provider-stat {
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .provider-stat-label {
+            color: #666;
+            font-size: 0.85rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .provider-stat-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .models-section {
+            margin-top: 1.5rem;
+        }
+
+        .models-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .models-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .models-toggle {
+            background: none;
+            border: none;
+            color: #667eea;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .models-list {
+            display: none;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.5rem;
+        }
+
+        .models-list.expanded {
+            display: grid;
+        }
+
+        .model-tag {
+            padding: 0.5rem 0.75rem;
+            background: #f3f4f6;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: #555;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .provider-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid #e5e7eb;
+        }
+
+        .action-button {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .action-button.primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .action-button.primary:hover {
+            background: #5a67d8;
+        }
+
+        .action-button.secondary {
+            background: #f3f4f6;
+            color: #666;
+        }
+
+        .action-button.secondary:hover {
+            background: #e5e7eb;
+        }
+
+        .quota-section {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .quota-bar {
+            width: 100%;
+            height: 20px;
+            background: #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 0.5rem 0;
+        }
+
+        .quota-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+            transition: width 0.3s ease;
+        }
+
+        .quota-fill.warning {
+            background: linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%);
+        }
+
+        .quota-fill.danger {
+            background: linear-gradient(90deg, #ef4444 0%, #f87171 100%);
+        }
+
+        .quota-text {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: #666;
+            margin-top: 0.25rem;
+        }
+
+        .model-category {
+            margin-bottom: 1rem;
+        }
+
+        .model-category h4 {
+            font-size: 0.9rem;
+            margin: 0 0 0.5rem 0;
+            color: #555;
+            font-weight: 600;
+        }
+
+        .model-tag.stable {
+            background: #10b981;
+            color: white;
+        }
+
+        .model-tag.preview {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .model-tag.deprecated {
+            background: #6b7280;
+            color: white;
+        }
+
+        .show-more-models {
+            background: #f3f4f6;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+            color: #6b7280;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        .show-more-models:hover {
+            background: #e5e7eb;
+            color: #374151;
+        }
+
+        .model-quotas {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+
+        .model-quota-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #e1e5e9;
+        }
+
+        .model-quota-item:last-child {
+            border-bottom: none;
+        }
+
+        .model-quota-name {
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        .model-quota-usage {
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .used-models-section {
+            margin-bottom: 1.5rem;
+        }
+
+        .used-models-section h4 {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.95rem;
+            margin: 0 0 1rem 0;
+            color: #1f2937;
+            font-weight: 600;
+        }
+
+        .used-models-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        .used-model-card {
+            background: #f8f9fa;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 1rem;
+            transition: all 0.2s;
+        }
+
+        .used-model-card.high {
+            border-color: #ef4444;
+            background: #fef2f2;
+        }
+
+        .used-model-card.medium {
+            border-color: #f59e0b;
+            background: #fffbeb;
+        }
+
+        .used-model-card.low {
+            border-color: #10b981;
+            background: #f0fdf4;
+        }
+
+        .used-model-card .model-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+            color: #1f2937;
+        }
+
+        .used-model-card .model-stats {
+            font-size: 0.85rem;
+        }
+
+        .used-model-card .stat {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+
+        .used-model-card .label {
+            color: #6b7280;
+        }
+
+        .used-model-card .value {
+            font-weight: 600;
+            color: #1f2937;
+        }
+
+        .usage-bar {
+            height: 4px;
+            background: #e5e7eb;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .usage-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981 0%, #f59e0b 50%, #ef4444 100%);
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        .all-models-section {
+            margin-top: 1rem;
+        }
+
+        .view-all-models {
+            background: #f3f4f6;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            padding: 1rem;
+            width: 100%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: #374151;
+            transition: all 0.2s;
+        }
+
+        .view-all-models:hover {
+            background: #e5e7eb;
+            color: #1f2937;
+        }
+
+        .model-tag.used {
+            background: #10b981;
+            color: white;
+            position: relative;
+        }
+
+        .model-tag.used::after {
+            content: '•';
+            position: absolute;
+            top: 2px;
+            right: 6px;
+            font-size: 1.2rem;
+            color: #dcfce7;
+        }
+
+        .working-keys-info {
+            background: #f0f9ff;
+            border: 1px solid #0ea5e9;
+            border-radius: 6px;
+            padding: 0.75rem;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+            color: #0c4a6e;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .working-keys-info .material-icons {
+            font-size: 1rem;
+            color: #0ea5e9;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .provider-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+
+            .provider-stats {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    {% include 'navigation.html' %}
+
+    <div class="container">
+        <div class="page-header">
+            <h1>Provider Management</h1>
+            <p>Monitor and manage all AI model providers in one place</p>
+        </div>
+
+        <!-- Summary Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Active Providers</div>
+                <div class="stat-value" id="active-providers">0</div>
+                <div class="stat-meta">of <span id="total-providers">0</span> configured</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Models</div>
+                <div class="stat-value" id="total-models">0</div>
+                <div class="stat-meta">across all providers</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Requests Today</div>
+                <div class="stat-value" id="requests-today">0</div>
+                <div class="stat-meta">last 24 hours</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg Response Time</div>
+                <div class="stat-value" id="avg-response">0</div>
+                <div class="stat-meta">milliseconds</div>
+            </div>
+        </div>
+
+        <!-- Providers List -->
+        <div class="providers-container" id="providers-container">
+            <!-- Provider cards will be dynamically inserted here -->
+        </div>
+    </div>
+
+    <script>
+        let providersData = null;
+
+        async function loadProviders() {
+            try {
+                // Load main provider data
+                const response = await fetch('/api/upstreams');
+                const data = await response.json();
+                providersData = data;
+
+                // Update summary stats
+                updateSummaryStats(data);
+
+                // Store providers data globally for model list updates
+                window.currentProvidersData = data.upstreams || [];
+
+                // Render provider cards
+                renderProviders(data);
+
+                // Load provider-specific stats
+                await loadProviderSpecificStats();
+            } catch (error) {
+                console.error('Failed to load providers:', error);
+            }
+        }
+
+        function updateSummaryStats(data) {
+            const providers = data.upstreams || [];
+            const activeProviders = providers.filter(p => p.healthy).length;
+            const totalModels = providers.reduce((sum, p) => sum + (p.model_count || 0), 0);
+
+            document.getElementById('active-providers').textContent = activeProviders;
+            document.getElementById('total-providers').textContent = providers.length;
+            document.getElementById('total-models').textContent = totalModels;
+
+            // These would come from actual stats API
+            document.getElementById('requests-today').textContent = '1.2k';
+            document.getElementById('avg-response').textContent = '245';
+        }
+
+        function renderProviders(data) {
+            const container = document.getElementById('providers-container');
+            const providers = data.upstreams || [];
+
+            container.innerHTML = providers.map(provider => {
+                const typeClass = provider.type.toLowerCase().replace('-', '');
+                const healthClass = provider.healthy ? '' : 'unhealthy';
+
+                return `
+                    <div class="provider-card" data-provider-id="${provider.id}">
+                        <div class="provider-header ${typeClass}">
+                            <div class="provider-info">
+                                <span class="material-icons provider-icon">
+                                    ${getProviderIcon(provider.type)}
+                                </span>
+                                <div>
+                                    <h3 class="provider-name">${provider.name}</h3>
+                                    <div class="provider-type">${provider.type} • ${provider.endpoint}</div>
+                                </div>
+                            </div>
+                            <div class="provider-status">
+                                <span class="status-indicator ${healthClass}"></span>
+                                ${provider.healthy ? 'Healthy' : 'Unhealthy'}
+                            </div>
+                        </div>
+                        <div class="provider-content">
+                            <div class="provider-stats">
+                                <div class="provider-stat">
+                                    <div class="provider-stat-label">Models</div>
+                                    <div class="provider-stat-value">${provider.model_count || 0}</div>
+                                </div>
+                                <div class="provider-stat">
+                                    <div class="provider-stat-label">Priority</div>
+                                    <div class="provider-stat-value">${provider.priority || 0}</div>
+                                </div>
+                                <div class="provider-stat">
+                                    <div class="provider-stat-label">Last Check</div>
+                                    <div class="provider-stat-value">${provider.last_checked_ago || 'Never'}</div>
+                                </div>
+                            </div>
+
+                            ${renderProviderSpecificSection(provider)}
+
+                            <div class="models-section">
+                                <div class="models-header">
+                                    <span class="models-title">Available Models</span>
+                                    <button class="models-toggle" onclick="toggleModels('${provider.id}')">
+                                        <span class="material-icons">expand_more</span>
+                                        Show ${provider.model_count || 0} models
+                                    </button>
+                                </div>
+                                <div class="models-list" id="models-${provider.id}">
+                                    ${renderModelsList(provider.models || [], provider.id, window.providerUsageData?.[provider.id])}
+                                </div>
+                            </div>
+
+                            <div class="provider-actions">
+                                <button class="action-button primary" onclick="testProvider('${provider.id}')">
+                                    <span class="material-icons">play_arrow</span>
+                                    Test Connection
+                                </button>
+                                <button class="action-button secondary" onclick="viewDetails('${provider.id}')">
+                                    <span class="material-icons">info</span>
+                                    View Details
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderProviderSpecificSection(provider) {
+            // Special handling for Google GenAI providers
+            if (provider.type === 'google-genai') {
+                return `
+                    <div class="quota-section" id="quota-${provider.id}">
+                        <div class="provider-stat-label">Daily Quota Usage</div>
+                        <div class="quota-bar">
+                            <div class="quota-fill" style="width: 0%"></div>
+                        </div>
+                        <div class="quota-text">
+                            <span>Loading...</span>
+                            <span id="api-key-info-${provider.id}" style="display: none;"></span>
+                        </div>
+                        <div id="model-quotas-${provider.id}" class="model-quotas" style="margin-top: 1rem; display: none;">
+                        </div>
+                    </div>
+                `;
+            }
+            return '';
+        }
+
+        function renderModelsList(models, providerId, usageData = {}) {
+            if (!models || models.length === 0) {
+                return '<div class="model-tag">No models available</div>';
+            }
+
+            // For Google GenAI, show used models first with stats
+            if (providerId) {
+                const providerCard = document.querySelector(`[data-provider-id="${providerId}"]`);
+                const isGoogleGenAI = providerCard && (providerCard.innerHTML.includes('google-genai') || providerCard.innerHTML.includes('auto_awesome'));
+
+                if (isGoogleGenAI && usageData) {
+                    // Get used models with actual usage
+                    const usedModels = Object.entries(usageData).filter(([_, usage]) => usage.requests > 0);
+
+                    let html = '';
+
+                    if (usedModels.length > 0) {
+                        html += '<div class="used-models-section">';
+                        html += '<h4><span class="material-icons">trending_up</span> Active Models Today</h4>';
+                        html += '<div class="used-models-grid">';
+
+                        usedModels.forEach(([modelName, usage]) => {
+                            const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
+                            const statusClass = usagePercent > 80 ? 'high' : usagePercent > 50 ? 'medium' : 'low';
+
+                            html += `
+                                <div class="used-model-card ${statusClass}">
+                                    <div class="model-name">${modelName}</div>
+                                    <div class="model-stats">
+                                        <div class="stat">
+                                            <span class="label">Requests:</span>
+                                            <span class="value">${usage.requests}/${usage.limit}</span>
+                                        </div>
+                                        <div class="usage-bar">
+                                            <div class="usage-fill" style="width: ${usagePercent}%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+
+                        html += '</div></div>';
+                    }
+
+                    // Show "View All Models" button for unused models
+                    const unusedCount = models.length - usedModels.length;
+                    if (unusedCount > 0) {
+                        html += `<div class="all-models-section">
+                            <button class="view-all-models" onclick="showAllModels('${providerId}')">
+                                <span class="material-icons">apps</span>
+                                View All ${models.length} Models (${unusedCount} unused)
+                            </button>
+                        </div>`;
+                    }
+
+                    return html;
+                }
+            }
+
+            // Default behavior for other providers - show used models first
+            const usedModels = models.filter(model => {
+                return usageData[model.name] && usageData[model.name].requests > 0;
+            });
+
+            const unusedModels = models.filter(model => {
+                return !usageData[model.name] || usageData[model.name].requests === 0;
+            });
+
+            let html = '';
+
+            // Show used models first
+            if (usedModels.length > 0) {
+                html += usedModels.slice(0, 10).map(model =>
+                    `<div class="model-tag used" title="${model.display_name || model.name}">${model.display_name || model.name}</div>`
+                ).join('');
+            }
+
+            // Show a few unused models
+            if (unusedModels.length > 0) {
+                html += unusedModels.slice(0, 5).map(model =>
+                    `<div class="model-tag" title="${model.display_name || model.name}">${model.display_name || model.name}</div>`
+                ).join('');
+
+                // Show "view more" if there are many unused models
+                if (unusedModels.length > 5) {
+                    html += `<button class="show-more-models" onclick="showAllModels('${providerId}')">
+                        <span class="material-icons">expand_more</span>
+                        +${unusedModels.length - 5} more
+                    </button>`;
+                }
+            }
+
+            return html;
+        }
+
+        function getProviderIcon(type) {
+            const icons = {
+                'google-genai': 'auto_awesome',
+                'anthropic': 'psychology',
+                'openai': 'smart_toy',
+                'ollama': 'computer',
+                'local': 'home'
+            };
+            return icons[type.toLowerCase()] || 'hub';
+        }
+
+        function toggleModels(providerId) {
+            const modelsList = document.getElementById(`models-${providerId}`);
+            const button = event.currentTarget;
+            const icon = button.querySelector('.material-icons');
+
+            modelsList.classList.toggle('expanded');
+
+            if (modelsList.classList.contains('expanded')) {
+                icon.textContent = 'expand_less';
+                button.innerHTML = button.innerHTML.replace('Show', 'Hide');
+            } else {
+                icon.textContent = 'expand_more';
+                button.innerHTML = button.innerHTML.replace('Hide', 'Show');
+            }
+        }
+
+        async function loadProviderSpecificStats() {
+            // Load Google GenAI stats if available
+            try {
+                const response = await fetch('/api/google-genai/stats');
+                if (response.ok) {
+                    const data = await response.json();
+                    updateGoogleGenAIStats(data);
+                }
+            } catch (error) {
+                console.log('Google GenAI stats not available');
+            }
+
+            // Load Anthropic stats if available
+            try {
+                const response = await fetch('/api/anthropic/stats');
+                if (response.ok) {
+                    const data = await response.json();
+                    updateAnthropicStats(data);
+                }
+            } catch (error) {
+                console.log('Anthropic stats not available');
+            }
+        }
+
+        function updateGoogleGenAIStats(data) {
+            if (data.providers) {
+                Object.entries(data.providers).forEach(([providerId, stats]) => {
+                    const quotaSection = document.getElementById(`quota-${providerId}`);
+                    if (quotaSection && stats.api_keys) {
+                        // Calculate working keys and model usage
+                        let totalRequests = 0;
+                        let totalQuota = 0;
+                        let workingKeys = 0;
+                        const modelUsage = {};
+
+                        Object.values(stats.api_keys).forEach(key => {
+                            totalRequests += key.total_requests_today || 0;
+                            totalQuota += (key.daily_limit_per_model || 5) * Object.keys(key.models || {}).length;
+
+                            // Count working keys (not exhausted)
+                            const hasExhaustedModels = Object.values(key.models || {}).some(model =>
+                                model.quota_exhausted || model.requests_today >= (model.daily_limit_per_model || 5)
+                            );
+                            if (!hasExhaustedModels) {
+                                workingKeys++;
+                            }
+
+                            // Aggregate per-model usage
+                            Object.entries(key.models || {}).forEach(([modelName, modelStats]) => {
+                                if (!modelUsage[modelName]) {
+                                    modelUsage[modelName] = {
+                                        requests: 0,
+                                        limit: modelStats.daily_limit_per_model || key.daily_limit_per_model || 5
+                                    };
+                                }
+                                modelUsage[modelName].requests += modelStats.requests_today || 0;
+                            });
+                        });
+
+                        // Store usage data globally for models list
+                        if (!window.providerUsageData) window.providerUsageData = {};
+                        window.providerUsageData[providerId] = modelUsage;
+
+                        const usagePercent = Math.min((totalRequests / Math.max(totalQuota, 1)) * 100, 100);
+                        const quotaFill = quotaSection.querySelector('.quota-fill');
+                        const quotaText = quotaSection.querySelector('.quota-text');
+                        const apiKeyInfo = document.getElementById(`api-key-info-${providerId}`);
+                        const modelQuotasDiv = document.getElementById(`model-quotas-${providerId}`);
+
+                        quotaFill.style.width = usagePercent + '%';
+
+                        if (usagePercent > 80) {
+                            quotaFill.className = 'quota-fill danger';
+                        } else if (usagePercent > 60) {
+                            quotaFill.className = 'quota-fill warning';
+                        }
+
+                        const totalKeys = stats.summary?.total_keys || Object.keys(stats.api_keys).length;
+                        quotaText.innerHTML = `
+                            <span>${totalRequests} requests today</span>
+                            <span><button onclick="toggleApiKeyInfo('${providerId}')" style="background: none; border: none; color: #667eea; cursor: pointer; font-size: 0.85rem;">Show Details</button></span>
+                        `;
+
+                        // Show working API keys info
+                        apiKeyInfo.innerHTML = `${totalKeys} API keys (${workingKeys} working)`;
+
+                        // Add working keys indicator below quota section
+                        let workingKeysInfo = quotaSection.querySelector('.working-keys-info');
+                        if (!workingKeysInfo) {
+                            workingKeysInfo = document.createElement('div');
+                            workingKeysInfo.className = 'working-keys-info';
+                            quotaSection.appendChild(workingKeysInfo);
+                        }
+
+                        const workingPercent = Math.round((workingKeys / totalKeys) * 100);
+                        workingKeysInfo.innerHTML = `
+                            <span class="material-icons">vpn_key</span>
+                            <span>${workingKeys}/${totalKeys} keys active (${workingPercent}% operational)</span>
+                        `;
+
+                        // Update models list with new usage data
+                        const modelsList = document.getElementById(`models-${providerId}`);
+                        if (modelsList) {
+                            const provider = window.currentProvidersData?.find(p => p.id === providerId);
+                            if (provider) {
+                                modelsList.innerHTML = renderModelsList(provider.models || [], providerId, modelUsage);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function updateAnthropicStats(data) {
+            // Update Anthropic-specific stats if needed
+        }
+
+        function testProvider(providerId) {
+            console.log('Testing provider:', providerId);
+            // Implement provider test functionality
+        }
+
+        function viewDetails(providerId) {
+            console.log('Viewing details for:', providerId);
+            // Could open a modal or navigate to detailed view
+        }
+
+        function toggleApiKeyInfo(providerId) {
+            const apiKeyInfo = document.getElementById(`api-key-info-${providerId}`);
+            const modelQuotas = document.getElementById(`model-quotas-${providerId}`);
+            const button = event.currentTarget;
+
+            if (apiKeyInfo.style.display === 'none') {
+                apiKeyInfo.style.display = 'inline';
+                modelQuotas.style.display = 'block';
+                button.textContent = 'Hide Details';
+            } else {
+                apiKeyInfo.style.display = 'none';
+                modelQuotas.style.display = 'none';
+                button.textContent = 'Show Details';
+            }
+        }
+
+        function showAllModels(providerId) {
+            // This would expand to show all models including deprecated ones
+            console.log('Showing all models for:', providerId);
+            // Implementation would reload the models list with all models
+        }
+
+        // Auto-refresh every 30 seconds
+        setInterval(loadProviders, 30000);
+
+        // Load on page load
+        document.addEventListener('DOMContentLoaded', loadProviders);
+    </script>
+</body>
+</html>

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmolRouter - Testing & Validation</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .page-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .page-header h1 {
+            margin: 0 0 0.5rem 0;
+            color: #333;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .page-header p {
+            color: #666;
+            font-size: 1.1rem;
+            margin: 0;
+        }
+
+        .chat-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+            margin-bottom: 2rem;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .chat-header h2 {
+            margin: 0;
+            font-size: 1.3rem;
+            font-weight: 600;
+        }
+
+        .model-selector {
+            margin-left: auto;
+            min-width: 200px;
+        }
+
+        .model-selector select {
+            width: 100%;
+            padding: 0.5rem;
+            border: none;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.2);
+            color: white;
+            font-size: 0.9rem;
+        }
+
+        .model-selector select option {
+            background: #333;
+            color: white;
+        }
+
+        .chat-content {
+            padding: 2rem;
+        }
+
+        .message-input {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .message-input textarea {
+            flex: 1;
+            padding: 1rem;
+            border: 2px solid #e1e5e9;
+            border-radius: 8px;
+            resize: vertical;
+            min-height: 100px;
+            font-family: inherit;
+            font-size: 1rem;
+            line-height: 1.5;
+        }
+
+        .message-input textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .send-button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: background 0.2s;
+            align-self: flex-start;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: #5a6fd8;
+        }
+
+        .send-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .response-area {
+            border-top: 1px solid #e1e5e9;
+            padding-top: 2rem;
+        }
+
+        .response-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .tab-button {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: #f8f9fa;
+            color: #666;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        .tab-button.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .response-display {
+            background: #f8f9fa;
+            border: 1px solid #e1e5e9;
+            border-radius: 8px;
+            padding: 1.5rem;
+            min-height: 200px;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .response-display.json {
+            background: #1e1e1e;
+            color: #d4d4d4;
+        }
+
+        .response-display.loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-style: italic;
+        }
+
+        .response-display.error {
+            background: #fee;
+            border-color: #fcc;
+            color: #c33;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.5rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-top: 1px solid #e1e5e9;
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .status-info {
+            display: flex;
+            gap: 1rem;
+        }
+
+        /* JSON Syntax Highlighting */
+        .json-key { color: #0451a5; font-weight: 600; }
+        .json-string { color: #0a3069; }
+        .json-number { color: #098658; }
+        .json-boolean { color: #0550ae; font-weight: 600; }
+        .json-null { color: #6f7681; font-style: italic; }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            .chat-header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 1rem;
+            }
+
+            .model-selector {
+                margin-left: 0;
+            }
+
+            .message-input {
+                flex-direction: column;
+            }
+
+            .response-tabs {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    {% include 'navigation.html' %}
+
+    <div class="container">
+        <div class="page-header">
+            <h1>Request Testing & Validation</h1>
+            <p>Test requests against SmolRouter endpoints and validate routing behavior</p>
+        </div>
+
+        <div class="chat-container">
+            <div class="chat-header">
+                <span class="material-icons">science</span>
+                <h2>Chat Completions Test</h2>
+                <div class="model-selector">
+                    <select id="model-select">
+                        <option value="">Loading models...</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="chat-content">
+                <div class="message-input">
+                    <textarea
+                        id="message-input"
+                        placeholder="Enter your test message here...&#10;&#10;Example:&#10;What is the capital of France?"
+                    ></textarea>
+                    <button id="send-button" class="send-button">
+                        <span class="material-icons" style="vertical-align: middle; margin-right: 0.5rem;">send</span>
+                        Send
+                    </button>
+                </div>
+
+                <div class="response-area">
+                    <div class="response-tabs">
+                        <button class="tab-button active" data-tab="formatted">Response</button>
+                        <button class="tab-button" data-tab="raw-request">Raw Request</button>
+                        <button class="tab-button" data-tab="raw-response">Raw Response</button>
+                    </div>
+
+                    <div id="tab-formatted" class="tab-content active">
+                        <div id="response-display" class="response-display">
+                            Select a model and send a message to test the endpoint
+                        </div>
+                    </div>
+
+                    <div id="tab-raw-request" class="tab-content">
+                        <div id="request-display" class="response-display json"></div>
+                    </div>
+
+                    <div id="tab-raw-response" class="tab-content">
+                        <div id="raw-response-display" class="response-display json"></div>
+                    </div>
+                </div>
+
+                <div class="status-bar">
+                    <div class="status-info">
+                        <span id="model-status">No model selected</span>
+                        <span id="endpoint-status">Endpoint: /v1/chat/completions</span>
+                    </div>
+                    <div id="response-time"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let availableModels = [];
+        let currentRequest = null;
+
+        // Load available models on page load
+        async function loadModels() {
+            try {
+                const response = await fetch('/api/testing/models');
+                const data = await response.json();
+                availableModels = data.models;
+
+                const select = document.getElementById('model-select');
+                select.innerHTML = '<option value="">Select a model...</option>';
+
+                data.models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.name;
+                    option.textContent = `${model.display_name || model.name} (${model.provider})`;
+                    select.appendChild(option);
+                });
+
+                // Pre-select first model if available
+                if (data.models.length > 0) {
+                    select.value = data.models[0].name;
+                    updateModelStatus();
+                }
+            } catch (error) {
+                console.error('Failed to load models:', error);
+                document.getElementById('model-select').innerHTML = '<option value="">Error loading models</option>';
+            }
+        }
+
+        // Update model status display
+        function updateModelStatus() {
+            const select = document.getElementById('model-select');
+            const status = document.getElementById('model-status');
+
+            if (select.value) {
+                const model = availableModels.find(m => m.name === select.value);
+                status.textContent = `Model: ${model?.display_name || select.value}`;
+            } else {
+                status.textContent = 'No model selected';
+            }
+        }
+
+        // Send test request
+        async function sendTestRequest() {
+            const messageInput = document.getElementById('message-input');
+            const modelSelect = document.getElementById('model-select');
+            const sendButton = document.getElementById('send-button');
+            const responseDisplay = document.getElementById('response-display');
+            const requestDisplay = document.getElementById('request-display');
+            const rawResponseDisplay = document.getElementById('raw-response-display');
+            const responseTime = document.getElementById('response-time');
+
+            if (!messageInput.value.trim()) {
+                alert('Please enter a message');
+                return;
+            }
+
+            if (!modelSelect.value) {
+                alert('Please select a model');
+                return;
+            }
+
+            // Prepare request
+            const requestPayload = {
+                model: modelSelect.value,
+                messages: [
+                    {
+                        role: "user",
+                        content: messageInput.value.trim()
+                    }
+                ],
+                max_tokens: 500,
+                temperature: 0.7
+            };
+
+            // Update UI
+            sendButton.disabled = true;
+            sendButton.innerHTML = '<div class="loading-spinner"></div>Sending...';
+
+            responseDisplay.className = 'response-display loading';
+            responseDisplay.textContent = 'Sending request...';
+
+            requestDisplay.textContent = JSON.stringify(requestPayload, null, 2);
+            highlightJSON(requestDisplay);
+
+            rawResponseDisplay.textContent = '';
+
+            const startTime = Date.now();
+
+            try {
+                const response = await fetch('/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer test-key'
+                    },
+                    body: JSON.stringify(requestPayload)
+                });
+
+                const endTime = Date.now();
+                const duration = endTime - startTime;
+                responseTime.textContent = `Response time: ${duration}ms`;
+
+                const responseData = await response.json();
+
+                // Update raw response
+                rawResponseDisplay.textContent = JSON.stringify(responseData, null, 2);
+                highlightJSON(rawResponseDisplay);
+
+                // Update formatted response
+                responseDisplay.className = 'response-display';
+
+                if (response.ok && responseData.choices && responseData.choices[0]) {
+                    const message = responseData.choices[0].message;
+                    responseDisplay.textContent = message.content || 'No content in response';
+                } else {
+                    responseDisplay.className = 'response-display error';
+                    responseDisplay.textContent = `Error: ${responseData.error?.message || 'Unknown error'}`;
+                }
+
+            } catch (error) {
+                const endTime = Date.now();
+                const duration = endTime - startTime;
+                responseTime.textContent = `Failed after: ${duration}ms`;
+
+                responseDisplay.className = 'response-display error';
+                responseDisplay.textContent = `Network error: ${error.message}`;
+
+                rawResponseDisplay.textContent = `Error: ${error.message}`;
+            } finally {
+                sendButton.disabled = false;
+                sendButton.innerHTML = '<span class="material-icons" style="vertical-align: middle; margin-right: 0.5rem;">send</span>Send';
+            }
+        }
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+        }
+
+        // JSON syntax highlighting
+        function highlightJSON(element) {
+            if (element.textContent) {
+                element.innerHTML = element.textContent
+                    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")\s*:/g, '<span class="json-key">$1</span>:')
+                    .replace(/: ("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")/g, ': <span class="json-string">$1</span>')
+                    .replace(/: (-?\d+\.?\d*)/g, ': <span class="json-number">$1</span>')
+                    .replace(/: (true|false)/g, ': <span class="json-boolean">$1</span>')
+                    .replace(/: (null)/g, ': <span class="json-null">$1</span>');
+            }
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            loadModels();
+
+            document.getElementById('model-select').addEventListener('change', updateModelStatus);
+            document.getElementById('send-button').addEventListener('click', sendTestRequest);
+
+            // Tab switching
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    switchTab(button.dataset.tab);
+                });
+            });
+
+            // Enter key to send (Ctrl+Enter for new line)
+            document.getElementById('message-input').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.ctrlKey && !e.shiftKey) {
+                    e.preventDefault();
+                    sendTestRequest();
+                }
+            });
+        });
+    </script>
+</body>
+</html>
