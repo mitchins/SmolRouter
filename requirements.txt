@@ -5,7 +5,6 @@ pytest
 pytest-asyncio
 pytest-mock
 respx
-peewee
 jinja2
 pyyaml
 slowapi

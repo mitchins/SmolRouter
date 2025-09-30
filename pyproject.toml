@@ -21,13 +21,14 @@ dependencies = [
     "fastapi",
     "httpx",
     "uvicorn[standard]",
-    "peewee",
     "jinja2",
     "pyyaml",
     'pyjwt',
     'slowapi',
     "google-genai", # New unified Google GenAI SDK with httpx transport
     "pytz>=2025.2",
+    "aiohttp>=3.12.15",
+    "fakeredis>=2.31.3",
 ]
 
 [project.optional-dependencies]
