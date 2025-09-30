@@ -10,7 +10,7 @@ Policy:
 import os
 import sys
 import logging
-from typing import Tuple, Union, Any
+from typing import Tuple, Any, Protocol
 
 import redis.asyncio as redis
 from redis.exceptions import RedisError
@@ -35,6 +35,17 @@ REDIS_MAX_CONNS = int(os.getenv("REDIS_MAX_CONNS", "256"))
 REDIS_SOCKET_TIMEOUT = float(os.getenv("REDIS_SOCKET_TIMEOUT", "2.0"))
 REDIS_CONNECT_TIMEOUT = float(os.getenv("REDIS_CONNECT_TIMEOUT", "1.0"))
 REDIS_HEALTH_CHECK_INTERVAL = int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))
+
+
+class RedisLike(Protocol):
+    """Protocol defining the interface that both redis.Redis and fakeredis.FakeRedis implement"""
+
+    async def ping(self) -> str: ...
+    async def eval(self, script: str, numkeys: int, *keys_and_args) -> Any: ...
+    async def hset(self, name: str, key: str = None, value: str = None, mapping: dict = None) -> int: ...
+    async def hget(self, name: str, key: str) -> str: ...
+    async def expire(self, name: str, time: int) -> bool: ...
+    async def delete(self, *names: str) -> int: ...
 
 
 def create_redis_client() -> Tuple[Any, bool]:
@@ -107,7 +118,7 @@ def create_redis_client() -> Tuple[Any, bool]:
     return client, True
 
 
-async def redis_startup_check(client: Union[redis.Redis, fakeredis.aioredis.FakeRedis], is_fake: bool):
+async def redis_startup_check(client: Any, is_fake: bool):
     """
     Perform Redis startup health check to catch misconfigurations early.
 
