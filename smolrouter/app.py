@@ -2014,7 +2014,9 @@ async def request_detail(request_id: str, request: Request):
     get_webui_security().check_webui_access(request)
 
     try:
-        log_entry = await RequestLog.get_by_id(request_id)
+        # Convert to string in case it's a UUID object
+        request_id_str = str(request_id)
+        log_entry = await RequestLog.get_by_id(request_id_str)
 
         if log_entry is None:
             return HTMLResponse(
@@ -2046,7 +2048,9 @@ async def get_request_details(request_id: str, request: Request):
     get_webui_security().check_webui_access(request)
 
     try:
-        log_entry = await RequestLog.get_by_id(request_id)
+        # Convert to string in case it's a UUID object
+        request_id_str = str(request_id)
+        log_entry = await RequestLog.get_by_id(request_id_str)
 
         return {
             "id": log_entry.id,

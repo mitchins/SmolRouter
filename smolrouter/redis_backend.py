@@ -182,7 +182,7 @@ class RedisRequestLog:
             "request_size": str(request_size or 0),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "completed_at": "",  # Empty string instead of None
-            "status_code": "0",  # String instead of None
+            "status_code": "pending",  # Mark as pending immediately
             "response_size": "0",
             "error_message": "",
         }
