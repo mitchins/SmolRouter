@@ -9,20 +9,11 @@ import logging
 import os
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 
-import redis.asyncio as redis
 from redis.exceptions import ConnectionError, TimeoutError
 
 from .redis_config import redis_client, is_fake_redis, get_redis_status
-
-# Only import fakeredis if we're actually using it
-try:
-    import fakeredis.aioredis
-
-    FAKEREDIS_AVAILABLE = True
-except ImportError:
-    FAKEREDIS_AVAILABLE = False
 
 
 class LogRecord:
@@ -147,7 +138,7 @@ return {
 QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode()).hexdigest()
 
 
-async def get_redis() -> Union[redis.Redis, fakeredis.aioredis.FakeRedis]:
+async def get_redis():
     """Get the global Redis client"""
     return redis_client
 
