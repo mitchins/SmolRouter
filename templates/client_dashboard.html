@@ -625,7 +625,7 @@
             }
 
             tbody.innerHTML = logs.map(log => `
-                <tr class="expandable-row" onclick="toggleRowExpansion('${log.id}')">
+                <tr class="expandable-row" onclick="window.location.href='/request/${log.id}'" style="cursor: pointer;">
                     <td>
                         <span class="material-icons expand-icon">chevron_right</span>
                     </td>
@@ -640,11 +640,6 @@
                     <td>${formatSize(log.request_size)}</td>
                     <td class="duration">${formatDuration(log.duration_ms)}</td>
                     <td>${formatStatus(log.status_code)}</td>
-                </tr>
-                <tr class="row-details" id="details-${log.id}" style="display: none;">
-                    <td colspan="8" id="details-content-${log.id}">
-                        <!-- Details loaded on expand -->
-                    </td>
                 </tr>
             `).join('');
         }
@@ -776,7 +771,7 @@
 
             const newRow = document.createElement('tr');
             newRow.className = 'expandable-row';
-            newRow.onclick = () => toggleRowExpansion(request.id);
+            newRow.onclick = () => window.location.href = `/request/${request.id}`;
             newRow.innerHTML = `
                 <td>
                     <span class="material-icons expand-icon">chevron_right</span>
@@ -794,21 +789,9 @@
                 <td>${formatStatus(request.status_code)}</td>
             `;
 
-            const detailsRow = document.createElement('tr');
-            detailsRow.className = 'row-details';
-            detailsRow.id = `details-${request.id}`;
-            detailsRow.style.display = 'none';
-            detailsRow.innerHTML = `
-                <td colspan="8" id="details-content-${request.id}">
-                    <!-- Details loaded on expand -->
-                </td>
-            `;
-
-            tbody.insertBefore(detailsRow, tbody.firstChild);
             tbody.insertBefore(newRow, tbody.firstChild);
 
-            while (tbody.children.length > 200) {
-                tbody.removeChild(tbody.lastChild);
+            while (tbody.children.length > 100) {
                 tbody.removeChild(tbody.lastChild);
             }
         }
@@ -836,7 +819,7 @@
                         <td>${formatStatus(request.status_code)}</td>
                     `;
 
-                    row.onclick = () => toggleRowExpansion(request.id);
+                    row.onclick = () => window.location.href = `/request/${request.id}`;
                     break;
                 }
             }
