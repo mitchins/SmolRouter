@@ -11,11 +11,18 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Union
 
-import fakeredis.aioredis
 import redis.asyncio as redis
 from redis.exceptions import ConnectionError, TimeoutError
 
 from .redis_config import redis_client, is_fake_redis, get_redis_status
+
+# Only import fakeredis if we're actually using it
+try:
+    import fakeredis.aioredis
+
+    FAKEREDIS_AVAILABLE = True
+except ImportError:
+    FAKEREDIS_AVAILABLE = False
 
 
 class LogRecord:
