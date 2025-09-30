@@ -20,38 +20,106 @@ class LogRecord:
     """Object wrapper for Redis log data to provide attribute access"""
 
     def __init__(self, data: Dict[str, Any]):
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         for key, value in data.items():
             setattr(self, key, value)
 
-        # Ensure required attributes exist with defaults
-        if not hasattr(self, "duration_ms"):
+        # Convert string values to proper types (Redis stores everything as strings)
+        # These conversions are critical for template comparisons
+        if hasattr(self, "duration_ms") and self.duration_ms:
+            try:
+                self.duration_ms = int(self.duration_ms) if self.duration_ms not in ("", "None", None) else None
+            except (ValueError, TypeError):
+                self.duration_ms = None
+        else:
             self.duration_ms = None
-        if not hasattr(self, "status_code"):
+
+        if hasattr(self, "status_code") and self.status_code:
+            if self.status_code == "pending":
+                self.status_code = "pending"  # Keep as string for pending status
+            else:
+                try:
+                    self.status_code = (
+                        int(self.status_code) if self.status_code not in ("", "0", "None", None) else None
+                    )
+                except (ValueError, TypeError):
+                    self.status_code = None
+        else:
             self.status_code = None
-        if not hasattr(self, "completed_at"):
-            self.completed_at = None
-        if not hasattr(self, "response_size"):
-            self.response_size = None
+
+        if hasattr(self, "request_size") and self.request_size:
+            try:
+                self.request_size = int(self.request_size) if self.request_size not in ("", "None", None) else 0
+            except (ValueError, TypeError):
+                self.request_size = 0
+        else:
+            self.request_size = 0
+
+        if hasattr(self, "response_size") and self.response_size:
+            try:
+                self.response_size = int(self.response_size) if self.response_size not in ("", "None", None) else 0
+            except (ValueError, TypeError):
+                self.response_size = 0
+        else:
+            self.response_size = 0
+
+        if hasattr(self, "prompt_tokens") and self.prompt_tokens:
+            try:
+                self.prompt_tokens = int(self.prompt_tokens) if self.prompt_tokens not in ("", "None", None) else None
+            except (ValueError, TypeError):
+                self.prompt_tokens = None
+
+        if hasattr(self, "completion_tokens") and self.completion_tokens:
+            try:
+                self.completion_tokens = (
+                    int(self.completion_tokens) if self.completion_tokens not in ("", "None", None) else None
+                )
+            except (ValueError, TypeError):
+                self.completion_tokens = None
+
+        if hasattr(self, "total_tokens") and self.total_tokens:
+            try:
+                self.total_tokens = int(self.total_tokens) if self.total_tokens not in ("", "None", None) else None
+            except (ValueError, TypeError):
+                self.total_tokens = None
 
         # Add compatibility attributes that app.py expects
         self.id = getattr(self, "request_id", None)
 
-        # Parse timestamp from created_at if available
+        # Parse timestamp from created_at if available - make timezone-aware
         if hasattr(self, "created_at") and self.created_at:
             try:
                 self.timestamp = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
+                # Ensure it's timezone-aware
+                if self.timestamp.tzinfo is None:
+                    self.timestamp = self.timestamp.replace(tzinfo=timezone.utc)
             except (ValueError, TypeError):
-                self.timestamp = datetime.now()
+                self.timestamp = datetime.now(timezone.utc)
         else:
-            self.timestamp = datetime.now()
+            self.timestamp = datetime.now(timezone.utc)
+
+        # Parse completed_at if available - make timezone-aware
+        if hasattr(self, "completed_at") and self.completed_at and self.completed_at != "":
+            try:
+                self.completed_at = datetime.fromisoformat(self.completed_at.replace("Z", "+00:00"))
+                # Ensure it's timezone-aware
+                if self.completed_at.tzinfo is None:
+                    self.completed_at = self.completed_at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                self.completed_at = None
+        else:
+            self.completed_at = None
 
         # Ensure other expected attributes exist
         if not hasattr(self, "upstream_url"):
-            self.upstream_url = getattr(self, "upstream_url", "")
+            self.upstream_url = ""
         if not hasattr(self, "error_message"):
-            self.error_message = getattr(self, "error_message", None)
+            self.error_message = None
+        if not hasattr(self, "request_body"):
+            self.request_body = None
+        if not hasattr(self, "response_body"):
+            self.response_body = None
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
