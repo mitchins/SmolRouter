@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from .anthropic_provider import AnthropicProvider, AnthropicConfig
+from .dummy_provider import DummyProvider, DummyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,7 @@ class ProviderFactory:
         "openai": OpenAIProvider,
         "google-genai": GoogleGenAIProvider,
         "anthropic": AnthropicProvider,
+        "dummy": DummyProvider,
     }
 
     @classmethod
@@ -412,6 +414,8 @@ class ProviderFactory:
                     config = GoogleGenAIConfig(**processed_config)
                 elif processed_config.get("type") == "anthropic":
                     config = AnthropicConfig(**processed_config)
+                elif processed_config.get("type") == "dummy":
+                    config = DummyConfig(**processed_config)
                 else:
                     config = ProviderConfig(**processed_config)
 

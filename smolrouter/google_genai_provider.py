@@ -239,11 +239,10 @@ class GoogleGenAIProvider(IModelProvider):
         pacific_tz = pytz.timezone("US/Pacific")
         return datetime.now(pacific_tz).date().strftime("%Y-%m-%d")
 
-    def _get_quota_record(self, api_key: str, model_name: str) -> ApiKeyQuota:
+    async def _get_quota_record(self, api_key: str, model_name: str) -> dict:
         """Get or create quota record for an API key + model combination"""
-        pacific_date = self._get_pacific_date()
-        quota, created = ApiKeyQuota.get_or_create_quota(
-            api_key=api_key, provider_name=self.config.name, model_name=model_name, pacific_date=pacific_date
+        quota, created = await ApiKeyQuota.get_or_create_quota(
+            api_key=api_key, provider_id=self.config.name, model_name=model_name
         )
         return quota
 

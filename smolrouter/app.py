@@ -17,7 +17,6 @@ import httpx
 
 # Import database functionality
 from smolrouter.database import (
-    init_database,
     RequestLog,
     get_recent_logs,
     get_log_stats,
@@ -231,13 +230,12 @@ logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
 logger.info(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
 logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
 
-# Initialize database and blob storage if logging is enabled
+# Initialize blob storage if logging is enabled
 if ENABLE_LOGGING:
     try:
         init_blob_storage()
-        init_database()
     except Exception as e:
-        logger.error(f"Failed to initialize logging database: {e}")
+        logger.error(f"Failed to initialize blob storage: {e}")
         logger.warning("Request logging will be disabled")
         ENABLE_LOGGING = False
 
@@ -263,11 +261,20 @@ async def init_new_architecture():
 @app.on_event("startup")
 async def startup_event():
     """FastAPI startup event - initialize background tasks"""
-    if ENABLE_LOGGING:
-        # Start background cleanup task now that event loop is running
-        from smolrouter.database import start_background_cleanup
+    global ENABLE_LOGGING
 
-        start_background_cleanup()
+    if ENABLE_LOGGING:
+        # Initialize database now that event loop is running
+        from smolrouter.database import init_database, start_background_cleanup
+
+        try:
+            await init_database()
+            # Start background cleanup task now that database is initialized
+            start_background_cleanup()
+        except Exception as e:
+            logger.error(f"Failed to initialize logging database: {e}")
+            logger.warning("Request logging will be disabled")
+            ENABLE_LOGGING = False
 
     await init_new_architecture()
 
@@ -491,7 +498,7 @@ def strip_json_markdown_from_text(text: str) -> str:
     return result.strip()
 
 
-def start_request_log(
+async def start_request_log(
     request: Request,
     service_type: str,
     upstream_url: str,
@@ -523,7 +530,8 @@ def start_request_log(
         request_size = len(request_body) if request_body else 0
 
         # Create initial log entry (inflight - no completed_at)
-        log_entry = RequestLog.create(
+        # Use async Redis logging for hot path performance
+        log_entry = await RequestLog.create(
             source_ip=source_ip,
             method=request.method,
             path=request.url.path,
@@ -683,7 +691,7 @@ async def proxy_request(path: str, request: Request):
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
         # Use default upstream for error logging
-        log_entry = start_request_log(
+        log_entry = await start_request_log(
             request, "openai", DEFAULT_UPSTREAM, original_model, mapped_model, auth_payload, None
         )
         complete_request_log(
@@ -700,7 +708,7 @@ async def proxy_request(path: str, request: Request):
         payload["model"] = mapped_model
 
     # For logging purposes, we'll determine the upstream after routing
-    log_entry = start_request_log(
+    log_entry = await start_request_log(
         request, "openai", "pending", original_model, mapped_model, auth_payload, request_body_bytes
     )
 
@@ -867,7 +875,9 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     except Exception as e:
         logger.error(f"Failed to parse Ollama request JSON: {e}")
         # Use default upstream for error logging
-        log_entry = start_request_log(request, "ollama", DEFAULT_UPSTREAM, original_model, mapped_model, None, None)
+        log_entry = await start_request_log(
+            request, "ollama", DEFAULT_UPSTREAM, original_model, mapped_model, None, None
+        )
         complete_request_log(
             log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"}
         )
@@ -895,7 +905,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     openai_payload["stream"] = ollama_payload.get("stream", False)
 
     # Start logging with the determined upstream URL
-    log_entry = start_request_log(
+    log_entry = await start_request_log(
         request, "ollama", upstream_url, original_model, final_model, None, request_body_bytes
     )
 
@@ -1341,7 +1351,7 @@ async def performance_dashboard(request: Request):
 async def api_logs(limit: int = 100, service_type: str = None):
     """API endpoint for getting logs as JSON"""
     try:
-        logs = get_recent_logs(limit=limit, service_type=service_type)
+        logs = await get_recent_logs(limit=limit, service_type=service_type)
         return [
             {
                 "id": log.id,
@@ -1371,7 +1381,7 @@ async def api_logs(limit: int = 100, service_type: str = None):
 async def api_stats():
     """API endpoint for getting statistics"""
     try:
-        return get_log_stats()
+        return await get_log_stats()
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         return JSONResponse(content={"error": "Failed to get stats"}, status_code=500)
@@ -1383,8 +1393,8 @@ async def api_dashboard(limit: int = 100):
     from datetime import datetime
 
     try:
-        logs = get_recent_logs(limit=limit)
-        stats = get_log_stats()
+        logs = await get_recent_logs(limit=limit)
+        stats = await get_log_stats()
 
         # Format logs for JSON response
         formatted_logs = []
@@ -1421,14 +1431,14 @@ async def api_dashboard(limit: int = 100):
         }
     except Exception as e:
         logger.error(f"Error getting dashboard data: {e}")
-        return JSONResponse(content={"error": "Failed to get dashboard data"}, status_code=500)
+        return JSONResponse(content={"error": f"Failed to get dashboard data. {e}"}, status_code=500)
 
 
 @app.get("/api/inflight")
 async def api_inflight():
     """API endpoint for getting currently inflight requests"""
     try:
-        inflight = get_inflight_requests()
+        inflight = await get_inflight_requests()
         return [
             {
                 "id": log.id,
@@ -1822,7 +1832,6 @@ async def system_dashboard(request: Request):
             "strip_json_markdown": STRIP_JSON_MARKDOWN,
             "disable_thinking": DISABLE_THINKING,
             "enable_logging": ENABLE_LOGGING,
-            "database_file": "requests.db",
             "blob_storage_path": "blob_storage",
         }
 
@@ -1999,26 +2008,31 @@ async def system_dashboard(request: Request):
 
 
 @app.get("/request/{request_id}", response_class=HTMLResponse)
-async def request_detail(request_id: int, request: Request):
+async def request_detail(request_id: str, request: Request):
     """Detailed view of a specific request"""
     # Check WebUI access security
     get_webui_security().check_webui_access(request)
 
     try:
-        log_entry = RequestLog.get_by_id(request_id)
+        log_entry = await RequestLog.get_by_id(request_id)
+
+        if log_entry is None:
+            return HTMLResponse(
+                content="<h1>Request Not Found</h1><p>The requested log entry does not exist.</p>", status_code=404
+            )
 
         return templates.TemplateResponse(
             request,
             "request_detail.html",
             {
                 "log": log_entry,
-                "request_body_str": log_entry.request_body.decode("utf-8") if log_entry.request_body else None,
-                "response_body_str": log_entry.response_body.decode("utf-8") if log_entry.response_body else None,
+                "request_body_str": getattr(log_entry, "request_body", b"").decode("utf-8")
+                if getattr(log_entry, "request_body", None)
+                else None,
+                "response_body_str": getattr(log_entry, "response_body", b"").decode("utf-8")
+                if getattr(log_entry, "response_body", None)
+                else None,
             },
-        )
-    except RequestLog.DoesNotExist:
-        return HTMLResponse(
-            content="<h1>Request Not Found</h1><p>The requested log entry does not exist.</p>", status_code=404
         )
     except Exception as e:
         logger.error(f"Error rendering request detail: {e}")
@@ -2026,13 +2040,13 @@ async def request_detail(request_id: int, request: Request):
 
 
 @app.get("/api/requests/{request_id}")
-async def get_request_details(request_id: int, request: Request):
+async def get_request_details(request_id: str, request: Request):
     """API endpoint for request details with JSON response"""
     # Check WebUI access security
     get_webui_security().check_webui_access(request)
 
     try:
-        log_entry = RequestLog.get_by_id(request_id)
+        log_entry = await RequestLog.get_by_id(request_id)
 
         return {
             "id": log_entry.id,
@@ -2344,7 +2358,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
 
         elif event_type == "dashboard_update":
             # Send updated dashboard stats
-            stats = get_log_stats()
+            stats = await get_log_stats()
             event_data = {"type": "dashboard_update", "data": stats}
             await manager.broadcast(event_data)
 
@@ -2360,8 +2374,8 @@ async def websocket_dashboard(websocket: WebSocket):
     try:
         # Send initial data
         try:
-            logs = get_recent_logs(limit=100)
-            stats = get_log_stats()
+            logs = await get_recent_logs(limit=100)
+            stats = await get_log_stats()
 
             # Format logs with real-time duration calculation
             formatted_logs = []

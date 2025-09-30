@@ -219,7 +219,7 @@ class SmartRouter:
         last_status_code = 502  # Default to bad gateway if no attempts made
 
         for i, instance in enumerate(instances_to_try):
-            logger.debug(f"Trying upstream {i+1}/{len(instances_to_try)}: {instance}")
+            logger.debug(f"Trying upstream {i + 1}/{len(instances_to_try)}: {instance}")
 
             success, result, status_code = await self.try_upstream(instance, request_payload, path, headers, timeout)
 

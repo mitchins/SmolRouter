@@ -222,9 +222,8 @@ class SmolRouterContainer:
         # Perform startup health checks
         await self._perform_startup_health_checks()
 
-        # Start background health monitoring
-        if self.config.enable_background_health_checks:
-            self._start_background_health_monitoring()
+        # Health monitoring is handled by ModelAggregator - no need for duplicate checking
+        logger.info("Health monitoring delegated to ModelAggregator (no duplicate checking)")
 
         self._initialized = True
         logger.info(f"SmolRouter container initialized with {len(self._providers)} providers")

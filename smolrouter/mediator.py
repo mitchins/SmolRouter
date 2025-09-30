@@ -14,6 +14,7 @@ from .interfaces import IModelStrategy, IAccessControl, ModelInfo, ClientContext
 from .caching import ModelAggregator, IModelCache
 from .providers import IModelProvider
 from .google_genai_provider import GoogleGenAIProvider
+from .dummy_provider import DummyProvider
 from .load_balancer import model_load_balancer
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class ModelMediator:
         filtered_models = await self.access_control.filter_models(transformed_models, client)
 
         logger.info(
-            f"Returning {len(filtered_models)} models to client {client.ip} " f"(filtered from {len(all_models)} total)"
+            f"Returning {len(filtered_models)} models to client {client.ip} (filtered from {len(all_models)} total)"
         )
 
         return filtered_models
@@ -389,6 +390,19 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": str(e), "provider": "openai"}},
                         500,
                         f"openai:{resolved_model.provider_id}",
+                    )
+
+            # Handle Dummy provider requests
+            if isinstance(provider, DummyProvider):
+                try:
+                    response_data = await provider.make_request(request_payload, headers)
+                    return response_data, 200, f"dummy:{resolved_model.provider_id}"
+                except Exception as e:
+                    logger.error(f"Dummy provider error: {e}")
+                    return (
+                        {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
+                        500,
+                        f"dummy:{resolved_model.provider_id}",
                     )
 
             # For other providers, fall back to legacy HTTP routing
