@@ -62,6 +62,70 @@ class LogRecord:
         return getattr(self, key, default)
 
 
+class QuotaRecord:
+    """Object wrapper for Redis quota data to provide attribute access"""
+
+    def __init__(self, data: Dict[str, Any]):
+        from datetime import datetime
+
+        for key, value in data.items():
+            setattr(self, key, value)
+
+        # Ensure required attributes exist with defaults for Google GenAI provider
+        # Also ensure they're the right type (Redis returns strings)
+        self.requests_today = int(getattr(self, "requests_today", 0))
+        self.tokens_today = int(getattr(self, "tokens_today", 0))
+        self.error_count = int(getattr(self, "error_count", 0))
+
+        if not hasattr(self, "last_error"):
+            self.last_error = None
+        if not hasattr(self, "last_reset_date"):
+            self.last_reset_date = None
+        if not hasattr(self, "quota_exhausted_at"):
+            self.quota_exhausted_at = None
+
+        # Handle boolean conversion from Redis string
+        if hasattr(self, "invalid_key"):
+            if isinstance(self.invalid_key, str):
+                self.invalid_key = self.invalid_key.lower() == "true"
+            elif isinstance(self.invalid_key, bool):
+                pass  # Already boolean
+            else:
+                self.invalid_key = False
+        else:
+            self.invalid_key = False
+
+        if not hasattr(self, "api_key_hash"):
+            self.api_key_hash = data.get("key_hash", "")
+
+        # Parse updated_at timestamp if available
+        if hasattr(self, "updated_at") and self.updated_at:
+            try:
+                self.updated_at = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
+            except (ValueError, TypeError, AttributeError):
+                self.updated_at = datetime.now()
+        else:
+            self.updated_at = datetime.now()
+
+    def mark_request_success(self, tokens: int = 0):
+        """Mark a successful request (updates will be persisted via increment_usage)"""
+        # This is a no-op on the object - actual persistence happens via Redis atomic operations
+        pass
+
+    def mark_request_failure(self, error: str = None, quota_exhausted: bool = False):
+        """Mark a failed request (updates will be persisted separately)"""
+        # This is a no-op on the object - actual persistence happens via Redis atomic operations
+        pass
+
+    def items(self):
+        """Provide dict-like items() method for backward compatibility"""
+        return self.__dict__.items()
+
+    def get(self, key, default=None):
+        """Provide dict-like get() method for backward compatibility"""
+        return getattr(self, key, default)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -265,8 +329,8 @@ class RedisApiKeyQuota:
         api_key: str,
         provider_id: str,
         model_name: str,
-    ) -> tuple[Dict[str, Any], bool]:
-        """Get or create quota entry - returns (quota_data, was_created)"""
+    ) -> tuple["QuotaRecord", bool]:
+        """Get or create quota entry - returns (quota_record, was_created)"""
         client = await get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
@@ -280,8 +344,11 @@ class RedisApiKeyQuota:
             quota_data = dict(existing)
             quota_data["requests_today"] = int(quota_data.get("requests_today", 0))
             quota_data["tokens_today"] = int(quota_data.get("tokens_today", 0))
+            quota_data["error_count"] = int(quota_data.get("error_count", 0))
             quota_data["last_reset"] = quota_data.get("last_reset", "")
-            return quota_data, False
+            quota_data["last_reset_date"] = quota_data.get("last_reset", "")  # Alias for compatibility
+            quota_data["invalid_key"] = quota_data.get("invalid_key", "false").lower() == "true"
+            return QuotaRecord(quota_data), False
 
         # Create new quota entry
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -291,7 +358,10 @@ class RedisApiKeyQuota:
             "model_name": model_name,
             "requests_today": 0,
             "tokens_today": 0,
+            "error_count": 0,
             "last_reset": today,
+            "last_reset_date": today,  # Alias for compatibility
+            "invalid_key": "false",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -303,7 +373,7 @@ class RedisApiKeyQuota:
         await client.sadd(f"quotas:by_key:{key_hash}", quota_key)
 
         logger.debug(f"Created Redis quota entry: {quota_key}")
-        return quota_data, True
+        return QuotaRecord(quota_data), True
 
     @staticmethod
     async def increment_usage(
@@ -395,7 +465,7 @@ class RedisApiKeyQuota:
         return quota_data
 
     @staticmethod
-    async def get_provider_usage(provider_id: str) -> List[Dict[str, Any]]:
+    async def get_provider_usage(provider_id: str) -> List["QuotaRecord"]:
         """Get all quota entries for a provider"""
         client = await get_redis()
 
@@ -408,7 +478,10 @@ class RedisApiKeyQuota:
                 quota_data = dict(data)
                 quota_data["requests_today"] = int(quota_data.get("requests_today", 0))
                 quota_data["tokens_today"] = int(quota_data.get("tokens_today", 0))
-                quotas.append(quota_data)
+                quota_data["error_count"] = int(quota_data.get("error_count", 0))
+                quota_data["last_reset_date"] = quota_data.get("last_reset", "")
+                quota_data["invalid_key"] = quota_data.get("invalid_key", "false").lower() == "true"
+                quotas.append(QuotaRecord(quota_data))
 
         return quotas
 
