@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 import pytz
+import httpx
 
 from google import genai
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
@@ -203,25 +204,24 @@ class GoogleGenAIProvider(IModelProvider):
         return self.config.max_requests_per_day
 
     def _create_proxy_transport(self, proxy_config: Optional[ProxyConfig] = None):
-        """Create httpx proxies mapping for the Google GenAI client"""
-        # Use provided proxy config or fall back to default
+        """Create httpx Transport pair configured with a proxy.
+
+        We explicitly set transports because google-genai may fall back to aiohttp
+        internally, which ignores simple 'proxies' mappings. Attaching transports
+        forces httpx for both sync and async paths.
+        """
         config_to_use = proxy_config or self.config.proxy_config
 
         if config_to_use and config_to_use.to_httpx_proxy():
             proxy_url = config_to_use.to_httpx_proxy()
             logger.info(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
 
-            # httpx expects proxies to be configured on the Client, not on the Transport.
-            # Provide both http and https mappings to be explicit across versions.
-            proxies = {
-                "http://": proxy_url,
-                "https://": proxy_url,
-                "all://": proxy_url,
-            }
-            return proxies
+            sync_transport = httpx.HTTPTransport(proxy=proxy_url)
+            async_transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+            return sync_transport, async_transport
 
         logger.debug(f"🚫 No proxy configured (proxy_config={proxy_config}, default={self.config.proxy_config})")
-        return None
+        return None, None
 
     def get_provider_id(self) -> str:
         return self.config.name
@@ -494,14 +494,14 @@ class GoogleGenAIProvider(IModelProvider):
             try:
                 # Create client with proxy transport
                 proxy_config = self.config.get_proxy_for_model("health-check")
-                proxies = self._create_proxy_transport(proxy_config)
+                sync_transport, async_transport = self._create_proxy_transport(proxy_config)
 
                 from google.genai import types
 
-                if proxies:
+                if sync_transport and async_transport:
                     http_options = types.HttpOptions(
-                        client_args={"proxies": proxies, "trust_env": False},
-                        async_client_args={"proxies": proxies, "trust_env": False},
+                        client_args={"transport": sync_transport, "trust_env": False},
+                        async_client_args={"transport": async_transport, "trust_env": False},
                     )
                     client = genai.Client(api_key=api_key, http_options=http_options)
                 else:
@@ -527,14 +527,14 @@ class GoogleGenAIProvider(IModelProvider):
             try:
                 # Create client with proxy transport
                 proxy_config = self.config.get_proxy_for_model("model-discovery")
-                proxies = self._create_proxy_transport(proxy_config)
+                sync_transport, async_transport = self._create_proxy_transport(proxy_config)
 
                 from google.genai import types
 
-                if proxies:
+                if sync_transport and async_transport:
                     http_options = types.HttpOptions(
-                        client_args={"proxies": proxies, "trust_env": False},
-                        async_client_args={"proxies": proxies, "trust_env": False},
+                        client_args={"transport": sync_transport, "trust_env": False},
+                        async_client_args={"transport": async_transport, "trust_env": False},
                     )
                     client = genai.Client(api_key=api_key, http_options=http_options)
                 else:
@@ -739,21 +739,21 @@ class GoogleGenAIProvider(IModelProvider):
             # Create client with proxy transport
             proxy_config = self.config.get_proxy_for_model(model_name)
             logger.info(f"🔍 Checking proxy for model '{model_name}': config={proxy_config}")
-            proxies = self._create_proxy_transport(proxy_config)
+            sync_transport, async_transport = self._create_proxy_transport(proxy_config)
 
             from google.genai import types
 
-            if proxies:
+            if sync_transport and async_transport:
                 http_options = types.HttpOptions(
-                    client_args={"proxies": proxies, "trust_env": False},
-                    async_client_args={"proxies": proxies, "trust_env": False},
+                    client_args={"transport": sync_transport, "trust_env": False},
+                    async_client_args={"transport": async_transport, "trust_env": False},
                 )
                 client = genai.Client(api_key=api_key, http_options=http_options)
-                logger.debug(f"httpx proxies active: {bool(proxies)}; proxies={proxies}")
+                logger.debug("httpx transports active: True (proxy attached)")
                 logger.debug("httpx trust_env disabled via HttpOptions: True")
             else:
                 client = genai.Client(api_key=api_key)
-                logger.debug(f"httpx proxies active: {bool(proxies)}; proxies={proxies}")
+                logger.debug("httpx transports active: False (no proxy)")
                 logger.debug("httpx trust_env disabled via HttpOptions: True")
 
             # Acquire rate limiting slot (blocks if needed)
