@@ -246,7 +246,7 @@ class GoogleGenAIProvider(IModelProvider):
         )
         return quota
 
-    def _select_best_api_key(self, model_name: str) -> str:
+    async def _select_best_api_key(self, model_name: str) -> str:
         """
         Select the API key with lowest usage for the given model.
 
@@ -259,7 +259,7 @@ class GoogleGenAIProvider(IModelProvider):
         error_prone_keys = []
 
         for key in self.config.api_keys:
-            quota = self._get_quota_record(key, model_name)
+            quota = await self._get_quota_record(key, model_name)
 
             # Skip if key is permanently invalid/expired
             if quota.invalid_key:
@@ -373,9 +373,11 @@ class GoogleGenAIProvider(IModelProvider):
 
         return best_key
 
-    def _update_api_key_stats(self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None):
+    async def _update_api_key_stats(
+        self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None
+    ):
         """Update statistics for an API key + model combination after a request"""
-        quota = self._get_quota_record(api_key, model_name)
+        quota = await self._get_quota_record(api_key, model_name)
 
         # Database handles timezone automatically
 
@@ -735,7 +737,7 @@ class GoogleGenAIProvider(IModelProvider):
             model_name, genai_request = self._convert_openai_to_genai_request(openai_request)
 
             # Select best API key
-            api_key = self._select_best_api_key(model_name)
+            api_key = await self._select_best_api_key(model_name)
 
             # Create client with proxy transport
             proxy_config = self.config.get_proxy_for_model(model_name)
@@ -777,7 +779,7 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Update API key statistics
             tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
-            self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
+            await self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
 
             return openai_response
 
@@ -785,7 +787,7 @@ class GoogleGenAIProvider(IModelProvider):
             error_msg = f"Google GenAI quota exhausted: {e}"
             # Don't update stats if this is our own "all keys exhausted" exception
             if "api_key" in locals() and "model_name" in locals():
-                self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+                await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
 
             # Check if this ResourceExhausted has retry timing info
             retry_after_seconds = None
@@ -801,16 +803,16 @@ class GoogleGenAIProvider(IModelProvider):
             raise quota_error
         except PermissionDenied as e:
             error_msg = f"Google GenAI permission denied: {e}"
-            self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
             raise Exception(error_msg)
         except InvalidArgument as e:
             error_msg = f"Google GenAI invalid argument: {e}"
-            self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
             raise Exception(error_msg)
         except Exception as e:
             error_msg = f"Google GenAI error: {e}"
             if "api_key" in locals() and "model_name" in locals():
-                self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+                await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
             raise Exception(error_msg)
 
     def get_api_key_stats(self) -> Dict[str, Dict[str, Any]]:

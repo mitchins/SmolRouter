@@ -342,14 +342,19 @@ async def get_log_stats():
 
 
 async def get_inflight_requests():
-    """Get in-flight (pending) requests"""
+    """Get in-flight (pending) requests from the last 60 minutes"""
     try:
+        from datetime import datetime, timedelta
+
         all_recent = await RequestLog.get_recent(1000)
-        # Filter for pending requests (status_code = 0 or empty completed_at)
+        cutoff_time = datetime.now() - timedelta(minutes=60)
+
+        # Filter for pending requests (status_code = "pending" or empty completed_at) within 60 min window
         inflight = [
             log
             for log in all_recent
-            if getattr(log, "status_code", "0") == "0" or not getattr(log, "completed_at", None)
+            if (getattr(log, "status_code", "pending") == "pending" or not getattr(log, "completed_at", None))
+            and getattr(log, "timestamp", datetime.now()) >= cutoff_time
         ]
         return inflight
     except Exception as e:
