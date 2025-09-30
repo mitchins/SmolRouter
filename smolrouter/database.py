@@ -58,8 +58,20 @@ db = SqliteDatabase(
     },
 )
 
-# Hook to ensure performance settings on every connection
-db.connect_signal.connect(configure_connection)
+# Apply performance settings immediately and add initialization hook
+configure_connection(db)
+
+# Override the connect method to ensure performance settings on every new connection
+original_connect = db.connect
+
+
+def enhanced_connect(*args, **kwargs):
+    result = original_connect(*args, **kwargs)
+    configure_connection(db)
+    return result
+
+
+db.connect = enhanced_connect
 
 
 def estimate_token_count(text: str) -> int:
