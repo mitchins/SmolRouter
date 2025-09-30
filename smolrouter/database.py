@@ -182,6 +182,11 @@ class ApiKeyQuota:
         return await RedisApiKeyQuota.get_or_create_quota(api_key, provider_id, model_name)
 
     @staticmethod
+    async def get_or_create_quota(api_key: str, provider_id: str, model_name: str):
+        """Get or create quota entry (alias for compatibility)"""
+        return await RedisApiKeyQuota.get_or_create_quota(api_key, provider_id, model_name)
+
+    @staticmethod
     async def increment_usage(
         api_key: str, provider_id: str, model_name: str, request_count: int = 1, token_count: int = 0
     ):
