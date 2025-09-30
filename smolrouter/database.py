@@ -19,24 +19,37 @@ from smolrouter.storage import get_blob_storage
 logger = logging.getLogger("model-rerouter")
 
 # Database configuration
-DB_PATH = os.getenv("DB_PATH", "requests.db")
+PERSIST_DB = os.getenv("PERSIST_DB", "false").lower() in ("true", "1", "yes")
+DB_PATH = ":memory:" if not PERSIST_DB else os.getenv("DB_PATH", "requests.db")
 MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))  # Auto-purge logs older than N days (0 = disabled)
 
 
 # Performance optimization function
 def configure_connection(database, **kwargs):
     """Configure SQLite connection for optimal performance"""
-    database.execute_sql("PRAGMA journal_mode = WAL")
-    database.execute_sql("PRAGMA synchronous = NORMAL")
-    database.execute_sql("PRAGMA cache_size = -65536")  # 64MB cache
-    database.execute_sql("PRAGMA temp_store = MEMORY")
-    database.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB memory map
-    database.execute_sql("PRAGMA wal_autocheckpoint = 1000")  # Checkpoint every 1000 pages
+    if DB_PATH == ":memory:":
+        # In-memory database configuration
+        database.execute_sql("PRAGMA journal_mode = MEMORY")
+        database.execute_sql("PRAGMA synchronous = OFF")  # Safe for in-memory
+        database.execute_sql("PRAGMA cache_size = -131072")  # 128MB cache for in-memory
+        database.execute_sql("PRAGMA temp_store = MEMORY")
+        logger.info("Database configured for in-memory operation (high performance mode)")
+    else:
+        # File-based database configuration
+        database.execute_sql("PRAGMA journal_mode = WAL")
+        database.execute_sql("PRAGMA synchronous = NORMAL")
+        database.execute_sql("PRAGMA cache_size = -65536")  # 64MB cache
+        database.execute_sql("PRAGMA temp_store = MEMORY")
+        database.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB memory map
+        database.execute_sql("PRAGMA wal_autocheckpoint = 1000")  # Checkpoint every 1000 pages
+        logger.info(f"Database configured for file-based operation: {DB_PATH}")
     database.execute_sql("PRAGMA optimize")  # Analyze statistics
 
 
 def checkpoint_wal():
-    """Force WAL checkpoint to reduce WAL file size"""
+    """Force WAL checkpoint to reduce WAL file size (only for file-based databases)"""
+    if DB_PATH == ":memory:":
+        return  # No WAL in memory databases
     try:
         db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
         logger.debug("WAL checkpoint completed")
@@ -44,19 +57,30 @@ def checkpoint_wal():
         logger.error(f"WAL checkpoint failed: {e}")
 
 
-# Initialize database with performance optimizations
-db = SqliteDatabase(
-    DB_PATH,
-    pragmas={
-        "journal_mode": "wal",  # Enable WAL mode for concurrent reads during writes
-        "synchronous": "normal",  # Faster than 'full', still crash-safe
-        "cache_size": -64 * 1000,  # 64MB cache (negative = KB)
-        "foreign_keys": 1,  # Enable foreign key constraints
-        "ignore_check_constraints": 0,  # Enable check constraints
-        "temp_store": "memory",  # Store temp tables in memory
-        "mmap_size": 268435456,  # 256MB memory map
-    },
-)
+# Initialize database with basic configuration (detailed config applied by configure_connection)
+if DB_PATH == ":memory:":
+    # Minimal configuration for in-memory database
+    db = SqliteDatabase(
+        DB_PATH,
+        pragmas={
+            "foreign_keys": 1,  # Enable foreign key constraints
+            "ignore_check_constraints": 0,  # Enable check constraints
+        },
+    )
+else:
+    # File-based database with optimized defaults
+    db = SqliteDatabase(
+        DB_PATH,
+        pragmas={
+            "journal_mode": "wal",  # Enable WAL mode for concurrent reads during writes
+            "synchronous": "normal",  # Faster than 'full', still crash-safe
+            "cache_size": -64 * 1000,  # 64MB cache (negative = KB)
+            "foreign_keys": 1,  # Enable foreign key constraints
+            "ignore_check_constraints": 0,  # Enable check constraints
+            "temp_store": "memory",  # Store temp tables in memory
+            "mmap_size": 268435456,  # 256MB memory map
+        },
+    )
 
 # Apply performance settings immediately and add initialization hook
 configure_connection(db)
