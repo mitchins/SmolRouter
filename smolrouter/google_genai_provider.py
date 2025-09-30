@@ -165,6 +165,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         # Cache for discovered models
         self._cached_models: Optional[List[ModelInfo]] = None
+        self._cache_time: Optional[datetime] = None
+        self._cache_ttl = timedelta(minutes=15)  # Cache for 15 minutes
 
         # Create provider-specific rate limiter instance
         self._rate_limiter = GoogleGenAIRequestFunnel(
