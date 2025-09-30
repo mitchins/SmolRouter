@@ -22,6 +22,28 @@ logger = logging.getLogger("model-rerouter")
 DB_PATH = os.getenv("DB_PATH", "requests.db")
 MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))  # Auto-purge logs older than N days (0 = disabled)
 
+
+# Performance optimization function
+def configure_connection(database, **kwargs):
+    """Configure SQLite connection for optimal performance"""
+    database.execute_sql("PRAGMA journal_mode = WAL")
+    database.execute_sql("PRAGMA synchronous = NORMAL")
+    database.execute_sql("PRAGMA cache_size = -65536")  # 64MB cache
+    database.execute_sql("PRAGMA temp_store = MEMORY")
+    database.execute_sql("PRAGMA mmap_size = 268435456")  # 256MB memory map
+    database.execute_sql("PRAGMA wal_autocheckpoint = 1000")  # Checkpoint every 1000 pages
+    database.execute_sql("PRAGMA optimize")  # Analyze statistics
+
+
+def checkpoint_wal():
+    """Force WAL checkpoint to reduce WAL file size"""
+    try:
+        db.execute_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        logger.debug("WAL checkpoint completed")
+    except Exception as e:
+        logger.error(f"WAL checkpoint failed: {e}")
+
+
 # Initialize database with performance optimizations
 db = SqliteDatabase(
     DB_PATH,
@@ -32,8 +54,12 @@ db = SqliteDatabase(
         "foreign_keys": 1,  # Enable foreign key constraints
         "ignore_check_constraints": 0,  # Enable check constraints
         "temp_store": "memory",  # Store temp tables in memory
+        "mmap_size": 268435456,  # 256MB memory map
     },
 )
+
+# Hook to ensure performance settings on every connection
+db.connect_signal.connect(configure_connection)
 
 
 def estimate_token_count(text: str) -> int:
@@ -369,13 +395,58 @@ def vacuum_database():
 
 
 def get_recent_logs(limit=100, service_type=None):
-    """Get recent request logs"""
-    query = RequestLog.select().order_by(RequestLog.timestamp.desc()).limit(limit)
+    """Get recent request logs (optimized for performance)"""
+    try:
+        # Use raw SQL for better performance with large datasets
+        where_clause = f"WHERE service_type = '{service_type}'" if service_type else ""
 
-    if service_type:
-        query = query.where(RequestLog.service_type == service_type)
+        # Use the model's database connection for consistency
+        model_db = RequestLog._meta.database
+        cursor = model_db.execute_sql(f"""
+            SELECT id, timestamp, source_ip, method, path, service_type,
+                   upstream_url, original_model, mapped_model, duration_ms,
+                   status_code, error_message, request_size
+            FROM requestlog
+            {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT {limit}
+        """)
 
-    return list(query)
+        # Convert to RequestLog objects for compatibility
+        results = []
+        for row in cursor.fetchall():
+            # Create a mock object with the needed attributes
+            log = type(
+                "Log",
+                (),
+                {
+                    "id": row[0],
+                    "timestamp": datetime.fromisoformat(row[1].replace("Z", "+00:00"))
+                    if isinstance(row[1], str)
+                    else row[1],
+                    "source_ip": row[2],
+                    "method": row[3],
+                    "path": row[4],
+                    "service_type": row[5],
+                    "upstream_url": row[6],
+                    "original_model": row[7],
+                    "mapped_model": row[8],
+                    "duration_ms": row[9],
+                    "status_code": row[10],
+                    "error_message": row[11],
+                    "request_size": row[12],
+                },
+            )()
+            results.append(log)
+
+        return results
+    except Exception as e:
+        logger.error(f"Failed to get recent logs: {e}")
+        # Fallback to original ORM query
+        query = RequestLog.select().order_by(RequestLog.timestamp.desc()).limit(limit)
+        if service_type:
+            query = query.where(RequestLog.service_type == service_type)
+        return list(query)
 
 
 def get_inflight_requests():
@@ -442,17 +513,23 @@ _cleanup_task = None
 
 async def background_cleanup_task():
     """Background task that runs cleanup periodically"""
+    checkpoint_counter = 0
     while True:
         try:
-            if MAX_AGE_DAYS > 0:  # Only run if cleanup is enabled
-                await asyncio.sleep(24 * 60 * 60)  # Sleep 24 hours
+            # WAL checkpoint every 10 minutes to keep WAL file size manageable
+            await asyncio.sleep(10 * 60)  # 10 minutes
+            checkpoint_counter += 1
+
+            # Force WAL checkpoint to reduce write lock contention
+            checkpoint_wal()
+
+            # Full cleanup every 24 hours if enabled
+            if MAX_AGE_DAYS > 0 and checkpoint_counter >= 144:  # 24 hours in 10-min intervals
+                checkpoint_counter = 0
                 logger.info("Running automatic database cleanup...")
                 cleanup_old_logs()
                 vacuum_database()
                 logger.info("Automatic cleanup completed")
-            else:
-                # If disabled, sleep for a longer period and check again
-                await asyncio.sleep(60 * 60)  # Check every hour if setting changed
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
             break
