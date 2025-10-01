@@ -1593,14 +1593,25 @@ async def api_google_genai_stats():
 
             all_stats = {}
             for provider in google_providers:
-                provider_stats = provider.get_api_key_stats()
-                all_stats[provider.get_provider_id()] = provider_stats
+                provider_stats = await provider.get_api_key_stats()
+                # Filter out _rate_limiter from api_keys for frontend compatibility
+                api_keys_only = {k: v for k, v in provider_stats.items() if k != "_rate_limiter"}
+                # Wrap in api_keys structure for frontend compatibility
+                all_stats[provider.get_provider_id()] = {
+                    "api_keys": api_keys_only,
+                    "summary": {
+                        "total_keys": len(api_keys_only),
+                    },
+                }
 
             return {
                 "providers": all_stats,
                 "summary": {
                     "total_providers": len(google_providers),
-                    "total_keys": sum(len(stats) for stats in all_stats.values()),
+                    "total_keys": sum(
+                        len([k for k in stats.get("api_keys", {}).keys() if k != "_rate_limiter"])
+                        for stats in all_stats.values()
+                    ),
                     "timezone": "US/Pacific (Google's reset time)",
                 },
             }
