@@ -545,6 +545,25 @@ async def start_request_log(
             request_size=request_size,
         )
 
+        # Store request body immediately in blob storage (for inflight visibility)
+        if request_body:
+            from smolrouter.storage import get_blob_storage
+            from smolrouter.redis_backend import RedisRequestLog
+
+            blob_storage = get_blob_storage()
+            request_body_key = blob_storage.store(request_body, content_type="application/json")
+
+            # Update Redis with the request body key immediately
+            import asyncio
+
+            asyncio.create_task(
+                RedisRequestLog.update_completion(
+                    request_id=request_id,
+                    status_code="pending",  # Keep as pending
+                    request_body_key=request_body_key,
+                )
+            )
+
         # Log request start with traceability info
         logger.info(
             f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "

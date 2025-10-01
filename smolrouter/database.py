@@ -61,6 +61,23 @@ class RequestLogEntry:
         """Update Redis with completion data when request is finished"""
         if hasattr(self, "completed_at") and self.completed_at:
             import asyncio
+            from .storage import get_blob_storage
+
+            # Store response body in blob storage (request body was stored at request start)
+            request_body_key = getattr(self, "request_body_key", None)  # Use existing key if already stored
+            response_body_key = None
+
+            blob_storage = get_blob_storage()
+
+            # Only store request body if it wasn't already stored at request start
+            if not request_body_key and hasattr(self, "request_body") and self.request_body:
+                request_body_key = blob_storage.store(self.request_body, content_type="application/json")
+                self.request_body_key = request_body_key
+
+            # Always store response body on completion
+            if hasattr(self, "response_body") and self.response_body:
+                response_body_key = blob_storage.store(self.response_body, content_type="application/json")
+                self.response_body_key = response_body_key
 
             try:
                 # Create async task to update completion data
@@ -74,6 +91,8 @@ class RequestLogEntry:
                         prompt_tokens=getattr(self, "prompt_tokens", None),
                         completion_tokens=getattr(self, "completion_tokens", None),
                         total_tokens=getattr(self, "total_tokens", None),
+                        request_body_key=request_body_key,
+                        response_body_key=response_body_key,
                     )
                 )
             except RuntimeError:
@@ -90,6 +109,8 @@ class RequestLogEntry:
                         prompt_tokens=getattr(self, "prompt_tokens", None),
                         completion_tokens=getattr(self, "completion_tokens", None),
                         total_tokens=getattr(self, "total_tokens", None),
+                        request_body_key=request_body_key,
+                        response_body_key=response_body_key,
                     )
                 )
 
