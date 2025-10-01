@@ -292,7 +292,7 @@
                         <span class="detail-value">
                             {% if log.completed_at %}
                                 {% if log.status_code %}
-                                <span class="status-badge {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                                <span class="status-badge {% if log.status_code is string %}status-inflight{% elif log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
                                     {{ log.status_code }}
                                 </span>
                                 {% else %}

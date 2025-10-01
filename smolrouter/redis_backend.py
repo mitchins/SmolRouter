@@ -116,9 +116,20 @@ class LogRecord:
             self.upstream_url = ""
         if not hasattr(self, "error_message"):
             self.error_message = None
-        if not hasattr(self, "request_body"):
+
+        # Retrieve request/response bodies from blob storage if keys are present
+        from .storage import get_blob_storage
+
+        blob_storage = get_blob_storage()
+
+        if hasattr(self, "request_body_key") and self.request_body_key:
+            self.request_body = blob_storage.retrieve(self.request_body_key)
+        else:
             self.request_body = None
-        if not hasattr(self, "response_body"):
+
+        if hasattr(self, "response_body_key") and self.response_body_key:
+            self.response_body = blob_storage.retrieve(self.response_body_key)
+        else:
             self.response_body = None
 
     def items(self):
@@ -341,6 +352,8 @@ class RedisRequestLog:
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
+        request_body_key: Optional[str] = None,
+        response_body_key: Optional[str] = None,
     ):
         """Update request with completion data"""
         client = await get_redis()
@@ -355,6 +368,13 @@ class RedisRequestLog:
             "completion_tokens": completion_tokens or 0,
             "total_tokens": total_tokens or 0,
         }
+
+        # Store blob keys if provided (bodies are stored in blob storage, not Redis)
+        if request_body_key:
+            update_data["request_body_key"] = request_body_key
+
+        if response_body_key:
+            update_data["response_body_key"] = response_body_key
 
         await client.hset(f"request:{request_id}", mapping=update_data)
         logger.debug(f"Updated Redis request completion: {request_id}")
