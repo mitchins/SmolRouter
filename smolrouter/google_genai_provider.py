@@ -815,15 +815,23 @@ class GoogleGenAIProvider(IModelProvider):
                 await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
             raise Exception(error_msg)
 
-    def get_api_key_stats(self) -> Dict[str, Dict[str, Any]]:
-        """Get current API key usage statistics (grouped by API key, showing all models)"""
+    async def get_api_key_stats(self, include_unused_models: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Get current API key usage statistics (grouped by API key)
+
+        Args:
+            include_unused_models: If False (default), only include models with requests_today > 0
+        """
         stats = {}
 
-        # Get all quota records for this provider
-        quotas = ApiKeyQuota.select().where(ApiKeyQuota.provider_name == self.config.name)
+        # Get all quota records for this provider (Redis-based)
+        quotas = await ApiKeyQuota.get_provider_usage(self.config.name)
 
         # Group stats by API key
         for quota in quotas:
+            # Skip models with no usage unless explicitly requested
+            if not include_unused_models and quota.requests_today == 0:
+                continue
+
             # Use hash for privacy but show some chars for identification
             key_display = f"{quota.api_key_hash[:8]}..."
             model = quota.model_name
@@ -865,22 +873,22 @@ class GoogleGenAIProvider(IModelProvider):
             stats[key_display]["total_tokens_today"] += quota.tokens_today
             stats[key_display]["total_errors"] += quota.error_count
 
-        # Add unused API keys (those not yet used with any model)
-        # This ensures we show total capacity, not just used keys
-        used_key_hashes = set()
-        for quota in quotas:
-            used_key_hashes.add(quota.api_key_hash)
+        # Only add unused API keys if we're showing all models
+        if include_unused_models:
+            used_key_hashes = set()
+            for quota in quotas:
+                used_key_hashes.add(quota.api_key_hash)
 
-        for api_key in self.config.api_keys:
-            key_hash = ApiKeyQuota.hash_api_key(api_key)
-            if key_hash not in used_key_hashes:
-                key_display = f"{key_hash[:8]}..."
-                stats[key_display] = {
-                    "models": {},
-                    "total_requests_today": 0,
-                    "total_tokens_today": 0,
-                    "total_errors": 0,
-                }
+            for api_key in self.config.api_keys:
+                key_hash = ApiKeyQuota.hash_api_key(api_key)
+                if key_hash not in used_key_hashes:
+                    key_display = f"{key_hash[:8]}..."
+                    stats[key_display] = {
+                        "models": {},
+                        "total_requests_today": 0,
+                        "total_tokens_today": 0,
+                        "total_errors": 0,
+                    }
 
         # Add rate limiter statistics
         stats["_rate_limiter"] = self._rate_limiter.stats

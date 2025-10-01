@@ -145,7 +145,7 @@ class QuotaRecord:
     """Object wrapper for Redis quota data to provide attribute access"""
 
     def __init__(self, data: Dict[str, Any]):
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         for key, value in data.items():
             setattr(self, key, value)
@@ -156,12 +156,15 @@ class QuotaRecord:
         self.tokens_today = int(getattr(self, "tokens_today", 0))
         self.error_count = int(getattr(self, "error_count", 0))
 
+        # Ensure string attributes exist
         if not hasattr(self, "last_error"):
             self.last_error = None
         if not hasattr(self, "last_reset_date"):
             self.last_reset_date = None
-        if not hasattr(self, "quota_exhausted_at"):
-            self.quota_exhausted_at = None
+        if not hasattr(self, "api_key_hash"):
+            self.api_key_hash = data.get("key_hash", "")
+        if not hasattr(self, "model_name"):
+            self.model_name = data.get("model_name", "")
 
         # Handle boolean conversion from Redis string
         if hasattr(self, "invalid_key"):
@@ -174,17 +177,31 @@ class QuotaRecord:
         else:
             self.invalid_key = False
 
-        if not hasattr(self, "api_key_hash"):
-            self.api_key_hash = data.get("key_hash", "")
-
-        # Parse updated_at timestamp if available
+        # Parse updated_at timestamp if available - make timezone-aware
         if hasattr(self, "updated_at") and self.updated_at:
             try:
-                self.updated_at = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
+                if isinstance(self.updated_at, str):
+                    self.updated_at = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
+                    if self.updated_at.tzinfo is None:
+                        self.updated_at = self.updated_at.replace(tzinfo=timezone.utc)
             except (ValueError, TypeError, AttributeError):
-                self.updated_at = datetime.now()
+                self.updated_at = None
         else:
-            self.updated_at = datetime.now()
+            self.updated_at = None
+
+        # Parse quota_exhausted_at timestamp if available - make timezone-aware
+        if hasattr(self, "quota_exhausted_at") and self.quota_exhausted_at:
+            try:
+                if isinstance(self.quota_exhausted_at, str) and self.quota_exhausted_at != "":
+                    self.quota_exhausted_at = datetime.fromisoformat(self.quota_exhausted_at.replace("Z", "+00:00"))
+                    if self.quota_exhausted_at.tzinfo is None:
+                        self.quota_exhausted_at = self.quota_exhausted_at.replace(tzinfo=timezone.utc)
+                elif not isinstance(self.quota_exhausted_at, datetime):
+                    self.quota_exhausted_at = None
+            except (ValueError, TypeError, AttributeError):
+                self.quota_exhausted_at = None
+        else:
+            self.quota_exhausted_at = None
 
     def mark_request_success(self, tokens: int = 0):
         """Mark a successful request (updates will be persisted via increment_usage)"""

@@ -191,6 +191,11 @@ class ApiKeyQuota:
     """Redis-based API key quota tracking interface"""
 
     @staticmethod
+    def hash_api_key(api_key: str) -> str:
+        """Create hash of API key for identification"""
+        return RedisApiKeyQuota.hash_api_key(api_key)
+
+    @staticmethod
     async def get_or_create(**kwargs):
         """Get or create quota entry"""
         api_key = kwargs.get("api_key")
