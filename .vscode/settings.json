@@ -1,0 +1,6 @@
+{
+    "sonarlint.connectedMode.project": {
+        "connectionId": "mitchins",
+        "projectKey": "mitchins_SmolRouter"
+    }
+}

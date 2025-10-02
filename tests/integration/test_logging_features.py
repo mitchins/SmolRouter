@@ -5,7 +5,7 @@ import httpx
 from httpx import AsyncClient
 
 from smolrouter.app import app
-from smolrouter.database import RequestLog, get_log_stats, cleanup_old_logs
+from smolrouter.database import RequestLog, get_log_stats
 
 
 # Use the shared isolated_db fixture from conftest.py

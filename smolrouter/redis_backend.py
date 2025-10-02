@@ -204,14 +204,24 @@ class QuotaRecord:
             self.quota_exhausted_at = None
 
     def mark_request_success(self, tokens: int = 0):
-        """Mark a successful request (updates will be persisted via increment_usage)"""
-        # This is a no-op on the object - actual persistence happens via Redis atomic operations
-        pass
+        """Update local object state after successful request
+
+        WARNING: This ONLY updates the in-memory object. You MUST call
+        RedisApiKeyQuota.increment_usage() separately to persist to Redis.
+        """
+        self.requests_today = getattr(self, "requests_today", 0) + 1
+        self.tokens_today = getattr(self, "tokens_today", 0) + tokens
 
     def mark_request_failure(self, error: str = None, quota_exhausted: bool = False):
-        """Mark a failed request (updates will be persisted separately)"""
-        # This is a no-op on the object - actual persistence happens via Redis atomic operations
-        pass
+        """Update local object state after failed request
+
+        WARNING: This ONLY updates the in-memory object. Persistence must be handled separately.
+        """
+        self.error_count = getattr(self, "error_count", 0) + 1
+        if quota_exhausted:
+            from datetime import datetime, timezone
+
+            self.quota_exhausted_at = datetime.now(timezone.utc).isoformat()
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
@@ -371,6 +381,8 @@ class RedisRequestLog:
         total_tokens: Optional[int] = None,
         request_body_key: Optional[str] = None,
         response_body_key: Optional[str] = None,
+        api_key_suffix: Optional[str] = None,
+        proxy_used: Optional[str] = None,
     ):
         """Update request with completion data"""
         client = await get_redis()
@@ -392,6 +404,13 @@ class RedisRequestLog:
 
         if response_body_key:
             update_data["response_body_key"] = response_body_key
+
+        # Store metadata if provided
+        if api_key_suffix:
+            update_data["api_key_suffix"] = api_key_suffix
+
+        if proxy_used:
+            update_data["proxy_used"] = proxy_used
 
         await client.hset(f"request:{request_id}", mapping=update_data)
         logger.debug(f"Updated Redis request completion: {request_id}")
@@ -423,6 +442,31 @@ class RedisRequestLog:
 
 class RedisApiKeyQuota:
     """Redis-based API key quota tracking with atomic counters"""
+
+    _script_sha: Optional[str] = None  # Class variable to store loaded script SHA
+    _script_initialized: bool = False
+
+    @classmethod
+    async def initialize_lua_script(cls):
+        """Load Lua script on startup. MUST succeed or raise exception.
+
+        This is called during application startup and WILL CRASH THE SERVER
+        if the script cannot be loaded. No silent failures, no fallbacks.
+        """
+        if cls._script_initialized:
+            logger.warning("Lua script already initialized, skipping re-initialization")
+            return
+
+        redis_client = await get_redis()
+
+        try:
+            cls._script_sha = await redis_client.script_load(QUOTA_UPDATE_SCRIPT)
+            cls._script_initialized = True
+            logger.info(f"✅ Lua script loaded successfully: {cls._script_sha}")
+        except Exception as e:
+            logger.critical(f"❌ FATAL: Failed to load Lua script into Redis: {e}")
+            logger.critical("⚠️  Server CANNOT start without functional quota tracking")
+            raise RuntimeError(f"Cannot start - Lua script loading failed: {e}") from e
 
     @staticmethod
     def hash_api_key(api_key: str) -> str:
@@ -491,15 +535,24 @@ class RedisApiKeyQuota:
         """Atomically increment usage counters using Lua script with circuit breaker"""
         return await _safe_increment_usage(api_key, provider_id, model_name, request_count, token_count)
 
-    @staticmethod
+    @classmethod
     async def _unsafe_increment_usage(
+        cls,
         api_key: str,
         provider_id: str,
         model_name: str,
         request_count: int = 1,
         token_count: int = 0,
     ) -> Dict[str, Any]:
-        """Internal method without circuit breaker protection"""
+        """Internal method without circuit breaker protection
+
+        RAISES if Lua script not initialized - no fallbacks, no excuses.
+        """
+        if not cls._script_initialized or cls._script_sha is None:
+            error_msg = "❌ FATAL: Lua script not initialized - call initialize_lua_script() during startup"
+            logger.critical(error_msg)
+            raise RuntimeError(error_msg)
+
         client = await get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
@@ -508,9 +561,9 @@ class RedisApiKeyQuota:
         timestamp = datetime.now(timezone.utc).isoformat()
 
         try:
-            # Try EVALSHA first for better performance (real Redis)
+            # Use pre-loaded script SHA - NO FALLBACK
             result = await client.evalsha(
-                QUOTA_UPDATE_SHA,
+                cls._script_sha,
                 1,
                 quota_key,
                 str(request_count),
@@ -521,20 +574,9 @@ class RedisApiKeyQuota:
             # Parse result from Lua script
             requests_today, tokens_today, last_reset = result
         except Exception as e:
-            # Fallback to EVAL for NOSCRIPT error
-            if "NOSCRIPT" in str(e):
-                result = await client.eval(
-                    QUOTA_UPDATE_SCRIPT,
-                    1,
-                    quota_key,
-                    str(request_count),
-                    str(token_count),
-                    today,
-                    timestamp,
-                )
-                requests_today, tokens_today, last_reset = result
-            # Fallback for FakeRedis (no Lua script support)
-            elif "unknown command" in str(e).lower():
+            # FakeRedis fallback ONLY (for tests)
+            if "unknown command" in str(e).lower() and is_fake_redis():
+                logger.warning("⚠️  FakeRedis detected - using pipeline fallback for tests only")
                 # Check if we need daily reset
                 last_reset = await client.hget(quota_key, "last_reset")
                 if last_reset != today:
@@ -559,7 +601,11 @@ class RedisApiKeyQuota:
                 tokens_today = results[1]
                 last_reset = today
             else:
-                raise
+                # NO OTHER FALLBACKS - if script fails in production, CRASH LOUDLY
+                logger.critical(f"❌ FATAL: Lua script execution failed: {e}")
+                logger.critical(f"⚠️  Script SHA: {cls._script_sha}")
+                logger.critical(f"⚠️  Quota key: {quota_key}")
+                raise RuntimeError(f"Quota tracking BROKEN - Lua script failed: {e}") from e
 
         # Get full quota data for return
         updated_data = await client.hgetall(quota_key)
@@ -599,20 +645,17 @@ async def _safe_increment_usage(
     request_count: int = 1,
     token_count: int = 0,
 ) -> Dict[str, Any]:
-    """Safe quota increment with circuit breaker protection"""
+    """Safe quota increment with circuit breaker protection
+
+    RAISES exceptions if Redis is unavailable - quota tracking is CRITICAL,
+    not optional. Callers must handle failures appropriately.
+    """
 
     # Check circuit breaker state
     if not _circuit_breaker.should_attempt():
-        logger.warning("Redis circuit breaker OPEN - skipping quota increment")
-        # Return empty quota data to avoid blocking request
-        return {
-            "provider_id": provider_id,
-            "key_hash": RedisApiKeyQuota.hash_api_key(api_key),
-            "model_name": model_name,
-            "requests_today": 0,
-            "tokens_today": 0,
-            "last_reset": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        }
+        error_msg = "Redis circuit breaker OPEN - quota tracking unavailable"
+        logger.error(error_msg)
+        raise ConnectionError(error_msg)
 
     try:
         # Attempt Redis operation
@@ -623,31 +666,15 @@ async def _safe_increment_usage(
         return result
 
     except (ConnectionError, TimeoutError) as e:
-        # Record failure but don't block the request
+        # Record failure and re-raise - this is a critical error
         _circuit_breaker.record_failure()
-        logger.warning(f"Redis quota increment failed (circuit breaker): {e}")
-
-        # Return fallback quota data
-        return {
-            "provider_id": provider_id,
-            "key_hash": RedisApiKeyQuota.hash_api_key(api_key),
-            "model_name": model_name,
-            "requests_today": 0,  # Conservative fallback
-            "tokens_today": 0,
-            "last_reset": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        }
+        logger.error(f"Redis quota increment FAILED: {e}")
+        raise
 
     except Exception as e:
-        # Unexpected errors - log but don't trip circuit breaker
-        logger.error(f"Unexpected Redis error: {e}")
-        return {
-            "provider_id": provider_id,
-            "key_hash": RedisApiKeyQuota.hash_api_key(api_key),
-            "model_name": model_name,
-            "requests_today": 0,
-            "tokens_today": 0,
-            "last_reset": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        }
+        # Unexpected errors - log and re-raise
+        logger.error(f"Unexpected Redis error during quota increment: {e}")
+        raise
 
 
 # Maintain compatibility with existing code

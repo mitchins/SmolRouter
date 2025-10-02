@@ -56,6 +56,8 @@ class RequestLogEntry:
         self.auth_user = kwargs.get("auth_user")
         self.request_body_key = None
         self.response_body_key = None
+        self.api_key_suffix = kwargs.get("api_key_suffix")  # pragma: allowlist secret
+        self.proxy_used = kwargs.get("proxy_used")
 
     def save(self):
         """Update Redis with completion data when request is finished"""
@@ -93,6 +95,8 @@ class RequestLogEntry:
                         total_tokens=getattr(self, "total_tokens", None),
                         request_body_key=request_body_key,
                         response_body_key=response_body_key,
+                        api_key_suffix=getattr(self, "api_key_suffix", None),
+                        proxy_used=getattr(self, "proxy_used", None),
                     )
                 )
             except RuntimeError:
@@ -111,6 +115,8 @@ class RequestLogEntry:
                         total_tokens=getattr(self, "total_tokens", None),
                         request_body_key=request_body_key,
                         response_body_key=response_body_key,
+                        api_key_suffix=getattr(self, "api_key_suffix", None),
+                        proxy_used=getattr(self, "proxy_used", None),
                     )
                 )
 

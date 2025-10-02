@@ -21,6 +21,7 @@ from google.api_core.exceptions import ResourceExhausted, PermissionDenied, Inva
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
 from .database import ApiKeyQuota
 from .rate_limiter import GoogleGenAIRequestFunnel
+from .request_metadata import RequestMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -205,21 +206,46 @@ class GoogleGenAIProvider(IModelProvider):
         # Default to conservative limit for unknown models
         return self.config.max_requests_per_day
 
-    def _create_proxy_transport(self, proxy_config: Optional[ProxyConfig] = None):
-        """Create httpx Transport pair configured with a proxy.
+    def _create_proxy_transport(self, proxy_config: Optional[ProxyConfig] = None, observation_id: Optional[str] = None):
+        """Create httpx Transport pair configured with a proxy and optional observation.
 
         We explicitly set transports because google-genai may fall back to aiohttp
         internally, which ignores simple 'proxies' mappings. Attaching transports
         forces httpx for both sync and async paths.
+
+        If observation_id is provided, wraps transports with observers for ground truth tracking.
         """
+        from .transport_observer import ObservingHTTPTransport, ObservingAsyncHTTPTransport
+
         config_to_use = proxy_config or self.config.proxy_config
 
         if config_to_use and config_to_use.to_httpx_proxy():
             proxy_url = config_to_use.to_httpx_proxy()
             logger.info(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
 
-            sync_transport = httpx.HTTPTransport(proxy=proxy_url)
-            async_transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+            # Create base transports with proxy
+            base_sync_transport = httpx.HTTPTransport(proxy=proxy_url)
+            base_async_transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
+
+            # Wrap with observers if observation requested
+            if observation_id:
+                sync_transport = ObservingHTTPTransport(observation_id, base_sync_transport, proxy=proxy_url)
+                async_transport = ObservingAsyncHTTPTransport(observation_id, base_async_transport, proxy=proxy_url)
+                logger.debug(f"🔬 Observation enabled for {observation_id}")
+            else:
+                sync_transport = base_sync_transport
+                async_transport = base_async_transport
+
+            return sync_transport, async_transport
+
+        # No proxy case
+        if observation_id:
+            # Still observe even without proxy
+            base_sync_transport = httpx.HTTPTransport()
+            base_async_transport = httpx.AsyncHTTPTransport()
+            sync_transport = ObservingHTTPTransport(observation_id, base_sync_transport)
+            async_transport = ObservingAsyncHTTPTransport(observation_id, base_async_transport)
+            logger.debug(f"🔬 Observation enabled for {observation_id} (no proxy)")
             return sync_transport, async_transport
 
         logger.debug(f"🚫 No proxy configured (proxy_config={proxy_config}, default={self.config.proxy_config})")
@@ -359,16 +385,18 @@ class GoogleGenAIProvider(IModelProvider):
         # Sort by request count, then by key name for consistent ordering
         available_keys.sort(key=lambda x: (x[1], x[0]))
 
-        # Select the first key from the lowest usage group
-        best_key = available_keys[0][0]
+        # Find all keys with the lowest usage count
         lowest_count = available_keys[0][1]
+        lowest_usage_keys = [key for key, count in available_keys if count == lowest_count]
 
-        # Count how many keys have the same lowest usage
-        equal_usage_count = sum(1 for _, count in available_keys if count == lowest_count)
+        # Random selection amongst equals (mitigation for when quota tracking is broken)
+        import random
+
+        best_key = random.choice(lowest_usage_keys)
 
         logger.debug(
             f"Selected API key {best_key[:8]}... for {model_name} with {lowest_count} requests today "
-            f"({equal_usage_count} keys at this usage level)"
+            f"({len(lowest_usage_keys)} keys at this usage level)"
         )
 
         return best_key
@@ -377,15 +405,31 @@ class GoogleGenAIProvider(IModelProvider):
         self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None
     ):
         """Update statistics for an API key + model combination after a request"""
+        from .redis_backend import RedisApiKeyQuota
+
         quota = await self._get_quota_record(api_key, model_name)
 
         # Database handles timezone automatically
 
         if success:
-            quota.mark_request_success(tokens=tokens)
-            logger.info(
-                f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.get_model_daily_limit(model_name)} RPD, {tokens} tokens"
-            )
+            # Actually increment usage in Redis
+            try:
+                await RedisApiKeyQuota.increment_usage(
+                    api_key=api_key,
+                    provider_id=self.config.name,
+                    model_name=model_name,
+                    request_count=1,
+                    token_count=tokens,
+                )
+                quota.mark_request_success(tokens=tokens)
+                logger.info(
+                    f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.get_model_daily_limit(model_name)} RPD, {tokens} tokens"
+                )
+            except Exception as e:
+                logger.error(f"❌ CRITICAL: Failed to update quota for {api_key[:8]}... / {model_name}: {e}")
+                logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
+                # Still update local object for logging purposes
+                quota.mark_request_success(tokens=tokens)
         else:
             # Check error type and handle appropriately
             if self._is_invalid_key_error(error):
@@ -728,9 +772,21 @@ class GoogleGenAIProvider(IModelProvider):
             logger.error(f"Error converting GenAI response to OpenAI format: {e}")
             raise
 
-    async def generate_completion(self, openai_request: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate completion using Google GenAI API"""
+    async def generate_completion(
+        self, openai_request: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
+        """Generate completion using Google GenAI API
+
+        Returns: (response_dict, metadata)
+        """
+        from .request_metadata import RequestMetadata
+        from .transport_observer import get_observer
+        import uuid
+
         original_model = openai_request.get("model", "")
+
+        # Generate observation ID for ground truth tracking
+        observation_id = f"obs_{uuid.uuid4().hex[:12]}"
 
         try:
             # Convert request format
@@ -738,11 +794,15 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Select best API key
             api_key = await self._select_best_api_key(model_name)
+            api_key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
 
             # Create client with proxy transport
             proxy_config = self.config.get_proxy_for_model(model_name)
-            logger.info(f"🔍 Checking proxy for model '{model_name}': config={proxy_config}")
-            sync_transport, async_transport = self._create_proxy_transport(proxy_config)
+            proxy_info = proxy_config if proxy_config else None
+            logger.info(
+                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}, proxy={proxy_info or 'no proxy'} [obs={observation_id}]"
+            )
+            sync_transport, async_transport = self._create_proxy_transport(proxy_config, observation_id)
 
             from google.genai import types
 
@@ -781,7 +841,70 @@ class GoogleGenAIProvider(IModelProvider):
             tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
             await self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
 
-            return openai_response
+            # Verify ground truth via observer (prefer observation over intent)
+            observer = get_observer()
+            observation = observer.get_observation(observation_id)
+
+            # Defaults (intent-based)
+            actual_key_suffix = api_key_suffix
+            actual_proxy = proxy_info
+            key_verified = False
+            proxy_verified = False
+
+            if observation:
+                # GROUND TRUTH available - use it as primary source
+                if observation.api_key_used:
+                    # Use observed API key (not intent)
+                    actual_key_suffix = (
+                        observation.api_key_used[-8:] if len(observation.api_key_used) > 8 else observation.api_key_used
+                    )
+                    key_verified = True
+
+                    # Verify it matches our intent
+                    if actual_key_suffix != api_key_suffix:
+                        logger.error(
+                            f"❌ API key MISMATCH: intended=...{api_key_suffix}, observed=...{actual_key_suffix}"
+                        )
+                    else:
+                        logger.debug(f"✅ API key verified: ...{actual_key_suffix}")
+
+                # Use observed proxy (not intent)
+                if observation.proxy_url:
+                    actual_proxy = observation.proxy_url
+                    proxy_verified = True
+
+                    # Verify it matches our intent
+                    expected_proxy_str = str(proxy_info) if proxy_info else None
+                    if expected_proxy_str and expected_proxy_str not in str(actual_proxy):
+                        logger.error(f"❌ Proxy MISMATCH: intended={expected_proxy_str}, observed={actual_proxy}")
+                    else:
+                        logger.debug(f"✅ Proxy verified: {actual_proxy}")
+                elif not proxy_info:
+                    # No proxy in observation, none intended - verified
+                    proxy_verified = True
+                    logger.debug("✅ No proxy verified (direct connection)")
+
+                logger.info(
+                    f"✅ GROUND TRUTH: key=...{actual_key_suffix} (verified={key_verified}), proxy={actual_proxy or 'NONE'} (verified={proxy_verified})"
+                )
+            else:
+                # Observation not available - fallback to intent
+                logger.warning(
+                    f"⚠️ No observation for {observation_id} - using INTENT: key=...{api_key_suffix}, proxy={proxy_info or 'NONE'}"
+                )
+
+            # Create metadata with ground truth (or intent as fallback)
+            metadata = RequestMetadata(
+                api_key_suffix=actual_key_suffix,
+                proxy_used=actual_proxy,
+                provider_id=self.config.name,
+                model_name=model_name,
+                api_key_verified=key_verified,
+                proxy_verified=proxy_verified,
+                observation_id=observation_id,
+            )
+
+            return openai_response, metadata
 
         except ResourceExhausted as e:
             error_msg = f"Google GenAI quota exhausted: {e}"

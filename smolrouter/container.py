@@ -387,7 +387,7 @@ class SmolRouterContainer:
         """
         Route a request using the new architecture.
 
-        Returns: (response_data, status_code, upstream_used)
+        Returns: (response_data, status_code, upstream_used, metadata)
         """
         if not self._initialized:
             await self.initialize()

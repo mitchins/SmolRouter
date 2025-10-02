@@ -260,8 +260,22 @@ async def init_new_architecture():
 # FastAPI event handlers
 @app.on_event("startup")
 async def startup_event():
-    """FastAPI startup event - initialize background tasks"""
+    """FastAPI startup event - initialize critical systems
+
+    CRITICAL: This function WILL CRASH the server if any critical system fails.
+    No silent failures, no graceful degradation for quota tracking.
+    """
     global ENABLE_LOGGING
+
+    # CRITICAL: Initialize Lua script FIRST - server won't start if this fails
+    from smolrouter.database import RedisApiKeyQuota
+
+    logger.info("🔧 Initializing critical systems...")
+    try:
+        await RedisApiKeyQuota.initialize_lua_script()
+    except Exception as e:
+        logger.critical(f"❌ FATAL: Cannot start server - Lua script initialization failed: {e}")
+        raise  # CRASH THE SERVER - no quota tracking = no service
 
     if ENABLE_LOGGING:
         # Initialize database now that event loop is running
@@ -277,6 +291,7 @@ async def startup_event():
             ENABLE_LOGGING = False
 
     await init_new_architecture()
+    logger.info("✅ All critical systems initialized successfully")
 
 
 @app.on_event("shutdown")
@@ -772,15 +787,17 @@ async def proxy_request(path: str, request: Request):
             # The container architecture handles both streaming and non-streaming automatically
             if is_streaming:
                 # For streaming, use the container's streaming capabilities
-                data, status_code, upstream_used = await container.route_streaming_request(
+                data, status_code, upstream_used, metadata = await container.route_streaming_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
 
-                # Update log entry
+                # Update log entry with metadata
                 if log_entry:
                     try:
                         log_entry.upstream_url = upstream_used
-                        log_entry.save()
+                        if metadata:
+                            log_entry.api_key_suffix = metadata.api_key_suffix
+                            log_entry.proxy_used = metadata.proxy_used
                     except Exception as e:
                         logger.error(f"Failed to update log entry with upstream: {e}")
 
@@ -792,7 +809,7 @@ async def proxy_request(path: str, request: Request):
                 return data  # data should be a StreamingResponse for streaming requests
             else:
                 # For non-streaming requests
-                data, status_code, upstream_used = await container.route_request(
+                data, status_code, upstream_used, metadata = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
         else:
@@ -804,7 +821,7 @@ async def proxy_request(path: str, request: Request):
             logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
             # Try non-streaming instead
             try:
-                data, status_code, upstream_used = await container.route_request(
+                data, status_code, upstream_used, metadata = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
             except Exception as fallback_e:
@@ -825,13 +842,15 @@ async def proxy_request(path: str, request: Request):
             )
             return JSONResponse(content={"error": "provider_architecture_failed", "message": str(e)}, status_code=503)
 
-    # Update log entry with actual upstream used
+    # Update log entry with actual upstream used and metadata
     if log_entry:
         try:
             log_entry.upstream_url = upstream_used
-            log_entry.save()
+            if metadata:
+                log_entry.api_key_suffix = metadata.api_key_suffix
+                log_entry.proxy_used = metadata.proxy_used
         except Exception as e:
-            logger.error(f"Failed to update log entry with upstream: {e}")
+            logger.error(f"Failed to update log entry with metadata: {e}")
 
     # Check if this was an error response
     if status_code >= 400:

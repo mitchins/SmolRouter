@@ -358,8 +358,8 @@ class ModelMediator:
             # Handle Google GenAI provider requests
             if isinstance(provider, GoogleGenAIProvider):
                 try:
-                    response_data = await provider.generate_completion(request_payload)
-                    return response_data, 200, f"google-genai:{resolved_model.provider_id}"
+                    response_data, metadata = await provider.generate_completion(request_payload)
+                    return response_data, 200, f"google-genai:{resolved_model.provider_id}", metadata
                 except Exception as e:
                     error_msg = str(e)
                     status_code = 500
@@ -376,13 +376,14 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
                         status_code,
                         f"google-genai:{resolved_model.provider_id}",
+                        None,  # No metadata on error
                     )
 
             # Handle OpenAI provider requests
             if hasattr(provider, "generate_completion") and resolved_model.provider_type == "openai":
                 try:
                     response_data, status_code = await provider.generate_completion(request_payload, headers, path)
-                    return response_data, status_code, f"openai:{resolved_model.provider_id}"
+                    return response_data, status_code, f"openai:{resolved_model.provider_id}", None  # No metadata yet
                 except Exception as e:
                     logger.error(f"OpenAI provider error: {e}")
                     # Return OpenAI-compatible error response
@@ -390,19 +391,21 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": str(e), "provider": "openai"}},
                         500,
                         f"openai:{resolved_model.provider_id}",
+                        None,
                     )
 
             # Handle Dummy provider requests
             if isinstance(provider, DummyProvider):
                 try:
                     response_data = await provider.make_request(request_payload, headers)
-                    return response_data, 200, f"dummy:{resolved_model.provider_id}"
+                    return response_data, 200, f"dummy:{resolved_model.provider_id}", None
                 except Exception as e:
                     logger.error(f"Dummy provider error: {e}")
                     return (
                         {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
                         500,
                         f"dummy:{resolved_model.provider_id}",
+                        None,
                     )
 
             # For other providers, fall back to legacy HTTP routing
@@ -415,11 +418,17 @@ class ModelMediator:
                 },
                 501,
                 resolved_model.endpoint,
+                None,
             )
 
         except Exception as e:
             logger.error(f"Error routing request: {e}")
-            return {"error": {"type": "internal_server_error", "message": "Request routing failed"}}, 500, "unknown"
+            return (
+                {"error": {"type": "internal_server_error", "message": "Request routing failed"}},
+                500,
+                "unknown",
+                None,
+            )
 
     async def _get_provider_by_id(self, provider_id: str) -> Optional[IModelProvider]:
         """Get a provider instance by ID"""
