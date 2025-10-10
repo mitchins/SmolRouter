@@ -1,8 +1,12 @@
 import os
 import hashlib
 import logging
+import shutil
+import asyncio
+import time
+import secrets
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger("model-rerouter")
@@ -10,6 +14,11 @@ logger = logging.getLogger("model-rerouter")
 # Configuration constants
 MAX_BLOB_SIZE = int(os.getenv("MAX_BLOB_SIZE", "10485760"))  # 10MB default
 MAX_TOTAL_STORAGE_SIZE = int(os.getenv("MAX_TOTAL_STORAGE_SIZE", "1073741824"))  # 1GB default
+JANITOR_INTERVAL_SEC = int(os.getenv("BLOB_JANITOR_INTERVAL_SEC", "300"))  # 5 minutes
+# Target to reduce to when pruning (e.g., 0.8 -> prune to 80% of cap)
+WATERMARK_FRACTION = float(os.getenv("BLOB_WATERMARK_FRACTION", "0.8"))
+# Keep at least this many recent hourly buckets untouched when pruning
+KEEP_RECENT_HOURS = int(os.getenv("BLOB_KEEP_RECENT_HOURS", "1"))
 
 
 class BlobStorage(ABC):
@@ -48,23 +57,38 @@ class FilesystemBlobStorage(BlobStorage):
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Initialized filesystem blob storage at {self.base_path}")
+        # Background janitor task handle (set by init/start functions)
+        self._janitor_task: Optional[asyncio.Task] = None
 
     def _get_blob_path(self, key: str, record_id: Optional[int] = None) -> Path:
-        """Get the filesystem path for a blob key with enhanced sharding"""
-        # Enhanced sharding strategy for 1M+ records
-        if record_id is not None:
-            # Shard by record_id/10000 for predictable distribution
-            shard = record_id // 10000
-            subdir = f"shard_{shard:04d}"
-        else:
-            # Fallback to hash-based sharding (for manual/legacy keys)
-            subdir = key[:2] if len(key) >= 2 else "00"
+        """Get the filesystem path for a blob key using timestamp-bucket sharding.
 
-        return self.base_path / subdir / f"{key}.blob"
+        Key format: "<epoch_ms>-<rand_hex8>[-<suffix>]"
+        Directory layout: base/YYYY/MM/DD/HH/<key>.blob (UTC time)
+        """
+        # record_id no longer affects sharding; kept for API compatibility
+        try:
+            epoch_ms_str = key.split("-", 1)[0]
+            epoch_ms = int(epoch_ms_str)
+        except Exception:
+            # Fallback: put into unknown dir to avoid crashes
+            return self.base_path / "unknown" / f"{key}.blob"
+
+        t = time.gmtime(epoch_ms / 1000.0)
+        year = f"{t.tm_year:04d}"
+        month = f"{t.tm_mon:02d}"
+        day = f"{t.tm_mday:02d}"
+        hour = f"{t.tm_hour:02d}"
+        return self.base_path / year / month / day / hour / f"{key}.blob"
 
     def _generate_key(self, data: bytes) -> str:
-        """Generate a SHA256 hash key for the data"""
-        return hashlib.sha256(data).hexdigest()
+        """Generate a timestamp-aligned unique key.
+
+        Format: epoch_ms-rand8hex. Content is not used to dedupe.
+        """
+        epoch_ms = int(time.time() * 1000)
+        rand8 = secrets.token_hex(4)
+        return f"{epoch_ms}-{rand8}"
 
     def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
@@ -78,25 +102,26 @@ class FilesystemBlobStorage(BlobStorage):
             logger.warning(f"Blob size {len(data)} bytes exceeds limit {MAX_BLOB_SIZE} bytes, truncating")
             data = data[:MAX_BLOB_SIZE]
 
-        key = self._generate_key(data)
-        blob_path = self._get_blob_path(key, record_id)
+        # Generate a unique key and path
+        attempts = 0
+        while True:
+            key = self._generate_key(data)
+            blob_path = self._get_blob_path(key, record_id)
+            blob_path.parent.mkdir(parents=True, exist_ok=True)
+            if not blob_path.exists():
+                break
+            attempts += 1
+            if attempts > 3:
+                # Extremely unlikely collision; add hash suffix to guarantee uniqueness
+                suffix = hashlib.sha256(data).hexdigest()[:8]
+                key = f"{key}-{suffix}"
+                blob_path = self._get_blob_path(key, record_id)
+                blob_path.parent.mkdir(parents=True, exist_ok=True)
+                break
 
-        # Create subdirectory if needed
-        blob_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Only write if file doesn't exist (deduplication)
-        if not blob_path.exists():
-            # Check total storage size limit before writing
-            if not self._check_storage_limit(len(data)):
-                logger.warning(f"Total storage limit exceeded, running cleanup before storing blob {key}")
-                self._cleanup_for_space(len(data))
-
-            with open(blob_path, "wb") as f:
-                f.write(data)
-            logger.debug(f"Stored blob {key} ({len(data)} bytes)")
-        else:
-            logger.debug(f"Blob {key} already exists, skipping write")
-
+        with open(blob_path, "wb") as f:
+            f.write(data)
+        logger.debug(f"Stored blob {key} ({len(data)} bytes) at {blob_path}")
         return key
 
     def retrieve(self, key: str, record_id: Optional[int] = None) -> Optional[bytes]:
@@ -174,6 +199,7 @@ class FilesystemBlobStorage(BlobStorage):
 
     def _check_storage_limit(self, additional_bytes: int) -> bool:
         """Check if adding additional_bytes would exceed storage limit"""
+        # No longer used in hot path; retained for potential external callers
         try:
             current_size = sum(f.stat().st_size for f in self.base_path.rglob("*.blob"))
             return (current_size + additional_bytes) <= MAX_TOTAL_STORAGE_SIZE
@@ -182,40 +208,137 @@ class FilesystemBlobStorage(BlobStorage):
             return True  # Allow storage if we can't check
 
     def _cleanup_for_space(self, needed_bytes: int):
-        """Remove oldest blobs to make space for needed_bytes"""
+        """Deprecated: cleanup now handled by background janitor."""
+        logger.debug("_cleanup_for_space called but janitor is responsible for pruning; ignoring.")
+
+    # ---------- Background Janitor (size-based pruning) ----------
+    def _list_hour_buckets(self) -> List[Path]:
+        """Return sorted list of hour-level bucket directories (oldest -> newest)."""
+        buckets: List[Path] = []
+        if not self.base_path.exists():
+            return buckets
         try:
-            # Get all blob files with their modification times
-            blob_files = []
-            for blob_file in self.base_path.rglob("*.blob"):
-                try:
-                    stat = blob_file.stat()
-                    blob_files.append((blob_file, stat.st_mtime, stat.st_size))
-                except Exception:
-                    continue
-
-            # Sort by modification time (oldest first)
-            blob_files.sort(key=lambda x: x[1])
-
-            freed_space = 0
-            deleted_count = 0
-
-            for blob_file, mtime, size in blob_files:
-                try:
-                    blob_file.unlink()
-                    freed_space += size
-                    deleted_count += 1
-
-                    # Check if we've freed enough space
-                    if freed_space >= needed_bytes:
-                        break
-
-                except Exception as e:
-                    logger.error(f"Failed to delete blob {blob_file}: {e}")
-
-            logger.info(f"Cleaned up {deleted_count} old blobs, freed {freed_space} bytes")
-
+            for year_dir in sorted(p for p in self.base_path.iterdir() if p.is_dir() and p.name.isdigit()):
+                for month_dir in sorted(p for p in year_dir.iterdir() if p.is_dir()):
+                    for day_dir in sorted(p for p in month_dir.iterdir() if p.is_dir()):
+                        for hour_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
+                            buckets.append(hour_dir)
         except Exception as e:
-            logger.error(f"Failed to cleanup for space: {e}")
+            logger.error(f"Failed to list hour buckets: {e}")
+        return buckets
+
+    def _bucket_epoch(self, bucket: Path) -> int:
+        """Parse bucket path YYYY/MM/DD/HH to epoch seconds (UTC)."""
+        try:
+            year = int(bucket.parents[2].name)
+            month = int(bucket.parents[1].name)
+            day = int(bucket.parents[0].name)
+            hour = int(bucket.name)
+            return int(
+                time.mktime(time.strptime(f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:00:00", "%Y-%m-%d %H:%M:%S"))
+            )
+        except Exception:
+            return 0
+
+    def _dir_size_bytes(self, path: Path) -> int:
+        total = 0
+        try:
+            for f in path.rglob("*.blob"):
+                try:
+                    total += f.stat().st_size
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return total
+
+    def _total_size_bytes(self) -> int:
+        return self._dir_size_bytes(self.base_path)
+
+    async def _run_janitor_once(self):
+        """One pruning cycle: if over cap, delete oldest buckets/files to watermark."""
+        try:
+            current_size = await asyncio.to_thread(self._total_size_bytes)
+            cap = MAX_TOTAL_STORAGE_SIZE
+            if current_size <= cap:
+                return
+
+            target = int(cap * WATERMARK_FRACTION)
+            logger.warning(f"Blob storage over cap: current={current_size} > cap={cap}. Pruning to ≈{target} bytes.")
+
+            buckets = await asyncio.to_thread(self._list_hour_buckets)
+            # Keep at least last KEEP_RECENT_HOURS buckets untouched
+            if KEEP_RECENT_HOURS > 0 and len(buckets) > KEEP_RECENT_HOURS:
+                prune_candidates = buckets[:-KEEP_RECENT_HOURS]
+            else:
+                prune_candidates = buckets
+
+            # Delete whole buckets oldest first
+            for bucket in prune_candidates:
+                if current_size <= target:
+                    break
+                try:
+                    bucket_size = await asyncio.to_thread(self._dir_size_bytes, bucket)
+                    await asyncio.to_thread(shutil.rmtree, bucket, True)
+                    current_size -= bucket_size
+                    logger.info(f"Deleted bucket {bucket} (freed {bucket_size} bytes)")
+                except Exception as e:
+                    logger.error(f"Failed to delete bucket {bucket}: {e}")
+
+            # If still over target, prune files in the oldest remaining bucket
+            if current_size > target and buckets:
+                oldest = prune_candidates[0] if prune_candidates else (buckets[0] if buckets else None)
+                if oldest and oldest.exists():
+                    try:
+                        files = []
+                        for f in oldest.rglob("*.blob"):
+                            try:
+                                st = f.stat()
+                                files.append((f, st.st_mtime, st.st_size))
+                            except Exception:
+                                pass
+                        files.sort(key=lambda x: x[1])
+                        for f, _, sz in files:
+                            if current_size <= target:
+                                break
+                            try:
+                                f.unlink()
+                                current_size -= sz
+                            except Exception:
+                                pass
+                        logger.info(f"Pruned files in {oldest} to reach target; now {current_size} bytes")
+                    except Exception as e:
+                        logger.error(f"Failed pruning files in {oldest}: {e}")
+        except Exception as e:
+            logger.error(f"Janitor cycle failed: {e}")
+
+    async def _janitor_loop(self):
+        logger.info(
+            f"Starting blob janitor: interval={JANITOR_INTERVAL_SEC}s, watermark={WATERMARK_FRACTION}, keep_recent_hours={KEEP_RECENT_HOURS}"
+        )
+        try:
+            while True:
+                await asyncio.sleep(JANITOR_INTERVAL_SEC)
+                await self._run_janitor_once()
+        except asyncio.CancelledError:
+            logger.info("Blob janitor cancelled")
+        except Exception as e:
+            logger.error(f"Blob janitor error: {e}")
+
+    def start_janitor(self):
+        """Start background janitor if not already running."""
+        try:
+            loop = asyncio.get_running_loop()
+            if self._janitor_task is None or self._janitor_task.done():
+                self._janitor_task = loop.create_task(self._janitor_loop())
+        except RuntimeError:
+            # No loop yet; app startup will call again when loop exists
+            logger.info("Janitor will start when event loop is available")
+
+    def stop_janitor(self):
+        if self._janitor_task and not self._janitor_task.done():
+            self._janitor_task.cancel()
+            self._janitor_task = None
 
 
 class InMemoryBlobStorage(BlobStorage):
@@ -351,4 +474,10 @@ def init_blob_storage():
     """Initialize blob storage (called at startup)"""
     storage = get_blob_storage()
     logger.info(f"Blob storage initialized: {type(storage).__name__}")
+    # Start janitor for filesystem storage
+    if isinstance(storage, FilesystemBlobStorage):
+        try:
+            storage.start_janitor()
+        except Exception as e:
+            logger.error(f"Failed to start blob janitor: {e}")
     return storage

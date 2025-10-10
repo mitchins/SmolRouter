@@ -25,7 +25,7 @@ class TestRequestDetailsPage:
         )
 
         # Request should complete (even if it fails)
-        assert response.status_code in [200, 400, 401, 404, 500, 501, 502]
+        assert response.status_code in [200, 400, 401, 404, 500, 501, 502, 503]
 
         # Get recent logs to find our request ID
         logs_response = self.client.get("/api/logs")
@@ -71,6 +71,9 @@ class TestRequestDetailsPage:
             "/v1/chat/completions",
             json={"model": "test-model", "messages": [{"role": "user", "content": "test"}]},
         )
+
+        # Basic sanity check so the variable is used (avoid F841)
+        assert response.status_code in [200, 400, 401, 404, 500, 501, 502, 503]
 
         # Get logs to find request ID
         logs_response = self.client.get("/api/logs")

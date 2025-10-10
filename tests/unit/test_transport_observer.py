@@ -38,9 +38,7 @@ def test_sync_transport_observes_api_key():
 
     # Create a mock request with API key header
     test_key = "test_key_12345678"  # pragma: allowlist secret
-    request = httpx.Request(
-        method="GET", url="https://example.com/test", headers={"x-goog-api-key": test_key}
-    )
+    request = httpx.Request(method="GET", url="https://example.com/test", headers={"x-goog-api-key": test_key})
 
     # Mock the wrapped transport's handle_request
     def mock_handle_request(req):
@@ -49,14 +47,14 @@ def test_sync_transport_observes_api_key():
     base_transport.handle_request = mock_handle_request
 
     # Handle the request
-    response = observing_transport.handle_request(request)
+    observing_transport.handle_request(request)
 
     # Verify observation was captured
     assert obs_id in observer.observations
     observation = observer.observations[obs_id]
 
     assert observation.api_key_used == test_key
-    assert observation.api_key_header_name == "x-goog-api-key"
+    assert observation.api_key_header_name == "x-goog-api-key"  # pragma: allowlist secret
     assert observation.method == "GET"
     assert observation.url == "https://example.com/test"
     assert observation.status_code == 200
@@ -86,14 +84,14 @@ async def test_async_transport_observes_api_key():
     base_transport.handle_async_request = mock_handle_async_request
 
     # Handle the request
-    response = await observing_transport.handle_async_request(request)
+    await observing_transport.handle_async_request(request)
 
     # Verify observation was captured
     assert obs_id in observer.observations
     observation = observer.observations[obs_id]
 
-    assert observation.api_key_used == "async_key_87654321"
-    assert observation.api_key_header_name == "x-goog-api-key"
+    assert observation.api_key_used == "async_key_87654321"  # pragma: allowlist secret
+    assert observation.api_key_header_name == "x-goog-api-key"  # pragma: allowlist secret
     assert observation.method == "POST"
     assert observation.url == "https://api.example.com/v1/generate"
     assert observation.status_code == 200
@@ -174,8 +172,8 @@ def test_observer_bearer_token_extraction():
 
     # Verify Bearer prefix was stripped
     observation = observer.observations[obs_id]
-    assert observation.api_key_used == "sk-test123456789"
-    assert observation.api_key_header_name == "authorization"
+    assert observation.api_key_used == "sk-test123456789"  # pragma: allowlist secret
+    assert observation.api_key_header_name == "authorization"  # pragma: allowlist secret
 
 
 def test_observer_cleanup_old_observations():

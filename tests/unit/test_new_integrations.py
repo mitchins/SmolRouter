@@ -1,5 +1,7 @@
 """Minimal regression tests for Google GenAI and Anthropic integrations"""
 
+import pytest
+
 from smolrouter.google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
 from smolrouter.providers import ProviderFactory
@@ -129,7 +131,8 @@ def test_anthropic_response_format_conversion():
     assert openai_response["usage"]["completion_tokens"] == 8
 
 
-def test_google_genai_api_key_selection():
+@pytest.mark.asyncio
+async def test_google_genai_api_key_selection():
     """Test Google GenAI API key selection logic"""
     config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys=["key1", "key2", "key3"])
 
@@ -139,7 +142,7 @@ def test_google_genai_api_key_selection():
     assert hasattr(provider, "_select_best_api_key")
 
     # Test with a model name
-    selected_key = provider._select_best_api_key("gemini-1.5-pro")
+    selected_key = await provider._select_best_api_key("gemini-1.5-pro")
     assert selected_key in config.api_keys
 
 

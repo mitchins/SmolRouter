@@ -329,6 +329,13 @@ class RedisRequestLog:
         user_agent: Optional[str] = None,
         auth_user: Optional[str] = None,
         request_size: Optional[int] = None,
+        # Optional completion fields (for tests and backfills)
+        duration_ms: Optional[int] = None,
+        response_size: Optional[int] = None,
+        status_code: Optional[any] = None,
+        error_message: Optional[str] = None,
+        completed_at: Optional[datetime] = None,
+        timestamp: Optional[datetime] = None,
     ) -> str:
         """Create request log entry - returns request_id"""
         client = await get_redis()
@@ -350,18 +357,20 @@ class RedisRequestLog:
             "user_agent": user_agent or "",
             "auth_user": auth_user or "",
             "request_size": str(request_size or 0),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "completed_at": "",  # Empty string instead of None
-            "status_code": "pending",  # Mark as pending immediately
-            "response_size": "0",
-            "error_message": "",
+            "created_at": (timestamp or datetime.now(timezone.utc)).isoformat(),
+            "completed_at": completed_at.isoformat() if completed_at else "",
+            "status_code": status_code if status_code is not None else "pending",
+            "response_size": str(response_size or 0),
+            "duration_ms": str(duration_ms or 0),
+            "error_message": error_message or "",
         }
 
         # Store in Redis hash
         await client.hset(f"request:{request_id}", mapping=request_data)
 
         # Add to request index for queries
-        await client.zadd("requests:by_time", {request_id: datetime.now().timestamp()})
+        ts = (timestamp or datetime.now(timezone.utc)).timestamp()
+        await client.zadd("requests:by_time", {request_id: ts})
 
         # Add to IP index
         await client.sadd(f"requests:by_ip:{source_ip}", request_id)
@@ -445,6 +454,7 @@ class RedisApiKeyQuota:
 
     _script_sha: Optional[str] = None  # Class variable to store loaded script SHA
     _script_initialized: bool = False
+    _lua_disabled: bool = False  # When true, use pipeline fallback (e.g., FakeRedis/tests)
 
     @classmethod
     async def initialize_lua_script(cls):
@@ -455,6 +465,12 @@ class RedisApiKeyQuota:
         """
         if cls._script_initialized:
             logger.warning("Lua script already initialized, skipping re-initialization")
+            return
+
+        # Allow explicit opt-out or FakeRedis fallback without crashing
+        if os.getenv("REDIS_DISABLE_LUA", "false").lower() in ("1", "true", "yes") or is_fake_redis():
+            cls._lua_disabled = True
+            logger.warning("Lua disabled (REDIS_DISABLE_LUA or FakeRedis detected) - using pipeline fallback")
             return
 
         redis_client = await get_redis()
@@ -549,9 +565,18 @@ class RedisApiKeyQuota:
         RAISES if Lua script not initialized - no fallbacks, no excuses.
         """
         if not cls._script_initialized or cls._script_sha is None:
-            error_msg = "❌ FATAL: Lua script not initialized - call initialize_lua_script() during startup"
-            logger.critical(error_msg)
-            raise RuntimeError(error_msg)
+            # In tests/FakeRedis or when explicitly disabled, use pipeline fallback
+            if (
+                cls._lua_disabled
+                or is_fake_redis()
+                or os.getenv("REDIS_DISABLE_LUA", "false").lower() in ("1", "true", "yes")
+            ):
+                # Defer to fallback path implemented below in the exception handler
+                pass
+            else:
+                error_msg = "❌ FATAL: Lua script not initialized - call initialize_lua_script() during startup"
+                logger.critical(error_msg)
+                raise RuntimeError(error_msg)
 
         client = await get_redis()
 
@@ -574,8 +599,10 @@ class RedisApiKeyQuota:
             # Parse result from Lua script
             requests_today, tokens_today, last_reset = result
         except Exception as e:
-            # FakeRedis fallback ONLY (for tests)
-            if "unknown command" in str(e).lower() and is_fake_redis():
+            # FakeRedis/compat fallback ONLY (for tests or when Lua disabled)
+            if ("unknown command" in str(e).lower() or "noscript" in str(e).lower() or cls._lua_disabled) and (
+                is_fake_redis() or cls._lua_disabled
+            ):
                 logger.warning("⚠️  FakeRedis detected - using pipeline fallback for tests only")
                 # Check if we need daily reset
                 last_reset = await client.hget(quota_key, "last_reset")

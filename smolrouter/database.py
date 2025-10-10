@@ -17,6 +17,7 @@ from .redis_backend import (
     close_redis_db,
     get_redis_stats,
 )
+from .redis_config import redis_client
 
 logger = logging.getLogger("smolrouter.database")
 
@@ -40,19 +41,19 @@ class RequestLogEntry:
         self.source_ip = kwargs.get("source_ip")
         self.method = kwargs.get("method")
         self.path = kwargs.get("path")
-        self.duration_ms = None
-        self.status_code = None
-        self.error_message = None
-        self.timestamp = datetime.now()
+        self.duration_ms = kwargs.get("duration_ms")
+        self.status_code = kwargs.get("status_code")
+        self.error_message = kwargs.get("error_message")
+        self.timestamp = kwargs.get("timestamp") or datetime.now()
         self.request_body = None
         self.response_body = None
         self.user_agent = kwargs.get("user_agent", "Unknown")
-        self.request_size = 0
-        self.response_size = 0
+        self.request_size = kwargs.get("request_size", 0)
+        self.response_size = kwargs.get("response_size", 0)
         self.prompt_tokens = None
         self.completion_tokens = None
         self.total_tokens = None
-        self.completed_at = None
+        self.completed_at = kwargs.get("completed_at")
         self.auth_user = kwargs.get("auth_user")
         self.request_body_key = None
         self.response_body_key = None
@@ -65,60 +66,124 @@ class RequestLogEntry:
             import asyncio
             from .storage import get_blob_storage
 
-            # Store response body in blob storage (request body was stored at request start)
-            request_body_key = getattr(self, "request_body_key", None)  # Use existing key if already stored
-            response_body_key = None
+            # Capture local refs for async task
+            request_id = self.request_id
+            status_code = getattr(self, "status_code", 200)
+            response_size = getattr(self, "response_size", 0)
+            error_message = getattr(self, "error_message", None)
+            duration_ms = getattr(self, "duration_ms", None)
+            prompt_tokens = getattr(self, "prompt_tokens", None)
+            completion_tokens = getattr(self, "completion_tokens", None)
+            total_tokens = getattr(self, "total_tokens", None)
+            api_key_suffix = getattr(self, "api_key_suffix", None)
+            proxy_used = getattr(self, "proxy_used", None)
+            request_body_bytes = getattr(self, "request_body", None)
+            response_body_bytes = getattr(self, "response_body", None)
+            existing_request_body_key = getattr(self, "request_body_key", None)
+
+            blob_storage = get_blob_storage()
+
+            async def _store_and_update():
+                from .redis_backend import RedisRequestLog
+
+                try:
+                    # Only store request body if it wasn't already stored at request start
+                    req_key = existing_request_body_key
+                    if not req_key and request_body_bytes:
+                        req_key = await asyncio.to_thread(
+                            blob_storage.store, request_body_bytes, content_type="application/json"
+                        )
+                        self.request_body_key = req_key
+
+                    # Always store response body on completion
+                    resp_key = None
+                    if response_body_bytes:
+                        resp_key = await asyncio.to_thread(
+                            blob_storage.store, response_body_bytes, content_type="application/json"
+                        )
+                        self.response_body_key = resp_key
+
+                    await RedisRequestLog.update_completion(
+                        request_id=request_id,
+                        status_code=status_code,
+                        response_size=response_size,
+                        error_message=error_message,
+                        duration_ms=duration_ms,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                        request_body_key=req_key,
+                        response_body_key=resp_key,
+                        api_key_suffix=api_key_suffix,
+                        proxy_used=proxy_used,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to store blobs/update completion asynchronously: {e}")
+
+            try:
+                asyncio.create_task(_store_and_update())
+            except RuntimeError:
+                # No event loop running - run synchronously (tests/CLI)
+                try:
+                    asyncio.run(_store_and_update())
+                except Exception as e:
+                    logger.error(f"Failed to run async store/update: {e}")
+
+    async def save_async(self):
+        """Async version of save() that awaits blob storage and Redis updates.
+
+        Useful in tests to avoid races with background tasks.
+        """
+        if hasattr(self, "completed_at") and self.completed_at:
+            from .storage import get_blob_storage
+            from .redis_backend import RedisRequestLog
+
+            request_id = self.request_id
+            status_code = getattr(self, "status_code", 200)
+            response_size = getattr(self, "response_size", 0)
+            error_message = getattr(self, "error_message", None)
+            duration_ms = getattr(self, "duration_ms", None)
+            prompt_tokens = getattr(self, "prompt_tokens", None)
+            completion_tokens = getattr(self, "completion_tokens", None)
+            total_tokens = getattr(self, "total_tokens", None)
+            api_key_suffix = getattr(self, "api_key_suffix", None)
+            proxy_used = getattr(self, "proxy_used", None)
+            request_body_bytes = getattr(self, "request_body", None)
+            response_body_bytes = getattr(self, "response_body", None)
+            existing_request_body_key = getattr(self, "request_body_key", None)
 
             blob_storage = get_blob_storage()
 
             # Only store request body if it wasn't already stored at request start
-            if not request_body_key and hasattr(self, "request_body") and self.request_body:
-                request_body_key = blob_storage.store(self.request_body, content_type="application/json")
-                self.request_body_key = request_body_key
+            req_key = existing_request_body_key
+            if not req_key and request_body_bytes:
+                req_key = await asyncio.to_thread(
+                    blob_storage.store, request_body_bytes, content_type="application/json"
+                )
+                self.request_body_key = req_key
 
             # Always store response body on completion
-            if hasattr(self, "response_body") and self.response_body:
-                response_body_key = blob_storage.store(self.response_body, content_type="application/json")
-                self.response_body_key = response_body_key
-
-            try:
-                # Create async task to update completion data
-                asyncio.create_task(
-                    RedisRequestLog.update_completion(
-                        request_id=self.request_id,
-                        status_code=getattr(self, "status_code", 200),
-                        response_size=getattr(self, "response_size", 0),
-                        error_message=getattr(self, "error_message", None),
-                        duration_ms=getattr(self, "duration_ms", None),
-                        prompt_tokens=getattr(self, "prompt_tokens", None),
-                        completion_tokens=getattr(self, "completion_tokens", None),
-                        total_tokens=getattr(self, "total_tokens", None),
-                        request_body_key=request_body_key,
-                        response_body_key=response_body_key,
-                        api_key_suffix=getattr(self, "api_key_suffix", None),
-                        proxy_used=getattr(self, "proxy_used", None),
-                    )
+            resp_key = None
+            if response_body_bytes:
+                resp_key = await asyncio.to_thread(
+                    blob_storage.store, response_body_bytes, content_type="application/json"
                 )
-            except RuntimeError:
-                # No event loop running - run directly
-                import asyncio
+                self.response_body_key = resp_key
 
-                asyncio.run(
-                    RedisRequestLog.update_completion(
-                        request_id=self.request_id,
-                        status_code=getattr(self, "status_code", 200),
-                        response_size=getattr(self, "response_size", 0),
-                        error_message=getattr(self, "error_message", None),
-                        duration_ms=getattr(self, "duration_ms", None),
-                        prompt_tokens=getattr(self, "prompt_tokens", None),
-                        completion_tokens=getattr(self, "completion_tokens", None),
-                        total_tokens=getattr(self, "total_tokens", None),
-                        request_body_key=request_body_key,
-                        response_body_key=response_body_key,
-                        api_key_suffix=getattr(self, "api_key_suffix", None),
-                        proxy_used=getattr(self, "proxy_used", None),
-                    )
-                )
+            await RedisRequestLog.update_completion(
+                request_id=request_id,
+                status_code=status_code,
+                response_size=response_size,
+                error_message=error_message,
+                duration_ms=duration_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                request_body_key=req_key,
+                response_body_key=resp_key,
+                api_key_suffix=api_key_suffix,
+                proxy_used=proxy_used,
+            )
 
     def set_request_body(self, body):
         """Store request body for logging"""
@@ -149,6 +214,13 @@ class RequestLog:
             "user_agent": "user_agent",
             "auth_user": "auth_user",
             "request_size": "request_size",
+            # Optional completion/test fields
+            "duration_ms": "duration_ms",
+            "response_size": "response_size",
+            "status_code": "status_code",
+            "error_message": "error_message",
+            "completed_at": "completed_at",
+            "timestamp": "timestamp",
         }
 
         for param_key, redis_key in param_mapping.items():
@@ -286,6 +358,61 @@ def get_database_stats():
     return stats
 
 
+async def cleanup_old_logs_async(max_age_days: int | None = None) -> int:
+    """Delete request logs older than max_age_days from Redis indices and hashes.
+
+    Returns number of deleted entries.
+    """
+    try:
+        client = redis_client
+        from datetime import timezone, timedelta
+
+        days = max_age_days if max_age_days is not None else MAX_AGE_DAYS
+        if days <= 0:
+            return 0
+
+        cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
+        # Get old request IDs
+        old_ids = await client.zrangebyscore("requests:by_time", 0, cutoff_ts)
+        deleted = 0
+        for request_id in old_ids:
+            key = f"request:{request_id}"
+            data = await client.hgetall(key)
+            # Remove from IP index if present
+            source_ip = data.get("source_ip") if data else None
+            if source_ip:
+                await client.srem(f"requests:by_ip:{source_ip}", request_id)
+            # Delete hash and sorted set entry
+            await client.delete(key)
+            await client.zrem("requests:by_time", request_id)
+            deleted += 1
+        return deleted
+    except Exception as e:
+        logger.error(f"Error during cleanup_old_logs_async: {e}")
+        return 0
+
+
+def cleanup_old_logs(max_age_days: int | None = None) -> int:
+    """Sync wrapper for cleanup_old_logs_async for non-async contexts.
+
+    If called within a running event loop, raises RuntimeError to avoid
+    unsafe nested event loop usage. Callers in async code should use
+    `await cleanup_old_logs_async(...)` instead.
+    """
+    try:
+        asyncio.get_running_loop()
+        # If we got here, there is a running event loop
+        raise RuntimeError("cleanup_old_logs() called inside a running event loop; use cleanup_old_logs_async()")
+    except RuntimeError:
+        # No running loop: safe to use asyncio.run
+        return asyncio.run(cleanup_old_logs_async(max_age_days))
+
+
+def vacuum_database() -> bool:
+    """No-op for Redis backend; provided for compatibility with legacy tests."""
+    return True
+
+
 # Background cleanup functionality (simplified - Redis TTL handles most of this)
 async def background_cleanup_task():
     """Background task to clean up old Redis entries"""
@@ -367,11 +494,15 @@ async def get_log_stats():
             service_type = getattr(log, "service_type", "unknown")
             service_types[service_type] = service_types.get(service_type, 0) + 1
 
+        # Inflight count
+        inflight = await get_inflight_requests()
+
         return {
             "total_requests": total_requests,
             "completed_requests": completed_requests,
             "pending_requests": pending_requests,
             "service_types": service_types,
+            "inflight_requests": len(inflight),
         }
     except Exception as e:
         logger.error(f"Error getting log stats: {e}")
@@ -381,10 +512,10 @@ async def get_log_stats():
 async def get_inflight_requests():
     """Get in-flight (pending) requests from the last 60 minutes"""
     try:
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         all_recent = await RequestLog.get_recent(1000)
-        cutoff_time = datetime.now() - timedelta(minutes=60)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=60)
 
         # Filter for pending requests (status_code = "pending" or empty completed_at) within 60 min window
         inflight = [

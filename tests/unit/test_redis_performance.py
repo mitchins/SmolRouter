@@ -14,6 +14,7 @@ Performance targets:
 
 import asyncio
 import pytest
+import pytest_asyncio
 import time
 from unittest.mock import patch
 import os
@@ -40,7 +41,7 @@ def ensure_fakeredis():
             os.environ["REDIS_URL"] = original_redis_url
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def fresh_redis():
     """Provide fresh Redis instance for each performance test"""
     await redis_client.flushall()

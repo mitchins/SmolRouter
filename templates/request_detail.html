@@ -309,8 +309,8 @@
                         <span class="detail-value">
                             {% if log.duration_ms %}
                             {{ log.duration_ms }}ms
-                            {% elif not log.completed_at %}
-                            {{ ((log.timestamp.utcnow() - log.timestamp).total_seconds() * 1000) | int }}ms (ongoing)
+                            {% elif not log.completed_at and elapsed_ms %}
+                            {{ elapsed_ms }}ms (ongoing)
                             {% else %}
                             <span class="no-data">N/A</span>
                             {% endif %}
