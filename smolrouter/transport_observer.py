@@ -234,9 +234,6 @@ class ObservingHTTPTransport(httpx.HTTPTransport):
             obs.proxy_url = str(self._pool._proxy_url)
 
         self.observer.observations[self.observation_id] = obs
-        logger.info(
-            f"📡 GROUND TRUTH [sync]: key=...{obs.api_key_used[-8:] if obs.api_key_used else 'NONE'}, proxy={obs.proxy_url or 'NONE'}, url={obs.url}"
-        )
 
         # Delegate to wrapped transport
         response = self.wrapped_transport.handle_request(request)
@@ -245,7 +242,7 @@ class ObservingHTTPTransport(httpx.HTTPTransport):
         obs.status_code = response.status_code
         obs.response_received = True
 
-        logger.info(f"📥 RESPONSE [sync]: status={obs.status_code}")
+        logger.debug(f"📥 RESPONSE [sync]: status={obs.status_code}")
 
         return response
 
@@ -297,9 +294,6 @@ class ObservingAsyncHTTPTransport(httpx.AsyncHTTPTransport):
             obs.proxy_url = str(self._pool._proxy_url)
 
         self.observer.observations[self.observation_id] = obs
-        logger.info(
-            f"📡 GROUND TRUTH [async]: key=...{obs.api_key_used[-8:] if obs.api_key_used else 'NONE'}, proxy={obs.proxy_url or 'NONE'}, url={obs.url}"
-        )
 
         # Delegate to wrapped transport
         response = await self.wrapped_transport.handle_async_request(request)
@@ -308,6 +302,6 @@ class ObservingAsyncHTTPTransport(httpx.AsyncHTTPTransport):
         obs.status_code = response.status_code
         obs.response_received = True
 
-        logger.info(f"📥 RESPONSE [async]: status={obs.status_code}")
+        logger.debug(f"📥 RESPONSE [async]: status={obs.status_code}")
 
         return response

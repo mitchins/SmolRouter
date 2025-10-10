@@ -577,8 +577,8 @@ async def start_request_log(
 
             asyncio.create_task(_store_request_body_async())
 
-        # Log request start with traceability info
-        logger.info(
+        # Log request start with traceability info (reduced verbosity)
+        logger.debug(
             f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "
             f"(user: {auth_user or 'anonymous'}, model: {original_model})"
         )
@@ -587,7 +587,7 @@ async def start_request_log(
         import asyncio
 
         try:
-            logger.info(f"Broadcasting new_request event for request {request_id}")
+            logger.debug(f"Broadcasting new_request event for request {request_id}")
             asyncio.create_task(broadcast_request_event("new_request", log_entry))
         except Exception as e:
             logger.error(f"Failed to broadcast new request event: {e}")
@@ -684,11 +684,11 @@ def complete_request_log(
         import asyncio
 
         try:
-            logger.info(f"Broadcasting request_completed event for request {request_id}")
+            logger.debug(f"Broadcasting request_completed event for request {request_id}")
             asyncio.create_task(broadcast_request_event("request_completed", log_entry))
         except Exception as e:
             logger.error(f"Failed to broadcast request completion event: {e}")
-        logger.info(
+        logger.debug(
             f"[{request_id}] Request completed: {duration_ms}ms, {response_data.get('status_code', 'unknown')} status, "
             f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}"
         )
@@ -736,7 +736,7 @@ async def proxy_request(path: str, request: Request):
         original_model = payload["model"]
         mapped_model = rewrite_model(original_model)
         if mapped_model != original_model:
-            logger.info(f"Rewriting model '{original_model}' -> '{mapped_model}'")
+            logger.debug(f"Rewriting model '{original_model}' -> '{mapped_model}'")
         payload["model"] = mapped_model
 
     # For logging purposes, we'll determine the upstream after routing
@@ -755,7 +755,7 @@ async def proxy_request(path: str, request: Request):
 
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
-        logger.info("Disabling thinking by appending '/no_think' marker to content")
+        logger.debug("Disabling thinking by appending '/no_think' marker to content")
         if "messages" in payload and isinstance(payload["messages"], list):
             payload["messages"].append({"role": "system", "content": "/no_think"})
         elif "prompt" in payload and isinstance(payload["prompt"], str):
@@ -937,7 +937,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
         )
         return JSONResponse(content={"error": "Invalid JSON in request body"}, status_code=400)
 
-    logger.info(f"Received Ollama request to {path}: {ollama_payload}")
+    logger.debug(f"Received Ollama request to {path}: {ollama_payload}")
 
     # Determine if it's a chat or generate endpoint
     is_chat_endpoint = "/chat" in path
@@ -952,7 +952,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
     # Apply route-specific model override if specified
     final_model = route_model_override or mapped_model
     if route_model_override and route_model_override != mapped_model:
-        logger.info(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
+        logger.debug(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
 
     openai_payload = {}
     openai_payload["model"] = final_model
@@ -979,7 +979,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
 
     # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
-        logger.info("Disabling thinking by appending '/no_think' marker to content")
+        logger.debug("Disabling thinking by appending '/no_think' marker to content")
         openai_payload["messages"].append({"role": "system", "content": "/no_think"})
 
     # Forward headers (keep Authorization)
@@ -1025,7 +1025,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                     "done_reason": "stop",
                 }
                 logger.debug(f"Transformed non-stream Ollama response: {json.dumps(ollama_response)}")
-                logger.info(f"Final Ollama response content: {repr(ollama_response.get('response', ''))}")
+                logger.debug(f"Final Ollama response content: {repr(ollama_response.get('response', ''))}")
 
                 # Complete logging for successful response
                 request_body_bytes = json.dumps(ollama_payload).encode("utf-8")
@@ -1232,7 +1232,7 @@ async def list_models(request: Request):
 
             response_data = {"object": "list", "data": openai_models}
 
-            logger.info(f"Served {len(openai_models)} aggregated models to {source_ip}")
+            logger.debug(f"Served {len(openai_models)} aggregated models to {source_ip}")
             return JSONResponse(content=response_data, status_code=200)
 
         except Exception as e:
@@ -1323,7 +1323,7 @@ async def ollama_list_models(request: Request):
                 )
 
             ollama_response = {"models": ollama_models}
-            logger.info(f"Served {len(ollama_models)} aggregated models in Ollama format to {source_ip}")
+            logger.debug(f"Served {len(ollama_models)} aggregated models in Ollama format to {source_ip}")
 
             return JSONResponse(content=ollama_response, status_code=200)
 
@@ -1961,7 +1961,7 @@ async def system_dashboard(request: Request):
                 "hosts": lb_host_stats,
                 "instances_by_model": lb_stats.get("instances", {}),
             }
-            logger.info(f"Load balancer stats: {load_balancing}")
+            logger.debug(f"Load balancer stats: {load_balancing}")
         except Exception as e:
             logger.error(f"Failed to load load balancer stats: {e}")
             load_balancing = {
@@ -1983,13 +1983,13 @@ async def system_dashboard(request: Request):
                 proxy_to_models = {}  # Maps proxy URL to list of models
 
                 providers_list = container.get_providers()
-                logger.info(f"DEBUG: Found {len(providers_list)} providers for proxy analysis")
+                logger.debug(f"Found {len(providers_list)} providers for proxy analysis")
 
                 for provider in providers_list:
                     provider_config = provider.config
-                    logger.info(f"DEBUG: Analyzing provider {provider.get_provider_id()}")
-                    logger.info(f"DEBUG: Has proxy_config: {hasattr(provider_config, 'proxy_config')}")
-                    logger.info(f"DEBUG: Has per_model_proxy: {hasattr(provider_config, 'per_model_proxy')}")
+                    logger.debug(f"Analyzing provider {provider.get_provider_id()}")
+                    logger.debug(f"Has proxy_config: {hasattr(provider_config, 'proxy_config')}")
+                    logger.debug(f"Has per_model_proxy: {hasattr(provider_config, 'per_model_proxy')}")
 
                     # Check default proxy for all models from this provider
                     default_proxy = getattr(provider_config, "proxy_config", None)
@@ -2331,7 +2331,7 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections.append((websocket, client_filter))
         filter_info = f" (filtering for {client_filter})" if client_filter else ""
-        logger.info(f"WebSocket connected{filter_info}. Total connections: {len(self.active_connections)}")
+        logger.debug(f"WebSocket connected{filter_info}. Total connections: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         # Find and remove the connection
@@ -2339,7 +2339,7 @@ class ConnectionManager:
             if conn == websocket:
                 del self.active_connections[i]
                 break
-        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+        logger.debug(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict, source_ip: Optional[str] = None):
         """Broadcast message to relevant connected clients"""
@@ -2376,7 +2376,7 @@ manager = ConnectionManager()
 async def broadcast_request_event(event_type: str, log_entry=None):
     """Broadcast request events to WebSocket clients"""
     try:
-        logger.info(
+        logger.debug(
             f"broadcast_request_event called: {event_type}, connected clients: {len(manager.active_connections)}"
         )
         if event_type == "new_request" and log_entry:
