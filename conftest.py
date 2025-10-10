@@ -4,6 +4,7 @@ Pytest configuration for OpenAI Model Rerouter tests
 
 import pytest
 import os
+import asyncio
 from unittest.mock import patch
 
 # Use Redis backend for tests - FakeRedis will handle the testing automatically
@@ -15,10 +16,9 @@ def fresh_redis_for_tests():
     Ensure fresh FakeRedis instance for each test.
     Using the new redis_config system - just flush all data to start fresh.
     """
-    import asyncio
-
     # Force development environment for tests
     os.environ["APP_ENV"] = "test"
+    os.environ.setdefault("REDIS_URL", "fake")
 
     # Get the redis client from the new config system
     from smolrouter.redis_config import redis_client, is_fake_redis
@@ -74,7 +74,6 @@ def isolated_db():
     Create isolated FakeRedis for each test.
     Since we're using Redis as the hot path, tests use FakeRedis automatically.
     """
-    import asyncio
     from smolrouter.redis_config import redis_client
 
     # Initialize fresh Redis connection (will use FakeRedis)
@@ -108,8 +107,42 @@ def disable_logging():
     """
     Disable logging during regular API tests to avoid database side effects.
     """
-    with patch("smolrouter.app.ENABLE_LOGGING", False):
+    # Disable logging side-effects and enable think stripping for deterministic tests
+    # Force legacy proxy mode so unit tests hit mocked upstreams directly
+    with (
+        patch("smolrouter.app.ENABLE_LOGGING", False),
+        patch("smolrouter.app.STRIP_THINKING", True),
+        patch.dict(os.environ, {"USE_LEGACY_PROXY": "true"}, clear=False),
+    ):
         yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def init_runtime_components():
+    """Initialize Redis (fakeredis), Lua scripts, and blob storage once per test session."""
+    os.environ["APP_ENV"] = "test"
+    os.environ.setdefault("REDIS_URL", "fake")
+
+    async def _init():
+        from smolrouter.redis_backend import init_redis_db, RedisApiKeyQuota
+        from smolrouter.storage import init_blob_storage
+
+        await init_redis_db()
+        # Initialize Lua script used for quota tracking
+        try:
+            await RedisApiKeyQuota.initialize_lua_script()
+        except Exception:
+            # Some fakeredis builds may not support scripts; tests that depend on it will handle skips
+            pass
+        # Initialize blob storage (starts janitor but harmless in tests)
+        init_blob_storage()
+
+    try:
+        asyncio.run(_init())
+    except RuntimeError:
+        # If there's already an event loop (e.g., in CI plugins), create a new task
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(_init())
 
 
 # Automatically use isolated database for logging tests

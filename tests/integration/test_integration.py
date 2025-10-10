@@ -25,12 +25,11 @@ class TestWebUIIntegration:
         self.client = TestClient(app)
 
     def test_upstreams_page_loads(self):
-        """Test that the upstreams page loads successfully"""
-        # This tests the HTML template loading
-        response = self.client.get("/upstreams")
+        """Test that the providers page loads successfully"""
+        # Providers UI is now at /providers
+        response = self.client.get("/providers")
         assert response.status_code == 200
-        assert "Upstream Providers" in response.text
-        assert "upstream-grid" in response.text  # Check for key CSS class
+        assert "Provider Management" in response.text
 
     def test_api_upstreams_endpoint(self):
         """Test the API endpoint for upstream data"""
@@ -142,7 +141,7 @@ def test_web_ui_navigation():
     client = TestClient(app)
 
     # Test main pages load
-    pages = ["/", "/performance", "/upstreams"]
+    pages = ["/", "/performance", "/providers"]
 
     for page in pages:
         response = client.get(page)
@@ -151,7 +150,7 @@ def test_web_ui_navigation():
         # Check that navigation links are present
         assert 'href="/"' in response.text  # Dashboard link
         assert 'href="/performance"' in response.text  # Performance link
-        assert 'href="/upstreams"' in response.text  # Upstreams link
+        assert 'href="/providers"' in response.text  # Providers link
 
 
 @pytest.mark.asyncio

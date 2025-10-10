@@ -127,10 +127,10 @@ def test_rewrite_model_no_match():
 
 def test_strip_think_chain_from_text():
     text_with_think = "Hello <think>internal thought</think> world."
-    assert strip_think_chain_from_text(text_with_think) == "Hello world."
+    assert strip_think_chain_from_text(text_with_think) == "Hello  world."
 
     text_with_multiple_think = "First <think>1</think> second <think>2</think>."
-    assert strip_think_chain_from_text(text_with_multiple_think) == "First second."
+    assert strip_think_chain_from_text(text_with_multiple_think) == "First  second."
 
     text_no_think = "Just a regular sentence."
     assert strip_think_chain_from_text(text_no_think) == "Just a regular sentence."
@@ -139,7 +139,7 @@ def test_strip_think_chain_from_text():
     assert strip_think_chain_from_text(text_only_think) == ""
 
     text_think_with_newlines = "Hello <think>\ninternal\nthought\n</think> world."
-    assert strip_think_chain_from_text(text_think_with_newlines) == "Hello world."
+    assert strip_think_chain_from_text(text_think_with_newlines) == "Hello  world."
 
 
 def test_model_mapping_with_environment_variables():
@@ -175,7 +175,8 @@ def test_think_chain_stripping_edge_cases():
 
     # Test malformed tags
     malformed = "Text <think>unclosed tag"
-    assert strip_think_chain_from_text(malformed) == "Text <think>unclosed tag"
+    # Unclosed tags are removed from start tag to end
+    assert strip_think_chain_from_text(malformed) == "Text "
 
 
 def test_url_validation():

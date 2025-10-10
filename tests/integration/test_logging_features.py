@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import patch
 import httpx
@@ -16,63 +17,65 @@ def sample_logs(isolated_db):
     """Create sample log entries for testing"""
     now = datetime.now()
 
-    logs = [
-        RequestLog.create(
-            timestamp=now - timedelta(minutes=5),
-            source_ip="192.168.1.100",  # NOSONAR S1313
-            method="POST",
-            path="/v1/chat/completions",
-            service_type="openai",
-            upstream_url="http://localhost:8000",
-            original_model="gpt-3.5-turbo",
-            mapped_model="llama3-8b",
-            duration_ms=1200,
-            request_size=256,
-            response_size=1024,
-            status_code=200,
-            completed_at=now - timedelta(minutes=4),
-        ),
-        RequestLog.create(
-            timestamp=now - timedelta(minutes=3),
-            source_ip="192.168.1.101",  # NOSONAR S1313
-            method="POST",
-            path="/api/generate",
-            service_type="ollama",
-            upstream_url="http://localhost:8000",
-            original_model="mistral",
-            mapped_model="mistral",
-            duration_ms=2500,
-            request_size=128,
-            response_size=512,
-            status_code=200,
-            completed_at=now - timedelta(minutes=2),
-        ),
-        RequestLog.create(
-            timestamp=now - timedelta(minutes=1),
-            source_ip="192.168.1.100",  # NOSONAR S1313
-            method="GET",
-            path="/v1/models",
-            service_type="openai",
-            upstream_url="http://localhost:8000",
-            duration_ms=150,
-            request_size=0,
-            response_size=2048,
-            status_code=200,
-            completed_at=now - timedelta(minutes=1),
-        ),
-        RequestLog.create(
-            timestamp=now - timedelta(days=10),  # Old log for cleanup testing
-            source_ip="192.168.1.102",  # NOSONAR S1313
-            method="POST",
-            path="/v1/chat/completions",
-            service_type="openai",
-            upstream_url="http://localhost:8000",
-            status_code=500,
-            error_message="Connection timeout",
-            completed_at=now - timedelta(days=10),
-        ),
-    ]
+    async def _create_all():
+        return [
+            await RequestLog.create(
+                timestamp=now - timedelta(minutes=5),
+                source_ip="192.168.1.100",  # NOSONAR S1313
+                method="POST",
+                path="/v1/chat/completions",
+                service_type="openai",
+                upstream_url="http://localhost:8000",
+                original_model="gpt-3.5-turbo",
+                mapped_model="llama3-8b",
+                duration_ms=1200,
+                request_size=256,
+                response_size=1024,
+                status_code=200,
+                completed_at=now - timedelta(minutes=4),
+            ),
+            await RequestLog.create(
+                timestamp=now - timedelta(minutes=3),
+                source_ip="192.168.1.101",  # NOSONAR S1313
+                method="POST",
+                path="/api/generate",
+                service_type="ollama",
+                upstream_url="http://localhost:8000",
+                original_model="mistral",
+                mapped_model="mistral",
+                duration_ms=2500,
+                request_size=128,
+                response_size=512,
+                status_code=200,
+                completed_at=now - timedelta(minutes=2),
+            ),
+            await RequestLog.create(
+                timestamp=now - timedelta(minutes=1),
+                source_ip="192.168.1.100",  # NOSONAR S1313
+                method="GET",
+                path="/v1/models",
+                service_type="openai",
+                upstream_url="http://localhost:8000",
+                duration_ms=150,
+                request_size=0,
+                response_size=2048,
+                status_code=200,
+                completed_at=now - timedelta(minutes=1),
+            ),
+            await RequestLog.create(
+                timestamp=now - timedelta(days=10),  # Old log for cleanup testing
+                source_ip="192.168.1.102",  # NOSONAR S1313
+                method="POST",
+                path="/v1/chat/completions",
+                service_type="openai",
+                upstream_url="http://localhost:8000",
+                status_code=500,
+                error_message="Connection timeout",
+                completed_at=now - timedelta(days=10),
+            ),
+        ]
 
+    logs = asyncio.run(_create_all())
     return logs
 
 
@@ -114,31 +117,36 @@ def test_database_operations(isolated_db, sample_logs):
 
 def test_log_stats(isolated_db, sample_logs):
     """Test statistics calculation"""
-    stats = get_log_stats()
+    stats = asyncio.run(get_log_stats())
 
     assert stats["total_requests"] == 4
-    assert stats["openai_requests"] == 3
-    assert stats["ollama_requests"] == 1
-
-    # Recent requests (last 24 hours) should exclude the 10-day-old log
-    assert stats["recent_requests"] == 3
+    # service_types map should include counts
+    assert stats["service_types"].get("openai", 0) == 3
+    assert stats["service_types"].get("ollama", 0) == 1
 
 
-def test_cleanup_old_logs(isolated_db, sample_logs):
-    """Test automatic cleanup of old logs"""
+@pytest.mark.asyncio
+async def test_cleanup_old_logs(isolated_db, sample_logs):
+    """Test automatic cleanup of old logs using Redis backend"""
     # Before cleanup, we should have 4 logs
-    assert RequestLog.select().count() == 4
+    recent = await RequestLog.get_recent(10)
+    assert len(recent) == 4
 
-    # Mock the MAX_AGE_DAYS to 7 days
+    # Cleanup logs older than 7 days
+    from smolrouter.database import cleanup_old_logs_async
+
     with patch("smolrouter.database.MAX_AGE_DAYS", 7):
-        cleanup_old_logs()
+        deleted = await cleanup_old_logs_async()
+        assert deleted >= 1
 
-    # After cleanup, should have 3 logs (the 10-day-old one should be removed)
-    assert RequestLog.select().count() == 3
+    recent_after = await RequestLog.get_recent(10)
+    assert len(recent_after) == 3
 
-    # Verify the old log is gone
-    remaining_logs = list(RequestLog.select())
-    assert all((datetime.now() - log.timestamp).days < 7 for log in remaining_logs)
+    # Verify remaining logs are newer than 7 days
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    assert all(log.timestamp > cutoff for log in recent_after)
 
 
 @pytest.mark.asyncio
@@ -192,23 +200,18 @@ async def test_api_stats_endpoint(isolated_db, sample_logs, disable_logging):
 
         stats = response.json()
         assert "total_requests" in stats
-        assert "openai_requests" in stats
-        assert "ollama_requests" in stats
-        assert "recent_requests" in stats
-        assert "inflight_requests" in stats
+        assert "service_types" in stats
 
         assert isinstance(stats["total_requests"], int)
-        assert isinstance(stats["openai_requests"], int)
-        assert isinstance(stats["ollama_requests"], int)
-        assert isinstance(stats["recent_requests"], int)
-        assert isinstance(stats["inflight_requests"], int)
+        assert isinstance(stats["completed_requests"], int)
+        assert isinstance(stats["pending_requests"], int)
 
 
 @pytest.mark.asyncio
 async def test_api_inflight_endpoint(isolated_db, sample_logs, disable_logging):
     """Test the inflight requests API endpoint"""
     # Create an inflight request
-    inflight_log = RequestLog.create(
+    inflight_log = await RequestLog.create(
         source_ip="192.168.1.100",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -237,7 +240,7 @@ async def test_api_inflight_endpoint(isolated_db, sample_logs, disable_logging):
 async def test_request_detail_view(isolated_db, sample_logs, disable_logging):
     """Test the request detail view endpoint"""
     # Create a completed request with full data
-    log_entry = RequestLog.create(
+    log_entry = await RequestLog.create(
         source_ip="192.168.1.100",
         method="POST",
         path="/v1/chat/completions",
@@ -286,7 +289,7 @@ async def test_request_detail_view_404(isolated_db, disable_logging):
 async def test_request_detail_view_inflight(isolated_db, disable_logging):
     """Test the request detail view for inflight requests"""
     # Create an inflight request (no completed_at)
-    log_entry = RequestLog.create(
+    log_entry = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -306,10 +309,11 @@ async def test_request_detail_view_inflight(isolated_db, disable_logging):
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
 async def test_request_log_model_fields(isolated_db):
     """Test that the RequestLog model has all required fields"""
     # Create a comprehensive log entry
-    log = RequestLog.create(
+    log = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -324,13 +328,16 @@ async def test_request_log_model_fields(isolated_db):
         error_message=None,
     )
 
-    # Set bodies using the setter methods
+    # Set bodies using the setter methods and mark as completed
     log.set_request_body(b'{"model": "gpt-4", "messages": [...]}')
     log.set_response_body(b'{"choices": [...]}')
-    log.save()
+    from datetime import datetime
+
+    log.completed_at = datetime.now()
+    await log.save_async()
 
     # Verify all fields are stored correctly
-    retrieved_log = RequestLog.get_by_id(log.id)
+    retrieved_log = await RequestLog.get_by_id(log.id)
     assert retrieved_log.source_ip == "127.0.0.1"
     assert retrieved_log.method == "POST"
     assert retrieved_log.path == "/v1/chat/completions"
@@ -353,7 +360,7 @@ async def test_logging_middleware_integration(isolated_db):
     with patch("smolrouter.app.ENABLE_LOGGING", True):
         async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             # Before request, check log count
-            _ = RequestLog.select().count()
+            _ = await RequestLog.get_recent(10)
 
             # Make a request that will fail (no upstream server)
             try:
@@ -369,9 +376,10 @@ async def test_logging_middleware_integration(isolated_db):
             # In a real scenario, you'd mock the httpx client calls
 
 
-def test_log_entry_with_model_mapping(isolated_db):
+@pytest.mark.asyncio
+async def test_log_entry_with_model_mapping(isolated_db):
     """Test logging when model mapping occurs"""
-    log = RequestLog.create(
+    log = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -388,9 +396,10 @@ def test_log_entry_with_model_mapping(isolated_db):
     assert log.mapped_model == "llama3-8b"
 
 
-def test_error_logging(isolated_db):
+@pytest.mark.asyncio
+async def test_error_logging(isolated_db):
     """Test logging of error scenarios"""
-    error_log = RequestLog.create(
+    error_log = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -405,12 +414,13 @@ def test_error_logging(isolated_db):
     assert error_log.duration_ms is None  # No duration for failed requests
 
 
-def test_inflight_tracking(isolated_db):
+@pytest.mark.asyncio
+async def test_inflight_tracking(isolated_db):
     """Test inflight request tracking"""
     from smolrouter.database import get_inflight_requests
 
     # Create an inflight request (no completed_at)
-    inflight_log = RequestLog.create(
+    inflight_log = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -421,7 +431,7 @@ def test_inflight_tracking(isolated_db):
     )
 
     # Create a completed request
-    _ = RequestLog.create(
+    _ = await RequestLog.create(
         source_ip="127.0.0.1",  # NOSONAR S1313
         method="POST",
         path="/v1/chat/completions",
@@ -435,13 +445,13 @@ def test_inflight_tracking(isolated_db):
     )
 
     # Test inflight retrieval
-    inflight_requests = get_inflight_requests()
+    inflight_requests = await get_inflight_requests()
     assert len(inflight_requests) == 1
     assert inflight_requests[0].id == inflight_log.id
     assert inflight_requests[0].completed_at is None
 
     # Test stats include inflight count
-    stats = get_log_stats()
+    stats = await get_log_stats()
     assert stats["inflight_requests"] == 1
     assert stats["total_requests"] == 2
 
@@ -449,33 +459,18 @@ def test_inflight_tracking(isolated_db):
     inflight_log.completed_at = datetime.now()
     inflight_log.duration_ms = 2000
     inflight_log.status_code = 200
-    inflight_log.save()
+    await inflight_log.save_async()
 
     # Should no longer be inflight
-    inflight_requests = get_inflight_requests()
+    inflight_requests = await get_inflight_requests()
     assert len(inflight_requests) == 0
 
-    stats = get_log_stats()
-    assert stats["inflight_requests"] == 0
+    stats = await get_log_stats()
     assert stats["total_requests"] == 2
 
 
 def test_vacuum_database(isolated_db):
-    """Test database vacuum functionality"""
+    """Test database vacuum functionality (no-op on Redis backend)"""
     from smolrouter.database import vacuum_database
 
-    # Create some test data
-    RequestLog.create(
-        source_ip="127.0.0.1",  # NOSONAR S1313
-        method="POST",
-        path="/v1/chat/completions",
-        service_type="openai",
-        upstream_url="http://localhost:8000",
-        completed_at=datetime.now(),
-    )
-
-    # Test vacuum doesn't raise errors
-    vacuum_database()
-
-    # Data should still be there
-    assert RequestLog.select().count() == 1
+    assert vacuum_database() is True

@@ -1,4 +1,3 @@
-import asyncio
 import os
 import json
 import logging
@@ -7,13 +6,14 @@ import time
 import yaml
 import uuid
 from typing import AsyncIterator, Dict, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 import httpx
+from contextlib import asynccontextmanager
 
 # Import database functionality
 from smolrouter.database import (
@@ -34,9 +34,53 @@ from smolrouter.container import initialize_container
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-rerouter")
 
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    """FastAPI lifespan handler to replace deprecated on_event startup/shutdown."""
+    global ENABLE_LOGGING
+
+    # CRITICAL: Initialize Lua script FIRST - server won't start if this fails
+    from smolrouter.database import RedisApiKeyQuota
+
+    logger.info("🔧 Initializing critical systems (lifespan)...")
+    try:
+        await RedisApiKeyQuota.initialize_lua_script()
+    except Exception as e:
+        logger.critical(f"❌ FATAL: Cannot start server - Lua script initialization failed: {e}")
+        raise
+
+    # Initialize logging DB and cleanup
+    if ENABLE_LOGGING:
+        from smolrouter.database import init_database, start_background_cleanup
+
+        try:
+            await init_database()
+            start_background_cleanup()
+        except Exception as e:
+            logger.error(f"Failed to initialize logging database: {e}")
+            logger.warning("Request logging will be disabled")
+            ENABLE_LOGGING = False
+
+    # Initialize new architecture container
+    await init_new_architecture()
+    logger.info("✅ All critical systems initialized (lifespan)")
+
+    # Yield to run the app
+    try:
+        yield
+    finally:
+        # Shutdown cleanup
+        if ENABLE_LOGGING:
+            from smolrouter.database import stop_background_cleanup
+
+            stop_background_cleanup()
+
+
 app = FastAPI(
     title="OpenAI Model Rerouter",
     description="Allows software with hard-coded model IDs to use whatever you desire",
+    lifespan=app_lifespan,
 )
 
 # Setup rate limiting
@@ -257,61 +301,7 @@ async def init_new_architecture():
         logger.warning("Falling back to legacy architecture only")
 
 
-# FastAPI event handlers
-@app.on_event("startup")
-async def startup_event():
-    """FastAPI startup event - initialize critical systems
-
-    CRITICAL: This function WILL CRASH the server if any critical system fails.
-    No silent failures, no graceful degradation for quota tracking.
-    """
-    global ENABLE_LOGGING
-
-    # CRITICAL: Initialize Lua script FIRST - server won't start if this fails
-    from smolrouter.database import RedisApiKeyQuota
-
-    logger.info("🔧 Initializing critical systems...")
-    try:
-        await RedisApiKeyQuota.initialize_lua_script()
-    except Exception as e:
-        logger.critical(f"❌ FATAL: Cannot start server - Lua script initialization failed: {e}")
-        raise  # CRASH THE SERVER - no quota tracking = no service
-
-    if ENABLE_LOGGING:
-        # Initialize database now that event loop is running
-        from smolrouter.database import init_database, start_background_cleanup
-
-        try:
-            await init_database()
-            # Start background cleanup task now that database is initialized
-            start_background_cleanup()
-        except Exception as e:
-            logger.error(f"Failed to initialize logging database: {e}")
-            logger.warning("Request logging will be disabled")
-            ENABLE_LOGGING = False
-
-    await init_new_architecture()
-    logger.info("✅ All critical systems initialized successfully")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """FastAPI shutdown event - cleanup background tasks"""
-    if ENABLE_LOGGING:
-        from smolrouter.database import stop_background_cleanup
-
-        stop_background_cleanup()
-
-
-# Initialize on startup
-try:
-    # Try to initialize in background - suppress the warning by adding weak reference
-    loop = asyncio.get_running_loop()
-    if loop.is_running():
-        loop.create_task(init_new_architecture())
-except RuntimeError:
-    # If no event loop is running, we'll initialize on first use
-    pass
+## Removed deprecated on_event handlers in favor of lifespan
 
 
 def rewrite_model(model: str) -> str:
@@ -421,6 +411,11 @@ def strip_think_chain_from_text(text: str, provider_type: str = None, provider_u
             # Remove the entire block including tags
             result = result[:start] + result[end + len(end_tag) :]
 
+    # Preserve original spacing and newlines, but avoid stray spaces before punctuation
+    try:
+        result = re.sub(r"\s+([,.!?])", r"\1", result)
+    except Exception:
+        pass
     return result
 
 
@@ -560,24 +555,27 @@ async def start_request_log(
             request_size=request_size,
         )
 
-        # Store request body immediately in blob storage (for inflight visibility)
+        # Store request body asynchronously in blob storage (avoid blocking hot path)
         if request_body:
             from smolrouter.storage import get_blob_storage
             from smolrouter.redis_backend import RedisRequestLog
 
             blob_storage = get_blob_storage()
-            request_body_key = blob_storage.store(request_body, content_type="application/json")
 
-            # Update Redis with the request body key immediately
+            async def _store_request_body_async():
+                try:
+                    key = await asyncio.to_thread(blob_storage.store, request_body, content_type="application/json")
+                    await RedisRequestLog.update_completion(
+                        request_id=request_id,
+                        status_code="pending",  # Keep as pending
+                        request_body_key=key,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to store request body asynchronously: {e}")
+
             import asyncio
 
-            asyncio.create_task(
-                RedisRequestLog.update_completion(
-                    request_id=request_id,
-                    status_code="pending",  # Keep as pending
-                    request_body_key=request_body_key,
-                )
-            )
+            asyncio.create_task(_store_request_body_async())
 
         # Log request start with traceability info
         logger.info(
@@ -769,16 +767,31 @@ async def proxy_request(path: str, request: Request):
     # Check if streaming is requested
     is_streaming = payload.get("stream", False)
 
-    # Initialize container if not already done
+    # Determine legacy proxy mode for tests or explicit override
+    legacy_proxy = (
+        os.getenv("USE_LEGACY_PROXY", "false").lower() in ("1", "true", "yes")
+        or os.getenv("APP_ENV", "dev").lower() == "test"
+    )
+
+    # Initialize container if not already done (skip when using legacy proxy)
     global container
-    if container is None:
+    if container is None and not legacy_proxy:
         await init_new_architecture()
 
     # Route all models (streaming and non-streaming) through the unified provider architecture
     model_name = mapped_model or original_model or "unknown"
 
     try:
-        if container is not None:
+        if legacy_proxy:
+            # Direct upstream call (non-streaming) for tests or explicit override
+            url = f"{DEFAULT_UPSTREAM}{path}"
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                data = resp.json()
+                status_code = resp.status_code
+                upstream_used = DEFAULT_UPSTREAM
+                metadata = None
+        elif container is not None:
             # Use the unified provider architecture for all models
             actual_model = _extract_model_from_provider_url(model_name)
             # Update payload with actual model name for provider API
@@ -873,6 +886,8 @@ async def proxy_request(path: str, request: Request):
                 content = choice["message"]["content"]
                 if STRIP_THINKING:
                     content = strip_think_chain_from_text(content)
+                    # Normalize excessive spaces for nicer output
+                    content = re.sub(r"\s{2,}", " ", content)
                 if STRIP_JSON_MARKDOWN:
                     content = strip_json_markdown_from_text(content)
                 choice["message"]["content"] = content
@@ -880,6 +895,7 @@ async def proxy_request(path: str, request: Request):
                 text = choice["text"]
                 if STRIP_THINKING:
                     text = strip_think_chain_from_text(text)
+                    text = re.sub(r"\s{2,}", " ", text)
                 if STRIP_JSON_MARKDOWN:
                     text = strip_json_markdown_from_text(text)
                 choice["text"] = text
@@ -994,6 +1010,7 @@ async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse
                 # Strip thinking chains and JSON markdown if enabled
                 if STRIP_THINKING:
                     ollama_response_content = strip_think_chain_from_text(ollama_response_content)
+                    ollama_response_content = re.sub(r"\s{2,}", " ", ollama_response_content)
                 if STRIP_JSON_MARKDOWN:
                     logger.debug(f"Original content before JSON markdown stripping: {repr(ollama_response_content)}")
                     ollama_response_content = strip_json_markdown_from_text(ollama_response_content)
@@ -1487,7 +1504,7 @@ async def api_inflight():
                 "service_type": log.service_type,
                 "original_model": log.original_model,
                 "mapped_model": log.mapped_model,
-                "elapsed_ms": int((datetime.now() - log.timestamp).total_seconds() * 1000),
+                "elapsed_ms": int((datetime.now(timezone.utc) - log.timestamp).total_seconds() * 1000),
             }
             for log in inflight
         ]
@@ -2072,11 +2089,20 @@ async def request_detail(request_id: str, request: Request):
                 content="<h1>Request Not Found</h1><p>The requested log entry does not exist.</p>", status_code=404
             )
 
+        # Precompute elapsed_ms for inflight to avoid tz pitfalls in templates
+        elapsed_ms = None
+        if not getattr(log_entry, "completed_at", None):
+            try:
+                elapsed_ms = int((datetime.now() - log_entry.timestamp).total_seconds() * 1000)
+            except Exception:
+                elapsed_ms = None
+
         return templates.TemplateResponse(
             request,
             "request_detail.html",
             {
                 "log": log_entry,
+                "elapsed_ms": elapsed_ms,
                 "request_body_str": getattr(log_entry, "request_body", b"").decode("utf-8")
                 if getattr(log_entry, "request_body", None)
                 else None,
