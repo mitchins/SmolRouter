@@ -94,7 +94,10 @@ if jwt_secret:
 
 # Templates for web UI
 script_dir = os.path.dirname(os.path.abspath(__file__))
-templates_dir = os.path.join(script_dir, "..", "templates")
+# Prefer package-internal templates; fallback to top-level (included via MANIFEST)
+pkg_templates_dir = os.path.join(script_dir, "templates")
+fallback_templates_dir = os.path.join(script_dir, "..", "templates")
+templates_dir = pkg_templates_dir if os.path.isdir(pkg_templates_dir) else fallback_templates_dir
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration via environment variables
@@ -1384,7 +1387,19 @@ async def dashboard(request: Request):
         return templates.TemplateResponse(request, "index.html", {"current_page": "dashboard"})
     except Exception as e:
         logger.error(f"Error rendering dashboard: {e}")
-        return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load dashboard: {e}</p>", status_code=500)
+        # Graceful fallback if templates are unavailable in installed package
+        return HTMLResponse(
+            content=(
+                "<!DOCTYPE html><html><head><meta charset='utf-8'><title>SmolRouter</title></head>"
+                "<body style='font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;'>"
+                "<div style='max-width: 760px; margin: 40px auto; padding: 24px; border: 1px solid #eee; border-radius: 8px;'>"
+                "<h1>SmolRouter</h1>"
+                "<p>The Web UI templates are not available. The service is running.</p>"
+                "<p>If you installed from PyPI, ensure templates are included or upgrade to a version that packages them.</p>"
+                "</div></body></html>"
+            ),
+            status_code=200,
+        )
 
 
 @app.get("/performance", response_class=HTMLResponse)

@@ -52,6 +52,12 @@ smolrouter = "smolrouter.cli:main"
 
 [tool.setuptools]
 packages = ["smolrouter"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+smolrouter = [
+    "templates/*.html",
+]
 
 # Linting configuration migrated from setup.cfg
 [tool.flake8]
