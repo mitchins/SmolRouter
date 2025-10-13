@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SmolRouter"
-version = "1.0.0"
+version = "2.0.0"
 authors = [
   { name="Mitchell Currie", email="mitchell.currie@gmail.com" },
 ]
@@ -26,6 +26,7 @@ dependencies = [
     'pyjwt',
     'slowapi',
     "google-genai", # New unified Google GenAI SDK with httpx transport
+    "google-api-core>=2.19.0",
     "pytz>=2025.2",
     "aiohttp>=3.12.15",
     "redis>=5.0.0",
