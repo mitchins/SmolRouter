@@ -28,6 +28,7 @@ dependencies = [
     "google-genai", # New unified Google GenAI SDK with httpx transport
     "pytz>=2025.2",
     "aiohttp>=3.12.15",
+    "redis>=5.0.0",
     "fakeredis>=2.31.3",
 ]
 
