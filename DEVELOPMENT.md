@@ -1,98 +1,41 @@
-# Development Guide
+# Development guide
 
-## Quick Start
-
-```bash
-# Install development dependencies
-make dev-install
-
-# Run tests
-make test
-
-# Run linting
-make lint
-
-# Install pre-commit hooks (optional)
-make pre-commit-install
-
-# Run all checks
-make check
-```
-
-## Development Tools
-
-### Linting and Code Quality
-
-- **flake8** with bugbear and comprehensions extensions
-- **vulture** for dead code detection  
-- **pre-commit** hooks for automated checks
-
-Configuration in `setup.cfg` and `.pre-commit-config.yaml`.
-
-### Testing
-
-- **pytest** with asyncio support
-- Test files: `test_*.py` 
-- Key test suites:
-  - `test_app.py` - Core application functionality
-  - `test_logging_features.py` - Request/response logging
-  - `test_critical_fixes.py` - Performance and security
-  - `test_integration.py` - End-to-end scenarios
-
-### Performance Optimization
-
-For 1M+ record scenarios:
+## Environment setup
 
 ```bash
-export CLEANUP_ON_STARTUP=false
-export MAX_LOG_AGE_DAYS=30
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
 ```
 
-### Database Optimizations
+This installs runtime dependencies (FastAPI, redis, google-genai, aiohttp) plus the development toolchain (pytest, flake8, ruff, pre-commit).
 
-- **Enhanced indexing** for performance queries
-- **Single aggregated stats query** instead of multiple COUNT queries  
-- **Blob storage sharding** by `record_id/10000`
-- **Conditional startup cleanup** to prevent slow startups
-
-### Request/Response Logging
-
-Bodies are now properly logged and stored in sharded blob storage:
-- `shard_0000/` for records 0-9999
-- `shard_0001/` for records 10000-19999
-- etc.
-
-## Common Commands
+## Common tasks
 
 ```bash
-# Development setup
-make dev-install
-
-# Testing
-make test           # Full test suite
-make test-fast      # Quick tests only
-
-# Code quality
-make lint           # Run flake8 + vulture  
-make pre-commit     # Run all pre-commit checks
-
-# Cleanup
-make clean          # Remove build artifacts
+make dev-install   # optional helper that runs pip install -e .[dev]
+make test          # run the full pytest suite (160 tests)
+make lint          # flake8 + ruff checks
+make check         # lint + tests in one go
+make pre-commit    # execute the configured pre-commit hooks
 ```
 
-## Test Status
+## Test suites
 
-✅ **36/36 core tests passing**
-- All logging features working
-- Request/response body capture working
-- Performance optimizations tested
-- Backward compatibility maintained
+- **Unit tests** cover request routing, model remapping, quota logic, security guards, and provider integrations.
+- **Integration tests** exercise the FastAPI app via ASGI clients, ensuring compatibility across OpenAI, Ollama, and Google GenAI paths.
+- **Load tests** (`test_load.py`) provide a harness for stress-testing and require `aiohttp` when executed.
 
-## Known Issues
+The official release build runs the entire suite; keep your branch green by mirroring the same `pytest` command locally or in CI.
 
-Minor issues not blocking production:
-- Some async test function warnings (cosmetic)
-- A few JWT-related test failures (not affecting core functionality)
-- Architecture test edge cases (new features, not breaking changes)
+## Coding standards
 
-These don't impact the core SmolRouter functionality for your 1M record training scenario.
+- Keep imports free of side-effect catching (no try/except around imports).
+- Prefer small, focused modules; leverage the provider factory instead of hard-coding upstream behaviour.
+- Update documentation in `docs/` when you add new configuration flags or observable metrics.
+
+## Troubleshooting
+
+- Missing dependencies (e.g., `redis`, `google.api_core`) indicate `pip install -e .[dev]` was skipped.
+- Redis features default to `fakeredis`, so tests run without a live server. For manual testing, point `REDIS_URL` at your instance.
+- If the Web UI cannot serve templates, confirm the package data section in `pyproject.toml` includes `smolrouter/templates`.
