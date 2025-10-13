@@ -7,10 +7,16 @@ setup:
 checks:
   - name: Ruff lint
     run: python -m ruff check smolrouter/
-  - name: Unit tests
-    run: pytest tests/unit/ -v --tb=short
-  - name: Integration tests
-    run: pytest tests/integration/ -v --tb=short
+  - name: Unit tests (fakeredis)
+    run: |
+      export REDIS_URL=fake
+      export APP_ENV=ci
+      pytest tests/unit/ -v --tb=short
+  - name: Integration tests (fakeredis)
+    run: |
+      export REDIS_URL=fake
+      export APP_ENV=ci
+      pytest tests/integration/ -v --tb=short
   - name: Package build
     run: |
       python -m build
