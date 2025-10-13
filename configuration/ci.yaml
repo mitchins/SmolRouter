@@ -1,0 +1,17 @@
+version: 1
+python:
+  version: "3.12"
+setup:
+  - python -m pip install --upgrade pip
+  - pip install -e ".[dev]"
+checks:
+  - name: Ruff lint
+    run: python -m ruff check smolrouter/
+  - name: Unit tests
+    run: pytest tests/unit/ -v --tb=short
+  - name: Integration tests
+    run: pytest tests/integration/ -v --tb=short
+  - name: Package build
+    run: |
+      python -m build
+      twine check dist/*
