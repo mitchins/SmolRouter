@@ -270,16 +270,17 @@ print(f"Authorization: Bearer {token}")
 **Authentication Scope:**
 When `JWT_SECRET` is configured, JWT authentication is required for:
 - All `/v1/*` endpoints (chat completions, completions, etc.)
-- All `/api/*` endpoints (logs, stats, performance, etc.)
+- Most `/api/*` endpoints (except those listed as exempt below)
 - WebUI/dashboard pages (when `WEBUI_SECURITY` policy requires it)
 
 The following paths are exempt from JWT authentication:
 - `/` (Dashboard - controlled by `WEBUI_SECURITY` policy)
 - `/performance` (Performance dashboard - controlled by `WEBUI_SECURITY` policy)
+- `/api/logs`, `/api/stats`, `/api/inflight`, `/api/performance` (API endpoints)
 - `/static/*` (Static assets)
 - `/request/*` (Request details)
 
-To allow unauthenticated API traffic, do not set `JWT_SECRET`. The `WEBUI_SECURITY` policy controls dashboard access independently.
+To allow unauthenticated API traffic to all endpoints, do not set `JWT_SECRET`. The `WEBUI_SECURITY` policy controls dashboard access independently.
 
 ## Web UI Navigation
 
