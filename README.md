@@ -90,8 +90,8 @@ Use SmolRouter when you need to:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `JWT_SECRET` | _(unset)_ | Enables JWT authentication for the API and Web UI. Must be ≥32 characters with good entropy |
-| `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls UI access policy: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
+| `JWT_SECRET` | _(unset)_ | Enables JWT authentication for all `/v1/*` and `/api/*` endpoints. Must be ≥32 characters with good entropy. Leave unset for unauthenticated API access |
+| `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls Web UI/dashboard access policy independently of API authentication: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
 | `WEBUI_ALLOWED_ORIGINS` | _(unset)_ | Comma-separated list of origins allowed to access the dashboard |
 | `RATE_LIMIT_REQUESTS` | _(unset)_ | Requests per minute per API key. Leave empty to disable rate limiting |
 | `RATE_LIMIT_TOKENS` | _(unset)_ | Token budget per minute per API key (estimated from request payloads) |
@@ -175,12 +175,13 @@ Access the Google GenAI dashboard at `http://localhost:1234/google-genai` to vie
 - Keep provider API keys and upstream URLs in environment variables or a secret manager
 
 **Authentication:**
-1. Set `JWT_SECRET` to a 32+ character random value. Weak secrets are rejected during startup
-2. Choose a Web UI policy with `WEBUI_SECURITY`:
-   - `NONE` — local experiments only
+1. Set `JWT_SECRET` to a 32+ character random value to enable JWT authentication for all `/v1/*` and `/api/*` endpoints. Weak secrets are rejected during startup
+2. Choose a Web UI access policy with `WEBUI_SECURITY` (controls dashboard/UI access independently):
+   - `NONE` — no authentication required for Web UI (local development only)
    - `AUTH_WHEN_PROXIED` — require auth when `X-Forwarded-For` headers are present (default)
-   - `ALWAYS_AUTH` — safest option when exposed beyond localhost
-3. Pair JWT auth with rate limiting by defining `RATE_LIMIT_REQUESTS` or `RATE_LIMIT_TOKENS` for each API key
+   - `ALWAYS_AUTH` — always require authentication for Web UI access
+3. Important: When `JWT_SECRET` is set, all API requests to `/v1/*` and `/api/*` require a valid JWT token in the `Authorization` header. Leave `JWT_SECRET` unset if you want unauthenticated API access
+4. Pair JWT auth with rate limiting by defining `RATE_LIMIT_REQUESTS` or `RATE_LIMIT_TOKENS` for each API key
 
 **Logging & Retention:**
 - `ENABLE_LOGGING=false` disables the request log and UI for ultra-lightweight proxies
