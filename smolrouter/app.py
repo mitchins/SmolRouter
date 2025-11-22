@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import hashlib
 import yaml
 import uuid
 from typing import AsyncIterator, Dict, Optional, Tuple
@@ -542,6 +543,14 @@ async def start_request_log(
         # Calculate request size if body provided
         request_size = len(request_body) if request_body else 0
 
+        # Compute request body hash for duplicate detection
+        request_body_hash = None
+        if request_body:
+            try:
+                request_body_hash = hashlib.sha256(request_body).hexdigest()
+            except Exception:
+                request_body_hash = None
+
         # Create initial log entry (inflight - no completed_at)
         # Use async Redis logging for hot path performance
         log_entry = await RequestLog.create(
@@ -556,6 +565,7 @@ async def start_request_log(
             user_agent=user_agent,
             auth_user=auth_user,
             request_size=request_size,
+            request_body_hash=request_body_hash,
         )
 
         # Store request body asynchronously in blob storage (avoid blocking hot path)
@@ -1439,6 +1449,8 @@ async def api_logs(limit: int = 100, service_type: str = None):
                 "error_message": log.error_message,
                 "completed_at": log.completed_at.isoformat() if log.completed_at else None,
                 "is_inflight": log.completed_at is None,
+                "is_duplicate": getattr(log, "is_duplicate", False),
+                "duplicate_count": getattr(log, "duplicate_count", 0),
             }
             for log in logs
         ]
@@ -1491,6 +1503,8 @@ async def api_dashboard(limit: int = 100):
                     "error_message": log.error_message,
                     "upstream": log.upstream_url,
                     "request_size": log.request_size,
+                    "is_duplicate": getattr(log, "is_duplicate", False),
+                    "duplicate_count": getattr(log, "duplicate_count", 0),
                 }
             )
 
@@ -2112,6 +2126,29 @@ async def request_detail(request_id: str, request: Request):
             except Exception:
                 elapsed_ms = None
 
+        # Compute duplicates list (other requests with same body hash)
+        duplicates = []
+        try:
+            body_hash = getattr(log_entry, "request_body_hash", None)
+            if body_hash:
+                from smolrouter.redis_backend import RedisRequestLog
+
+                ids = await RedisRequestLog.get_recent_duplicate_request_ids(body_hash, limit=10)
+                other_ids = [rid for rid in ids if rid != log_entry.id]
+                for rid in other_ids[:10]:
+                    dupe = await RequestLog.get_by_id(rid)
+                    if dupe:
+                        duplicates.append(
+                            {
+                                "id": dupe.id,
+                                "timestamp": dupe.timestamp.isoformat(),
+                                "status_code": dupe.status_code,
+                                "source_ip": dupe.source_ip,
+                            }
+                        )
+        except Exception:
+            duplicates = []
+
         return templates.TemplateResponse(
             request,
             "request_detail.html",
@@ -2124,6 +2161,7 @@ async def request_detail(request_id: str, request: Request):
                 "response_body_str": getattr(log_entry, "response_body", b"").decode("utf-8")
                 if getattr(log_entry, "response_body", None)
                 else None,
+                "duplicates": duplicates,
             },
         )
     except Exception as e:
@@ -2142,6 +2180,35 @@ async def get_request_details(request_id: str, request: Request):
         request_id_str = str(request_id)
         log_entry = await RequestLog.get_by_id(request_id_str)
 
+        # Prepare duplicate info
+        duplicate_info = {
+            "is_duplicate": getattr(log_entry, "is_duplicate", False),
+            "duplicate_count": getattr(log_entry, "duplicate_count", 0),
+            "request_body_hash": getattr(log_entry, "request_body_hash", None),
+            "duplicates": [],
+        }
+        try:
+            if duplicate_info["request_body_hash"]:
+                from smolrouter.redis_backend import RedisRequestLog
+
+                ids = await RedisRequestLog.get_recent_duplicate_request_ids(
+                    duplicate_info["request_body_hash"], limit=10
+                )
+                other_ids = [rid for rid in ids if rid != log_entry.id]
+                for rid in other_ids[:10]:
+                    dupe = await RequestLog.get_by_id(rid)
+                    if dupe:
+                        duplicate_info["duplicates"].append(
+                            {
+                                "id": dupe.id,
+                                "timestamp": dupe.timestamp.isoformat(),
+                                "status_code": dupe.status_code,
+                                "source_ip": dupe.source_ip,
+                            }
+                        )
+        except Exception:
+            pass
+
         return {
             "id": log_entry.id,
             "timestamp": log_entry.timestamp.isoformat(),
@@ -2158,6 +2225,7 @@ async def get_request_details(request_id: str, request: Request):
             "error_message": log_entry.error_message,
             "request_body": log_entry.request_body.decode("utf-8") if log_entry.request_body else None,
             "response_body": log_entry.response_body.decode("utf-8") if log_entry.response_body else None,
+            "duplicate": duplicate_info,
         }
     except RequestLog.DoesNotExist:
         raise HTTPException(status_code=404, detail="Request not found")

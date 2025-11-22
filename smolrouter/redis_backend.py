@@ -117,6 +117,23 @@ class LogRecord:
         if not hasattr(self, "error_message"):
             self.error_message = None
 
+        # Normalize duplicate detection fields
+        if hasattr(self, "duplicate_count"):
+            try:
+                self.duplicate_count = int(self.duplicate_count)
+            except Exception:
+                self.duplicate_count = 0
+        else:
+            self.duplicate_count = 0
+
+        if hasattr(self, "is_duplicate"):
+            try:
+                self.is_duplicate = str(self.is_duplicate).lower() in ("1", "true", "yes")
+            except Exception:
+                self.is_duplicate = False
+        else:
+            self.is_duplicate = False
+
         # Retrieve request/response bodies from blob storage if keys are present
         from .storage import get_blob_storage
 
@@ -329,6 +346,7 @@ class RedisRequestLog:
         user_agent: Optional[str] = None,
         auth_user: Optional[str] = None,
         request_size: Optional[int] = None,
+        request_body_hash: Optional[str] = None,
         # Optional completion fields (for tests and backfills)
         duration_ms: Optional[int] = None,
         response_size: Optional[int] = None,
@@ -374,6 +392,25 @@ class RedisRequestLog:
 
         # Add to IP index
         await client.sadd(f"requests:by_ip:{source_ip}", request_id)
+
+        # Index by request body hash and set duplicate flags
+        if request_body_hash:
+            set_key = f"requests:by_body:{request_body_hash}"
+            try:
+                existing_count = await client.scard(set_key)
+            except Exception:
+                existing_count = 0
+            is_dup = existing_count > 0
+            await client.hset(
+                f"request:{request_id}",
+                mapping={
+                    "request_body_hash": request_body_hash,
+                    "is_duplicate": "true" if is_dup else "false",
+                    # Number of other matching requests (before adding this one)
+                    "duplicate_count": existing_count,
+                },
+            )
+            await client.sadd(set_key, request_id)
 
         logger.debug(f"Created Redis request log: {request_id}")
         return request_id
@@ -447,6 +484,36 @@ class RedisRequestLog:
                 requests.append(LogRecord(dict(data)))
 
         return requests
+
+    @staticmethod
+    async def get_duplicate_request_ids(body_hash: str) -> List[str]:
+        """Return all request IDs that share the given request body hash."""
+        client = await get_redis()
+        set_key = f"requests:by_body:{body_hash}"
+        try:
+            ids = await client.smembers(set_key)
+            # Normalize to list of strings
+            return [str(x) for x in ids]
+        except Exception:
+            return []
+
+    @staticmethod
+    async def get_recent_duplicate_request_ids(body_hash: str, limit: int = 10, max_scan: int = 1000) -> List[str]:
+        """Return up to `limit` duplicate request IDs ordered by recency.
+
+        Intersects the duplicate set with the global recency index.
+        """
+        client = await get_redis()
+        set_key = f"requests:by_body:{body_hash}"
+        try:
+            dup_ids = set(str(x) for x in await client.smembers(set_key))
+            if not dup_ids:
+                return []
+            recent_ids = [str(x) for x in await client.zrevrange("requests:by_time", 0, max_scan - 1)]
+            ordered = [rid for rid in recent_ids if rid in dup_ids]
+            return ordered[:limit]
+        except Exception:
+            return []
 
 
 class RedisApiKeyQuota:

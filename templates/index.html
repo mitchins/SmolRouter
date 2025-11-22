@@ -367,11 +367,12 @@
                         <th>Size</th>
                         <th>Duration</th>
                         <th>Status</th>
+                        <th title="Duplicate request indicator">Dup</th>
                     </tr>
                 </thead>
                 <tbody id="requests-tbody">
                     <tr>
-                        <td colspan="9" class="no-data">
+                        <td colspan="10" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">hourglass_empty</span>
                             Loading requests...
                         </td>
@@ -614,6 +615,7 @@
                     <td>${formatSize(log.request_size)}</td>
                     <td class="duration">${formatDuration(log.duration_ms)}</td>
                     <td>${formatStatus(log.status_code)}</td>
+                    <td>${formatDuplicate(log)}</td>
                 </tr>
             `).join('');
         }
@@ -771,6 +773,7 @@
                 <td>${formatSize(request.request_size)}</td>
                 <td class="duration">${formatDuration(request.duration_ms)}</td>
                 <td>${formatStatus(request.status_code)}</td>
+                <td>${formatDuplicate(request)}</td>
             `;
 
             // Add row to top of table
@@ -780,6 +783,14 @@
             while (tbody.children.length > 100) {
                 tbody.removeChild(tbody.lastChild);
             }
+        }
+
+        function formatDuplicate(item) {
+            const count = item && (item.duplicate_count || 0);
+            const isDup = item && (item.is_duplicate || count > 0);
+            if (!isDup) return '';
+            const title = count > 0 ? `${count} other instance${count === 1 ? '' : 's'}` : 'Duplicate';
+            return `<span class="material-icons" style="font-size: 1rem; color: #c62828;" title="${title}">content_copy</span>`;
         }
 
         function updateRequestInTable(request) {
@@ -805,6 +816,7 @@
                         <td>${formatSize(request.request_size)}</td>
                         <td class="duration">${formatDuration(request.duration_ms)}</td>
                         <td>${formatStatus(request.status_code)}</td>
+                        <td>${formatDuplicate(request)}</td>
                     `;
 
                     // Restore click handler

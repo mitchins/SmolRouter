@@ -59,6 +59,10 @@ class RequestLogEntry:
         self.response_body_key = None
         self.api_key_suffix = kwargs.get("api_key_suffix")  # pragma: allowlist secret
         self.proxy_used = kwargs.get("proxy_used")
+        # Duplicate detection fields (optional)
+        self.request_body_hash = kwargs.get("request_body_hash")
+        self.is_duplicate = kwargs.get("is_duplicate", False)
+        self.duplicate_count = kwargs.get("duplicate_count", 0)
 
     def save(self):
         """Update Redis with completion data when request is finished"""
@@ -214,6 +218,7 @@ class RequestLog:
             "user_agent": "user_agent",
             "auth_user": "auth_user",
             "request_size": "request_size",
+            "request_body_hash": "request_body_hash",
             # Optional completion/test fields
             "duration_ms": "duration_ms",
             "response_size": "response_size",
