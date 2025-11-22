@@ -32,7 +32,7 @@ The official release build runs the entire suite; keep your branch green by mirr
 
 - Keep imports free of side-effect catching (no try/except around imports).
 - Prefer small, focused modules; leverage the provider factory instead of hard-coding upstream behaviour.
-- Update documentation in `docs/` when you add new configuration flags or observable metrics.
+- Update documentation in `README.md` or `DEVELOPMENT.md` when you add new configuration flags or observable metrics.
 
 ## Architecture
 
@@ -267,7 +267,19 @@ print(f"Authorization: Bearer {token}")
 - ✅ Detailed security logging – Audit access attempts
 - ✅ Graceful fallbacks – Secure defaults on configuration errors
 
-**Note:** JWT validation is only required for WebUI/dashboard access. Proxy endpoints (`/v1/chat/completions`, etc.) are not affected.
+**Authentication Scope:**
+When `JWT_SECRET` is configured, JWT authentication is required for:
+- All `/v1/*` endpoints (chat completions, completions, etc.)
+- All `/api/*` endpoints (logs, stats, performance, etc.)
+- WebUI/dashboard pages (when `WEBUI_SECURITY` policy requires it)
+
+The following paths are exempt from JWT authentication:
+- `/` (Dashboard - controlled by `WEBUI_SECURITY` policy)
+- `/performance` (Performance dashboard - controlled by `WEBUI_SECURITY` policy)
+- `/static/*` (Static assets)
+- `/request/*` (Request details)
+
+To allow unauthenticated API traffic, do not set `JWT_SECRET`. The `WEBUI_SECURITY` policy controls dashboard access independently.
 
 ## Web UI Navigation
 
