@@ -835,9 +835,10 @@ async def proxy_request(path: str, request: Request):
                 return data  # data should be a StreamingResponse for streaming requests
             else:
                 # For non-streaming requests
-                data, status_code, upstream_used, metadata = await container.route_request(
+                data, status_code, upstream_used = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
+                metadata = None
         else:
             # Fallback error if container not initialized
             raise Exception("Provider architecture not available")
@@ -847,9 +848,10 @@ async def proxy_request(path: str, request: Request):
             logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
             # Try non-streaming instead
             try:
-                data, status_code, upstream_used, metadata = await container.route_request(
+                data, status_code, upstream_used = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
+                metadata = None
             except Exception as fallback_e:
                 logger.error(f"Both streaming and non-streaming failed: {fallback_e}")
                 complete_request_log(
