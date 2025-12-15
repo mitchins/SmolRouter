@@ -707,14 +707,43 @@ class GoogleGenAIProvider(IModelProvider):
             role = message.get("role", "user")
             content = message.get("content", "")
 
+            parts = []
+            if isinstance(content, str):
+                parts.append({"text": content})
+            elif isinstance(content, list):
+                for item in content:
+                    if item.get("type") == "text":
+                        parts.append({"text": item.get("text", "")})
+                    elif item.get("type") == "image_url":
+                        image_url = item.get("image_url", {}).get("url", "")
+                        if image_url.startswith("data:"):
+                            try:
+                                header, base64_data = image_url.split(",", 1)
+                                mime_type = header.split(":")[1].split(";")[0]
+                                parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
+                            except Exception as e:
+                                logger.warning(f"Failed to parse data URI: {e}")
+                        else:
+                            logger.warning(
+                                f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."
+                            )
+
+            if not parts:
+                continue
+
             # Map OpenAI roles to Google GenAI roles
             if role == "system":
-                # System messages can be added as user messages with special formatting
-                contents.append({"role": "user", "parts": [{"text": f"System: {content}"}]})
+                # Prepend "System: " to the first text part if it exists
+                if parts and "text" in parts[0]:
+                    parts[0]["text"] = f"System: {parts[0]['text']}"
+                else:
+                    parts.insert(0, {"text": "System: "})
+
+                contents.append({"role": "user", "parts": parts})
             elif role == "assistant":
-                contents.append({"role": "model", "parts": [{"text": content}]})
+                contents.append({"role": "model", "parts": parts})
             else:  # user
-                contents.append({"role": "user", "parts": [{"text": content}]})
+                contents.append({"role": "user", "parts": parts})
 
         # Build generation config
         generation_config = {}
