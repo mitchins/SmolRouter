@@ -730,6 +730,36 @@ class RedisApiKeyQuota:
 
         return quotas
 
+    @staticmethod
+    async def mark_invalid(api_key_hash: str, provider_name: str) -> int:
+        """Mark all quota entries for a given key hash as invalid.
+
+        Args:
+            api_key_hash: The hashed API key
+            provider_name: The provider name
+
+        Returns:
+            Number of quota entries marked as invalid
+        """
+        client = await get_redis()
+
+        # Get all quota keys for this key hash
+        quota_keys = await client.smembers(f"quotas:by_key:{api_key_hash}")
+
+        count = 0
+        for quota_key in quota_keys:
+            # quota_key format: "quota:{provider_id}:{key_hash}:{model_name}"
+            # We need to match keys that have this provider_name in the right position
+            parts = quota_key.split(":")
+            if len(parts) >= 4 and parts[0] == "quota" and parts[1] == provider_name:
+                # This quota key matches both the key_hash (already filtered) and provider_name
+                await client.hset(quota_key, "invalid_key", "true")
+                await client.hset(quota_key, "updated_at", datetime.now(timezone.utc).isoformat())
+                count += 1
+
+        logger.debug(f"Marked {count} quota entries as invalid for key_hash={api_key_hash}, provider={provider_name}")
+        return count
+
 
 # Production-hardened safe wrapper for quota operations
 async def _safe_increment_usage(

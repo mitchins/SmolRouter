@@ -435,9 +435,10 @@ class GoogleGenAIProvider(IModelProvider):
             if self._is_invalid_key_error(error):
                 # Mark invalid across all models for this key
                 key_hash = ApiKeyQuota.hash_api_key(api_key)
-                ApiKeyQuota.update(invalid_key=True).where(
-                    (ApiKeyQuota.api_key_hash == key_hash) & (ApiKeyQuota.provider_name == self.config.name)
-                ).execute()
+                try:
+                    await ApiKeyQuota.mark_invalid_by_hash(key_hash, self.config.name)
+                except Exception as e:
+                    logger.error(f"Failed to mark API key as invalid: {e}")
                 logger.error(f"🚫 API key {api_key[:8]}... INVALID/EXPIRED: {error}")
 
             # Check if this is a quota exhaustion error
