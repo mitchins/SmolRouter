@@ -339,6 +339,18 @@ class ApiKeyQuota:
         """
         return await RedisApiKeyQuota.mark_invalid(api_key_hash, provider_name)
 
+    @staticmethod
+    async def mark_quota_exhausted(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
+        """Mark a quota entry as exhausted and persist to Redis.
+
+        Args:
+            api_key: The API key
+            provider_id: The provider ID
+            model_name: The model name
+            error: Optional error message to store
+        """
+        return await RedisApiKeyQuota.mark_quota_exhausted(api_key, provider_id, model_name, error)
+
 
 # Async database initialization
 async def init_database():
