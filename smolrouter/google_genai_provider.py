@@ -445,6 +445,13 @@ class GoogleGenAIProvider(IModelProvider):
             elif self._is_quota_exhausted_error(error):
                 # Mark this key as exhausted for this model regardless of our internal counter
                 quota.mark_request_failure(error=error, quota_exhausted=True)
+
+                # Persist quota exhaustion to Redis so it's remembered across requests
+                try:
+                    await ApiKeyQuota.mark_quota_exhausted(api_key, self.config.name, model_name, error)
+                except Exception as e:
+                    logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
+
                 logger.error(
                     f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted"
                 )

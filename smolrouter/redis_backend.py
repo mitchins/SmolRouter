@@ -306,6 +306,8 @@ if last_reset ~= today then
     redis.call('HSET', quota_key, 'requests_today', 0)
     redis.call('HSET', quota_key, 'tokens_today', 0)
     redis.call('HSET', quota_key, 'last_reset', today)
+    -- Clear quota exhaustion status on daily reset
+    redis.call('HDEL', quota_key, 'quota_exhausted_at')
 end
 
 -- Atomically increment counters
@@ -683,6 +685,8 @@ class RedisApiKeyQuota:
                             "last_reset": today,
                         },
                     )
+                    # Clear quota exhaustion status on daily reset
+                    await client.hdel(quota_key, "quota_exhausted_at")
 
                 # Atomically increment counters using pipeline
                 pipe = client.pipeline()
@@ -759,6 +763,36 @@ class RedisApiKeyQuota:
 
         logger.debug(f"Marked {count} quota entries as invalid for key_hash={api_key_hash}, provider={provider_name}")
         return count
+
+    @staticmethod
+    async def mark_quota_exhausted(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
+        """Mark a quota entry as exhausted and persist to Redis.
+
+        Args:
+            api_key: The API key
+            provider_id: The provider ID
+            model_name: The model name
+            error: Optional error message to store
+        """
+        client = await get_redis()
+
+        key_hash = RedisApiKeyQuota.hash_api_key(api_key)
+        quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
+
+        # Update fields in Redis
+        updates = {
+            "quota_exhausted_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if error:
+            updates["last_error"] = error
+            # Increment error count
+            await client.hincrby(quota_key, "error_count", 1)
+
+        await client.hset(quota_key, mapping=updates)
+
+        logger.debug(f"Marked quota as exhausted: {quota_key}")
 
 
 # Production-hardened safe wrapper for quota operations
