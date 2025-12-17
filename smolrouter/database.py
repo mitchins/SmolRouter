@@ -326,6 +326,19 @@ class ApiKeyQuota:
         except RuntimeError:
             return []
 
+    @staticmethod
+    async def mark_invalid_by_hash(api_key_hash: str, provider_name: str) -> int:
+        """Mark all quota entries for a given key hash as invalid.
+
+        Args:
+            api_key_hash: The hashed API key
+            provider_name: The provider name
+
+        Returns:
+            Number of quota entries marked as invalid
+        """
+        return await RedisApiKeyQuota.mark_invalid(api_key_hash, provider_name)
+
 
 # Async database initialization
 async def init_database():
