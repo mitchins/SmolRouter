@@ -315,28 +315,19 @@ class GoogleGenAIProvider(IModelProvider):
                 continue
 
             # Check for recent quota errors for this model (even if not at limit)
-            # But skip this check if quota should have reset today
-            if (
-                quota.last_error
-                and self._is_quota_exhausted_error(quota.last_error)
-                and quota.last_reset_date == pacific_date
-            ):
-                # If the error was recent (within last hour) AND the quota hasn't reset, be cautious
-                if quota.quota_exhausted_at:
-                    # quota_exhausted_at could be datetime object or string from database
-                    pacific_tz = pytz.timezone("US/Pacific")
+            # Only skip if the quota error happened TODAY (same Pacific date as now)
+            if quota.quota_exhausted_at:
+                # quota_exhausted_at could be datetime object or string from database
+                pacific_tz = pytz.timezone("US/Pacific")
 
+                try:
                     if isinstance(quota.quota_exhausted_at, str):
                         # Parse datetime string from database
-                        try:
-                            quota_exhausted_dt = datetime.fromisoformat(quota.quota_exhausted_at.replace("Z", "+00:00"))
-                            if quota_exhausted_dt.tzinfo is None:
-                                quota_exhausted_pacific = pytz.utc.localize(quota_exhausted_dt).astimezone(pacific_tz)
-                            else:
-                                quota_exhausted_pacific = quota_exhausted_dt.astimezone(pacific_tz)
-                        except ValueError:
-                            # Skip malformed timestamp
-                            continue
+                        quota_exhausted_dt = datetime.fromisoformat(quota.quota_exhausted_at.replace("Z", "+00:00"))
+                        if quota_exhausted_dt.tzinfo is None:
+                            quota_exhausted_pacific = pytz.utc.localize(quota_exhausted_dt).astimezone(pacific_tz)
+                        else:
+                            quota_exhausted_pacific = quota_exhausted_dt.astimezone(pacific_tz)
                     else:
                         # Handle datetime object
                         if quota.quota_exhausted_at.tzinfo is None:
@@ -344,9 +335,24 @@ class GoogleGenAIProvider(IModelProvider):
                         else:
                             quota_exhausted_pacific = quota.quota_exhausted_at.astimezone(pacific_tz)
 
-                    if (datetime.now(pacific_tz) - quota_exhausted_pacific).seconds < 3600:
-                        logger.debug(f"API key {key[:8]}... recent quota error for {model_name}, skipping temporarily")
+                    # CRITICAL FIX: Only skip if exhaustion was TODAY (same Pacific date)
+                    # Keys exhausted yesterday should be available again after midnight Pacific reset
+                    exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
+                    if exhausted_date == pacific_date:
+                        # Exhausted today - skip this key for now
+                        logger.debug(
+                            f"API key {key[:8]}... exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
+                        )
                         continue
+                    else:
+                        # Exhausted on a previous day - key should be available again
+                        logger.debug(
+                            f"API key {key[:8]}... exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
+                        )
+                except (ValueError, TypeError, AttributeError) as e:
+                    # Skip malformed timestamp - allow key through
+                    logger.warning(f"API key {key[:8]}... has malformed quota_exhausted_at, allowing: {e}")
+                    pass
 
             available_keys.append((key, actual_requests_today))
 
