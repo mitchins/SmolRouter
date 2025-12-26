@@ -397,6 +397,19 @@ class ProviderFactory:
                     per_model_proxy[model_name] = proxy_dict
             config["per_model_proxy"] = per_model_proxy
 
+        # Convert proxy_pool list entries to ProxyConfig objects
+        # proxy_pool is a list where each entry is either null (direct) or a proxy dict
+        if "proxy_pool" in config and isinstance(config["proxy_pool"], list):
+            proxy_pool = []
+            for entry in config["proxy_pool"]:
+                if entry is None:
+                    proxy_pool.append(None)  # Direct connection
+                elif isinstance(entry, dict):
+                    proxy_pool.append(ProxyConfig(**entry))
+                else:
+                    proxy_pool.append(entry)  # Already a ProxyConfig or other
+            config["proxy_pool"] = proxy_pool
+
         return config
 
     @classmethod
