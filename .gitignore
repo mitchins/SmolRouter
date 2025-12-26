@@ -25,9 +25,6 @@ blob_storage/
 data/
 deploy-data/
 
-# Configuration - ignore actual configs with secrets
-config/routes.yaml
-config/google_api_keys.txt
 var/
 wheels/
 share/python-wheels/
@@ -184,3 +181,7 @@ cython_debug/
 .pypirc
 requests.db
 blob_storage/
+
+# Configuration - ignore actual configs with secrets
+config/routes.yaml
+config/google_api_keys.txt

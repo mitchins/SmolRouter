@@ -270,7 +270,7 @@ class GoogleGenAIProvider(IModelProvider):
         # Gemini 2.5 Flash models (severely reduced limits after Dec 6, 2025)
         if "2.5" in model_lower and "flash" in model_lower:
             if "lite" in model_lower:
-                return 5  # Deprecated/unavailable as of Nov 2025
+                return 1000  # Flash-lite still has generous limits (250-1500 RPD range, using conservative 1000)
             else:
                 return 20  # 20 RPD per project (free tier, down from 250-500)
 
