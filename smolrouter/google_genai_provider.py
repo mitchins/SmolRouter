@@ -1002,9 +1002,17 @@ class GoogleGenAIProvider(IModelProvider):
             observer = get_observer()
             observation = observer.get_observation(observation_id)
 
-            # Defaults (intent-based)
+            # Defaults (intent-based) - convert ProxyConfig to string for storage
             actual_key_suffix = api_key_suffix
-            actual_proxy = proxy_info
+            actual_proxy = None
+            if proxy_info:
+                # Convert ProxyConfig to URL string
+                if hasattr(proxy_info, "to_httpx_proxy"):
+                    actual_proxy = proxy_info.to_httpx_proxy()
+                else:
+                    actual_proxy = str(proxy_info)
+            else:
+                actual_proxy = "direct"  # Explicitly mark direct connections
             key_verified = False
             proxy_verified = False
 
