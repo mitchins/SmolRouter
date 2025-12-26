@@ -422,6 +422,10 @@ class ModelLoadBalancer:
     ) -> Optional[ModelInstance]:
         """Select the best instance for a request using least-busy strategy.
 
+        This method atomically selects an instance AND marks the request as started
+        to prevent race conditions where multiple concurrent requests all see the
+        same load and get routed to the same instance.
+
         Args:
             requested_model: Model name requested by client
             distribution_strategy: Distribution strategy for host selection
@@ -441,6 +445,18 @@ class ModelLoadBalancer:
             selected = instances[0]
             selected.last_used = time.time()
 
+            # CRITICAL: Atomically increment active_requests while holding the lock
+            # This prevents race conditions where concurrent requests all see the same
+            # load (0) and all get routed to the same instance
+            selected.active_requests += 1
+            selected.total_requests += 1
+            self.active_requests[selected.model_id] = selected.active_requests
+
+            # Also update host metrics
+            host = self.hosts.get(selected.host_id)
+            if host:
+                host.active_requests += 1
+
             logger.debug(
                 f"Selected instance {selected.model_id} for {requested_model} "
                 f"(active_requests: {selected.active_requests})"
@@ -451,13 +467,17 @@ class ModelLoadBalancer:
     async def start_request(self, instance: ModelInstance) -> None:
         """Mark the start of a request on an instance.
 
+        NOTE: This method is now a no-op. Request tracking is handled atomically
+        inside select_instance() to prevent race conditions. This method is kept
+        for backward compatibility but does nothing.
+
         Args:
             instance: Model instance handling the request
         """
-        async with self._lock:
-            instance.active_requests += 1
-            instance.total_requests += 1
-            self.active_requests[instance.model_id] = instance.active_requests
+        # No-op: Request tracking is now done atomically in select_instance()
+        # to prevent race conditions where multiple concurrent requests all
+        # see the same load and get routed to the same instance.
+        pass
 
     async def end_request(
         self, instance: ModelInstance, response_time: float, success: bool = True, ttft: float = 0.0

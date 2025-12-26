@@ -122,8 +122,10 @@ class TestModelLoadBalancer:
         instances[1].active_requests = 1
 
         # Should select the less busy instance
+        # Note: select_instance now atomically increments active_requests
         selected = await load_balancer.select_instance("gpt-oss-20b")
-        assert selected.active_requests == 1
+        # After selection, active_requests is incremented from 1 to 2
+        assert selected.active_requests == 2
         assert selected.model_id == "gpt-oss-20b:2"
 
     @pytest.mark.asyncio
@@ -142,12 +144,15 @@ class TestModelLoadBalancer:
 
     @pytest.mark.asyncio
     async def test_start_end_request_tracking(self, load_balancer):
-        """Test request tracking with start and end."""
-        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
-        instance = load_balancer.instances["gpt-oss-20b"][0]
+        """Test request tracking with select_instance and end_request.
 
-        # Start request
-        await load_balancer.start_request(instance)
+        Note: start_request is now a no-op. Request tracking is handled atomically
+        inside select_instance to prevent race conditions.
+        """
+        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
+
+        # Select instance (this atomically marks request as started)
+        instance = await load_balancer.select_instance("gpt-oss-20b")
         assert instance.active_requests == 1
         assert instance.total_requests == 1
 
@@ -158,35 +163,43 @@ class TestModelLoadBalancer:
 
     @pytest.mark.asyncio
     async def test_multiple_concurrent_requests(self, load_balancer):
-        """Test handling multiple concurrent requests."""
+        """Test handling multiple concurrent requests.
+
+        This test verifies that select_instance atomically tracks requests,
+        preventing race conditions where concurrent requests all see the same
+        load and get routed to the same instance.
+        """
         load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
-        instance = load_balancer.instances["gpt-oss-20b"][0]
 
-        # Start multiple requests
-        await load_balancer.start_request(instance)
-        await load_balancer.start_request(instance)
-        await load_balancer.start_request(instance)
+        # Simulate multiple concurrent requests by selecting the same model
+        # Each selection atomically increments active_requests
+        instance1 = await load_balancer.select_instance("gpt-oss-20b")
+        assert instance1.active_requests == 1
 
-        assert instance.active_requests == 3
+        instance2 = await load_balancer.select_instance("gpt-oss-20b")
+        assert instance2.active_requests == 2
+        assert instance2 is instance1  # Same instance since only one registered
+
+        instance3 = await load_balancer.select_instance("gpt-oss-20b")
+        assert instance3.active_requests == 3
 
         # End requests
-        await load_balancer.end_request(instance, 1.0, True)
-        await load_balancer.end_request(instance, 2.0, True)
+        await load_balancer.end_request(instance1, 1.0, True)
+        await load_balancer.end_request(instance2, 2.0, True)
 
-        assert instance.active_requests == 1
-        assert instance.total_requests == 3
+        assert instance1.active_requests == 1
+        assert instance1.total_requests == 3
 
     @pytest.mark.asyncio
     async def test_response_time_averaging(self, load_balancer):
         """Test that response times are averaged correctly."""
         load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
-        instance = load_balancer.instances["gpt-oss-20b"][0]
 
         # Process multiple requests with different response times
-        await load_balancer.start_request(instance)
+        instance = await load_balancer.select_instance("gpt-oss-20b")
         await load_balancer.end_request(instance, 1.0, True)
 
-        await load_balancer.start_request(instance)
+        instance = await load_balancer.select_instance("gpt-oss-20b")
         await load_balancer.end_request(instance, 3.0, True)
 
         # Average should be (1.0 + 3.0) / 2 = 2.0
@@ -196,14 +209,13 @@ class TestModelLoadBalancer:
     async def test_failure_handling(self, load_balancer):
         """Test handling of failed requests."""
         load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
-        instance = load_balancer.instances["gpt-oss-20b"][0]
 
         # Successful request
-        await load_balancer.start_request(instance)
+        instance = await load_balancer.select_instance("gpt-oss-20b")
         await load_balancer.end_request(instance, 1.0, success=True)
 
         # Failed request
-        await load_balancer.start_request(instance)
+        instance = await load_balancer.select_instance("gpt-oss-20b")
         await load_balancer.end_request(instance, 0.5, success=False)
 
         # Check stats
@@ -272,8 +284,8 @@ class TestModelLoadBalancer:
 
         # Simulate 6 requests with realistic async behavior
         async def simulate_request():
+            # select_instance now atomically marks request as started
             instance = await load_balancer.select_instance("gpt-oss-20b")
-            await load_balancer.start_request(instance)
             selected_instances.append(instance.model_id)
 
             # Simulate processing time (realistic request duration)
@@ -308,9 +320,9 @@ class TestModelLoadBalancer:
         load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
 
         async def simulate_request():
+            # select_instance now atomically marks request as started
             instance = await load_balancer.select_instance("gpt-oss-20b")
             if instance:
-                await load_balancer.start_request(instance)
                 await asyncio.sleep(0.01)  # Simulate processing time
                 await load_balancer.end_request(instance, 0.01, True)
 
@@ -322,6 +334,44 @@ class TestModelLoadBalancer:
         instance = load_balancer.instances["gpt-oss-20b"][0]
         assert instance.active_requests == 0  # All requests should be completed
         assert instance.total_requests == 50
+
+    @pytest.mark.asyncio
+    async def test_race_condition_prevention(self, load_balancer):
+        """Test that simultaneous requests don't all go to the same instance.
+
+        This is the critical test for the fix: before the fix, rapid concurrent
+        requests would all see active_requests=0 and all get routed to the same
+        instance. After the fix, select_instance atomically increments
+        active_requests while holding the lock, preventing the race condition.
+        """
+        # Register two instances
+        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
+        load_balancer.register_model_instance("gpt-oss-20b:2", "provider1", "http://localhost:1234")
+
+        # Track which instances get selected
+        selected_instances = []
+
+        async def rapid_request():
+            instance = await load_balancer.select_instance("gpt-oss-20b")
+            selected_instances.append(instance.model_id)
+            # Don't sleep - we want maximum concurrency to stress test
+            await load_balancer.end_request(instance, 0.001, True)
+
+        # Launch many requests simultaneously (without any delay between them)
+        tasks = [rapid_request() for _ in range(20)]
+        await asyncio.gather(*tasks)
+
+        from collections import Counter
+
+        usage_count = Counter(selected_instances)
+
+        # Both instances should be used - if race condition exists,
+        # all 20 requests would go to instance 1
+        assert len(usage_count) == 2, f"Expected 2 instances used, got {usage_count}"
+
+        # Each should get roughly half (10 each, with some variance)
+        for model_id, count in usage_count.items():
+            assert count >= 5, f"Instance {model_id} only got {count} requests, expected more even distribution"
 
 
 class TestDistributionStrategies:
