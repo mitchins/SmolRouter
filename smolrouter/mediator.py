@@ -298,7 +298,7 @@ class ModelMediator:
         path: str,
         headers: Dict[str, str],
         timeout: float,
-    ) -> Tuple[Dict[str, Any], int, str]:
+    ) -> Tuple[Dict[str, Any], int, str, Any]:
         """
         Route a request to the appropriate provider and execute it.
 
@@ -316,7 +316,7 @@ class ModelMediator:
             timeout: Request timeout
 
         Returns:
-            Tuple of (response_data, status_code, upstream_used)
+            Tuple of (response_data, status_code, upstream_used, metadata)
         """
         client = ClientContext(ip=source_ip, headers=headers)
 
@@ -334,6 +334,7 @@ class ModelMediator:
                     },
                     404,
                     "none",
+                    None,  # No metadata for error case
                 )
 
             # Check if load balancer selected a specific instance and mutate request
@@ -353,13 +354,14 @@ class ModelMediator:
                     {"error": {"type": "internal_server_error", "message": "Provider not available"}},
                     500,
                     resolved_model.endpoint,
+                    None,  # No metadata for error case
                 )
 
             # Handle Google GenAI provider requests
             if isinstance(provider, GoogleGenAIProvider):
                 try:
                     response_data, metadata = await provider.generate_completion(request_payload)
-                    return response_data, 200, f"google-genai:{resolved_model.provider_id}"
+                    return response_data, 200, f"google-genai:{resolved_model.provider_id}", metadata
                 except Exception as e:
                     error_msg = str(e)
                     status_code = 500
@@ -376,13 +378,19 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
                         status_code,
                         f"google-genai:{resolved_model.provider_id}",
+                        None,  # No metadata for error case
                     )
 
             # Handle OpenAI provider requests
             if hasattr(provider, "generate_completion") and resolved_model.provider_type == "openai":
                 try:
                     response_data, status_code = await provider.generate_completion(request_payload, headers, path)
-                    return response_data, status_code, f"openai:{resolved_model.provider_id}"
+                    return (
+                        response_data,
+                        status_code,
+                        f"openai:{resolved_model.provider_id}",
+                        None,
+                    )  # OpenAI provider doesn't return metadata yet
                 except Exception as e:
                     logger.error(f"OpenAI provider error: {e}")
                     # Return OpenAI-compatible error response
@@ -390,19 +398,26 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": str(e), "provider": "openai"}},
                         500,
                         f"openai:{resolved_model.provider_id}",
+                        None,  # No metadata for error case
                     )
 
             # Handle Dummy provider requests
             if isinstance(provider, DummyProvider):
                 try:
                     response_data = await provider.make_request(request_payload, headers)
-                    return response_data, 200, f"dummy:{resolved_model.provider_id}"
+                    return (
+                        response_data,
+                        200,
+                        f"dummy:{resolved_model.provider_id}",
+                        None,
+                    )  # Dummy provider doesn't return metadata
                 except Exception as e:
                     logger.error(f"Dummy provider error: {e}")
                     return (
                         {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
                         500,
                         f"dummy:{resolved_model.provider_id}",
+                        None,  # No metadata for error case
                     )
 
             # For other providers, fall back to legacy HTTP routing

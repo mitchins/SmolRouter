@@ -824,6 +824,9 @@ async def proxy_request(path: str, request: Request):
                         if metadata:
                             log_entry.api_key_suffix = metadata.api_key_suffix
                             log_entry.proxy_used = metadata.proxy_used
+                            log_entry.provider_id = metadata.provider_id
+                            log_entry.api_key_index = metadata.api_key_index
+                            log_entry.api_key_total = metadata.api_key_total
                     except Exception as e:
                         logger.error(f"Failed to update log entry with upstream: {e}")
 
@@ -835,10 +838,9 @@ async def proxy_request(path: str, request: Request):
                 return data  # data should be a StreamingResponse for streaming requests
             else:
                 # For non-streaming requests
-                data, status_code, upstream_used = await container.route_request(
+                data, status_code, upstream_used, metadata = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
-                metadata = None
         else:
             # Fallback error if container not initialized
             raise Exception("Provider architecture not available")
@@ -848,10 +850,9 @@ async def proxy_request(path: str, request: Request):
             logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
             # Try non-streaming instead
             try:
-                data, status_code, upstream_used = await container.route_request(
+                data, status_code, upstream_used, metadata = await container.route_request(
                     source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
                 )
-                metadata = None
             except Exception as fallback_e:
                 logger.error(f"Both streaming and non-streaming failed: {fallback_e}")
                 complete_request_log(
@@ -877,6 +878,9 @@ async def proxy_request(path: str, request: Request):
             if metadata:
                 log_entry.api_key_suffix = metadata.api_key_suffix
                 log_entry.proxy_used = metadata.proxy_used
+                log_entry.provider_id = metadata.provider_id
+                log_entry.api_key_index = metadata.api_key_index
+                log_entry.api_key_total = metadata.api_key_total
         except Exception as e:
             logger.error(f"Failed to update log entry with metadata: {e}")
 
@@ -925,7 +929,12 @@ async def proxy_request(path: str, request: Request):
         response_body=response_body_bytes,
     )
 
-    return JSONResponse(content=data, status_code=status_code)
+    # Add custom header with our internal request ID for easier tracking
+    headers = {}
+    if log_entry and hasattr(log_entry, "request_id"):
+        headers["x-smolrouter-uuid"] = log_entry.request_id
+
+    return JSONResponse(content=data, status_code=status_code, headers=headers)
 
 
 async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse:
@@ -2225,6 +2234,11 @@ async def get_request_details(request_id: str, request: Request):
             "response_size": log_entry.response_size,
             "upstream_url": log_entry.upstream_url,
             "error_message": log_entry.error_message,
+            "api_key_suffix": getattr(log_entry, "api_key_suffix", None),
+            "proxy_used": getattr(log_entry, "proxy_used", None),
+            "provider_id": getattr(log_entry, "provider_id", None),
+            "api_key_index": getattr(log_entry, "api_key_index", None),
+            "api_key_total": getattr(log_entry, "api_key_total", None),
             "request_body": log_entry.request_body.decode("utf-8") if log_entry.request_body else None,
             "response_body": log_entry.response_body.decode("utf-8") if log_entry.response_body else None,
             "duplicate": duplicate_info,
