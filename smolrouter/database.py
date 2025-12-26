@@ -59,6 +59,9 @@ class RequestLogEntry:
         self.response_body_key = None
         self.api_key_suffix = kwargs.get("api_key_suffix")  # pragma: allowlist secret
         self.proxy_used = kwargs.get("proxy_used")
+        self.provider_id = kwargs.get("provider_id")  # Downstream provider that handled request
+        self.api_key_index = kwargs.get("api_key_index")  # Position in key pool (1-based)
+        self.api_key_total = kwargs.get("api_key_total")  # Total keys in pool
         # Duplicate detection fields (optional)
         self.request_body_hash = kwargs.get("request_body_hash")
         self.is_duplicate = kwargs.get("is_duplicate", False)
@@ -81,6 +84,9 @@ class RequestLogEntry:
             total_tokens = getattr(self, "total_tokens", None)
             api_key_suffix = getattr(self, "api_key_suffix", None)
             proxy_used = getattr(self, "proxy_used", None)
+            provider_id = getattr(self, "provider_id", None)
+            api_key_index = getattr(self, "api_key_index", None)
+            api_key_total = getattr(self, "api_key_total", None)
             request_body_bytes = getattr(self, "request_body", None)
             response_body_bytes = getattr(self, "response_body", None)
             existing_request_body_key = getattr(self, "request_body_key", None)
@@ -120,6 +126,9 @@ class RequestLogEntry:
                         response_body_key=resp_key,
                         api_key_suffix=api_key_suffix,
                         proxy_used=proxy_used,
+                        provider_id=provider_id,
+                        api_key_index=api_key_index,
+                        api_key_total=api_key_total,
                     )
                 except Exception as e:
                     logger.error(f"Failed to store blobs/update completion asynchronously: {e}")

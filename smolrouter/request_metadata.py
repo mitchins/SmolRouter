@@ -21,6 +21,10 @@ class RequestMetadata:
     provider_id: Optional[str] = None
     model_name: Optional[str] = None
 
+    # API key position tracking (for multi-key providers like Google GenAI)
+    api_key_index: Optional[int] = None  # 1-based position of key in pool
+    api_key_total: Optional[int] = None  # Total number of keys in pool
+
     # Ground truth verification flags
     api_key_verified: bool = False  # True if from httpx observation
     proxy_verified: bool = False  # True if from httpx observation
@@ -33,6 +37,8 @@ class RequestMetadata:
             "proxy_used": self.proxy_used,
             "provider_id": self.provider_id,
             "model_name": self.model_name,
+            "api_key_index": self.api_key_index,
+            "api_key_total": self.api_key_total,
             "api_key_verified": self.api_key_verified,
             "proxy_verified": self.proxy_verified,
             "observation_id": self.observation_id,

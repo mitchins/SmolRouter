@@ -839,11 +839,20 @@ class GoogleGenAIProvider(IModelProvider):
             api_key = await self._select_best_api_key(model_name)
             api_key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
 
+            # Get key position for debugging/monitoring
+            try:
+                api_key_index = self.config.api_keys.index(api_key) + 1  # 1-based for display
+                api_key_total = len(self.config.api_keys)
+            except (ValueError, AttributeError):
+                api_key_index = None
+                api_key_total = None
+
             # Create client with proxy transport
             proxy_config = self.config.get_proxy_for_model(model_name)
             proxy_info = proxy_config if proxy_config else None
+            key_position_str = f" key #{api_key_index}/{api_key_total}" if api_key_index else ""
             logger.info(
-                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}, proxy={proxy_info or 'no proxy'} [obs={observation_id}]"
+                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}{key_position_str}, proxy={proxy_info or 'no proxy'} [obs={observation_id}]"
             )
             sync_transport, async_transport = self._create_proxy_transport(proxy_config, observation_id)
 
@@ -942,6 +951,8 @@ class GoogleGenAIProvider(IModelProvider):
                 proxy_used=actual_proxy,
                 provider_id=self.config.name,
                 model_name=model_name,
+                api_key_index=api_key_index if api_key_index else None,
+                api_key_total=api_key_total if api_key_total else None,
                 api_key_verified=key_verified,
                 proxy_verified=proxy_verified,
                 observation_id=observation_id,

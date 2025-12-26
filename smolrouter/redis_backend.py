@@ -431,6 +431,9 @@ class RedisRequestLog:
         response_body_key: Optional[str] = None,
         api_key_suffix: Optional[str] = None,
         proxy_used: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        api_key_index: Optional[int] = None,
+        api_key_total: Optional[int] = None,
     ):
         """Update request with completion data"""
         client = await get_redis()
@@ -459,6 +462,15 @@ class RedisRequestLog:
 
         if proxy_used:
             update_data["proxy_used"] = proxy_used
+
+        if provider_id:
+            update_data["provider_id"] = provider_id
+
+        if api_key_index is not None:
+            update_data["api_key_index"] = api_key_index
+
+        if api_key_total is not None:
+            update_data["api_key_total"] = api_key_total
 
         await client.hset(f"request:{request_id}", mapping=update_data)
         logger.debug(f"Updated Redis request completion: {request_id}")
