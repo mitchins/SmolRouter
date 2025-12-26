@@ -99,6 +99,12 @@ class GoogleGenAIConfig(ProviderConfig):
     max_requests_per_window: int = 12
     window_minutes: int = 4
 
+    # Proxy pool for round-robin rotation across all requests
+    # When enabled, models with proxy_config="auto" (or no config) will round-robin through this pool
+    # Pool can include None for "direct" (no proxy) connections
+    proxy_pool: Optional[List[Optional["ProxyConfig"]]] = None
+    proxy_pool_enabled: bool = False  # Master switch for proxy pooling
+
     # Predictive 429 configuration (defaults to disabled)
     predictive_429_enabled: bool = False
 
@@ -117,6 +123,10 @@ class GoogleGenAIConfig(ProviderConfig):
 
         # Predictive 429 configuration (defaults to disabled)
         self.predictive_429_enabled = kwargs.pop("predictive_429_enabled", False)
+
+        # Proxy pool configuration
+        self.proxy_pool = kwargs.pop("proxy_pool", None)
+        self.proxy_pool_enabled = kwargs.pop("proxy_pool_enabled", False)
 
         # Set required fields for base class
         if "url" not in kwargs:
@@ -177,31 +187,114 @@ class GoogleGenAIProvider(IModelProvider):
             enabled=self.config.rate_limiting_enabled,
         )
 
+        # Proxy pool round-robin counter (thread-safe via atomicity of +=)
+        self._proxy_pool_index = 0
+
         logger.info(f"Initialized GoogleGenAI provider with {len(self.config.api_keys)} API keys")
         logger.info(f"Rate limiting: {'enabled' if self.config.rate_limiting_enabled else 'disabled'}")
         logger.info(f"Predictive 429: {'enabled' if self.config.predictive_429_enabled else 'disabled'}")
+        if self.config.proxy_pool_enabled and self.config.proxy_pool:
+            pool_size = len(self.config.proxy_pool)
+            direct_count = sum(1 for p in self.config.proxy_pool if p is None)
+            proxy_count = pool_size - direct_count
+            logger.info(f"Proxy pool: enabled with {pool_size} entries ({proxy_count} proxies, {direct_count} direct)")
+        else:
+            logger.info("Proxy pool: disabled")
+
+    def _get_next_proxy_from_pool(self) -> Optional["ProxyConfig"]:
+        """Get next proxy from pool using round-robin selection.
+
+        Returns None for "direct" entries (no proxy).
+        Thread-safe via atomic increment.
+        """
+        if not self.config.proxy_pool_enabled or not self.config.proxy_pool:
+            return None
+
+        pool = self.config.proxy_pool
+        # Atomic increment and modulo for round-robin
+        idx = self._proxy_pool_index
+        self._proxy_pool_index = (idx + 1) % len(pool)
+
+        selected = pool[idx]
+        if selected is None:
+            logger.debug(f"Proxy pool: selected DIRECT (index {idx + 1}/{len(pool)})")
+        else:
+            proxy_url = selected.to_httpx_proxy()
+            # Mask the proxy URL for logging
+            if proxy_url and "@" in proxy_url:
+                masked = proxy_url.split("@")[-1]
+            else:
+                masked = proxy_url
+            logger.debug(f"Proxy pool: selected {masked} (index {idx + 1}/{len(pool)})")
+
+        return selected
+
+    def _should_use_proxy_pool(self, model_name: str) -> bool:
+        """Check if this model should use the proxy pool.
+
+        Returns True if:
+        - Proxy pool is enabled
+        - Model has no explicit proxy override (or override is "auto")
+        """
+        if not self.config.proxy_pool_enabled or not self.config.proxy_pool:
+            return False
+
+        # Check if model has an explicit proxy override
+        if model_name in self.config.per_model_proxy:
+            model_proxy = self.config.per_model_proxy[model_name]
+            # Special "auto" marker means use pool (proxy is None with a special flag)
+            if model_proxy is None:
+                return True  # Explicit "use pool"
+            # Has explicit proxy config - don't use pool
+            return False
+
+        # No explicit override - use pool by default when enabled
+        return True
 
     def get_model_daily_limit(self, model_name: str) -> int:
-        """Get the daily request limit for a specific model based on Google's current quotas"""
+        """Get the daily request limit for a specific model based on Google's current quotas
+
+        These are per-project (per API key) free tier limits as of December 2025.
+        With multiple API keys, total capacity = limit * number_of_keys
+        """
         model_lower = model_name.lower()
 
-        # Experimental/Preview models have very low limits
-        if any(keyword in model_lower for keyword in ["exp", "experimental", "preview"]):
-            return 5
+        # Gemma-3 models have generous free tier limits
+        if "gemma" in model_lower and "3" in model_lower:
+            return 14400  # 14,400 RPD per project (free tier)
 
-        # Gemini Pro models have lower limits
-        if "pro" in model_lower:
-            if "2.5" in model_lower or "2.0" in model_lower:
-                return 50  # Current Gemini 2.x Pro limit
-            else:
-                return 15  # Gemini 1.5 Pro limit
+        # Gemini 3 Flash Preview (recommended, launched Dec 17, 2025)
+        if "gemini" in model_lower and ("3.0" in model_lower or "gemini-3" in model_lower):
+            return 20  # 20 RPD per project (free tier)
 
-        # Flash models have more generous limits
-        if "flash" in model_lower:
+        # Gemini 2.5 Flash models (severely reduced limits after Dec 6, 2025)
+        if "2.5" in model_lower and "flash" in model_lower:
             if "lite" in model_lower:
-                return 1500  # Flash Lite has highest free limit
+                return 5  # Deprecated/unavailable as of Nov 2025
             else:
-                return 1000  # Regular Flash models
+                return 20  # 20 RPD per project (free tier, down from 250-500)
+
+        # Gemini 2.0 Flash models
+        if "2.0" in model_lower and "flash" in model_lower:
+            if "exp" in model_lower or "experimental" in model_lower:
+                return 5  # Experimental models have minimal free access
+            else:
+                return 20  # Similar to 2.5 Flash
+
+        # Gemini 2.x Pro models (very limited free tier)
+        if "pro" in model_lower and ("2.5" in model_lower or "2.0" in model_lower):
+            return 20  # Conservative estimate for Pro models
+
+        # Gemini 1.5 models (older generation)
+        if "1.5" in model_lower:
+            if "pro" in model_lower:
+                return 50  # Gemini 1.5 Pro
+            elif "flash" in model_lower:
+                return 1000  # Gemini 1.5 Flash has better limits
+
+        # Preview/experimental models (catch-all)
+        if any(keyword in model_lower for keyword in ["preview", "experimental"]):
+            return 5
 
         # Default to conservative limit for unknown models
         return self.config.max_requests_per_day
@@ -784,9 +877,13 @@ class GoogleGenAIProvider(IModelProvider):
                 text_content = genai_response.text
             elif genai_response.candidates:
                 # Fallback to candidates structure for compatibility
-                for part in genai_response.candidates[0].content.parts:
-                    if hasattr(part, "text"):
-                        text_content += part.text
+                candidate = genai_response.candidates[0]
+                if hasattr(candidate, "content") and candidate.content:
+                    parts = getattr(candidate.content, "parts", None)
+                    if parts:
+                        for part in parts:
+                            if hasattr(part, "text"):
+                                text_content += part.text
 
             # Extract usage information
             usage = {}
@@ -848,11 +945,19 @@ class GoogleGenAIProvider(IModelProvider):
                 api_key_total = None
 
             # Create client with proxy transport
-            proxy_config = self.config.get_proxy_for_model(model_name)
+            # Check if we should use proxy pool (round-robin) or per-model proxy
+            if self._should_use_proxy_pool(model_name):
+                proxy_config = self._get_next_proxy_from_pool()
+                pool_info = (
+                    f" (pool #{self._proxy_pool_index}/{len(self.config.proxy_pool)})" if self.config.proxy_pool else ""
+                )
+            else:
+                proxy_config = self.config.get_proxy_for_model(model_name)
+                pool_info = ""
             proxy_info = proxy_config if proxy_config else None
             key_position_str = f" key #{api_key_index}/{api_key_total}" if api_key_index else ""
             logger.info(
-                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}{key_position_str}, proxy={proxy_info or 'no proxy'} [obs={observation_id}]"
+                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}{key_position_str}, proxy={proxy_info or 'direct'}{pool_info} [obs={observation_id}]"
             )
             sync_transport, async_transport = self._create_proxy_transport(proxy_config, observation_id)
 
