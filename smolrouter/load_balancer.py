@@ -293,89 +293,95 @@ class ModelLoadBalancer:
         return best_host_id
 
     def _sort_by_smart_strategy(self, instances: List[ModelInstance]) -> List[ModelInstance]:
-        """Smart strategy: Consider host performance, load, and instance health.
+        """Smart strategy: Prioritize least-loaded instances with tie-breaking.
 
-        Scoring factors:
-        1. Host performance (TTFT + response time)
-        2. Current load (active requests)
-        3. Recent usage patterns
+        The PRIMARY factor is current load (active_requests). When loads are equal
+        or very close, secondary factors like host performance and round-robin
+        are used for tie-breaking.
 
-        When scores are very similar, uses round-robin for fairness.
+        This ensures that an instance with 8 active requests will NEVER be selected
+        over one with 5 active requests, regardless of other factors.
         """
         if not instances:
             return instances
 
         base_name = instances[0].base_name
 
-        def smart_score(instance: ModelInstance) -> float:
-            host = self.hosts.get(instance.host_id)
-            if not host:
-                return float("inf")  # Penalize unknown hosts
+        # STEP 1: Sort purely by active_requests first
+        instances_by_load = sorted(instances, key=lambda x: x.active_requests)
 
-            # Normalize factors (lower is better)
-            load_factor = instance.active_requests * 10  # Heavily weight current load
-            host_speed_factor = (host.avg_ttft + host.avg_response_time) * 5
+        # STEP 2: Find the minimum load
+        min_load = instances_by_load[0].active_requests
 
-            # Recency factor: prefer instances that haven't been used recently
-            # If last_used is 0 (never used), give small bonus
-            # If recently used, give penalty that decreases over time
-            if instance.last_used == 0.0:
-                recency_factor = 0  # Small bonus for never-used instances
-            else:
-                time_since_use = time.time() - instance.last_used
-                # For short-term fairness in testing: higher penalty that decays slowly
-                # Penalty of 10 that decreases over 10 minutes (more persistent)
-                recency_factor = max(0, 10 - (time_since_use / 60))  # Penalty decreases over minutes
+        # STEP 3: Find all instances with EXACTLY the minimum load
+        # This is the ONLY set we consider for selection
+        # NO tolerance - we always want the truly least-loaded instance(s)
+        candidates = [i for i in instances_by_load if i.active_requests == min_load]
 
-            # Combine factors
-            return load_factor + host_speed_factor + recency_factor
-
-        # Calculate scores
-        scored_instances = [(smart_score(inst), inst) for inst in instances]
-        scored_instances.sort(key=lambda x: x[0])
-
-        # Check if top instances have very similar scores (within 10% or 0.1)
-        min_score = scored_instances[0][0]
-        similar_threshold = max(0.1, min_score * 0.1)
-
-        # Find all instances with similar scores to the best one
-        similar_instances = []
-        for score, instance in scored_instances:
-            if score <= min_score + similar_threshold:
-                similar_instances.append(instance)
-            else:
-                break
-
-        # Debug scoring
         logger.debug(
-            f"Smart strategy for {base_name}: min_score={min_score:.3f}, "
-            f"similar_threshold={similar_threshold:.3f}, "
-            f"scored_instances={[(s, i.model_id) for s, i in scored_instances]}, "
-            f"similar_count={len(similar_instances)}"
+            f"Smart strategy for {base_name}: min_load={min_load}, "
+            f"candidates={[(i.model_id, i.active_requests) for i in candidates]}, "
+            f"all_instances={[(i.model_id, i.active_requests) for i in instances_by_load]}"
         )
 
-        # If multiple instances have similar scores, use round-robin among them
-        if len(similar_instances) > 1:
-            counter = self._round_robin_counter[base_name]
-            selected_index = counter % len(similar_instances)
-            selected = similar_instances[selected_index]
-            self._round_robin_counter[base_name] = (counter + 1) % len(similar_instances)
+        # STEP 4: If only one candidate, use it
+        if len(candidates) == 1:
+            result = [candidates[0]]
+            result.extend([i for i in instances_by_load if i not in result])
+            return result
 
-            # Debug logging
+        # STEP 5: Multiple candidates with same/similar load - use secondary scoring for tie-break
+        def tiebreak_score(instance: ModelInstance) -> float:
+            """Secondary score for tie-breaking among equally-loaded instances."""
+            host = self.hosts.get(instance.host_id)
+
+            # Factor 1: Host performance (lower TTFT/response time is better)
+            if host:
+                host_speed = host.avg_ttft + host.avg_response_time
+            else:
+                host_speed = 0
+
+            # Factor 2: Slight preference for less recently used
+            # But this is ONLY a tie-breaker, not a primary factor
+            if instance.last_used == 0.0:
+                recency = 0
+            else:
+                time_since_use = time.time() - instance.last_used
+                # Small factor: 0 to 1 based on seconds since last use
+                recency = max(0, 1 - (time_since_use / 10))  # Decays over 10 seconds
+
+            return host_speed + recency
+
+        # Score and sort candidates
+        scored_candidates = [(tiebreak_score(c), c) for c in candidates]
+        scored_candidates.sort(key=lambda x: x[0])
+
+        # Check if scores are very similar - use round-robin for fairness
+        min_tiebreak = scored_candidates[0][0]
+        similar_threshold = max(0.5, min_tiebreak * 0.2)  # More generous for tie-breaking
+
+        similar_candidates = [c for score, c in scored_candidates if score <= min_tiebreak + similar_threshold]
+
+        if len(similar_candidates) > 1:
+            # Round-robin among similar candidates
+            counter = self._round_robin_counter[base_name]
+            selected_index = counter % len(similar_candidates)
+            selected = similar_candidates[selected_index]
+            self._round_robin_counter[base_name] = (counter + 1) % len(similar_candidates)
+
             logger.debug(
-                f"Round-robin selection for {base_name}: counter={counter}, "
-                f"selected_index={selected_index}, selected={selected.model_id}, "
-                f"similar_instances=[{[i.model_id for i in similar_instances]}], "
-                f"new_counter={self._round_robin_counter[base_name]}"
+                f"Round-robin tie-break for {base_name}: selected={selected.model_id}, "
+                f"from candidates={[c.model_id for c in similar_candidates]}"
             )
 
-            # Return with selected instance first, then the rest by score
             result = [selected]
-            result.extend([inst for _, inst in scored_instances if inst != selected])
+            result.extend([i for i in instances_by_load if i != selected])
             return result
         else:
-            # Return all instances sorted by score
-            return [inst for _, inst in scored_instances]
+            # Use the best scoring candidate
+            result = [scored_candidates[0][1]]
+            result.extend([i for i in instances_by_load if i not in result])
+            return result
 
     def _sort_by_host_round_robin(self, instances: List[ModelInstance]) -> List[ModelInstance]:
         """Distribute across hosts in round-robin fashion."""
