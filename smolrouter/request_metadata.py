@@ -30,6 +30,9 @@ class RequestMetadata:
     proxy_verified: bool = False  # True if from httpx observation
     observation_id: Optional[str] = None  # For debugging/tracing
 
+    # Load balancer instance tracking (for decrementing active_requests on completion)
+    lb_instance: Optional[object] = None  # ModelInstance from load_balancer
+
     def to_dict(self):
         """Convert to dictionary for logging"""
         return {

@@ -611,11 +611,52 @@ async def start_request_log(
         return None
 
 
+def _complete_lb_request(lb_instance, start_time: float, success: bool):
+    """Helper to complete load balancer request tracking.
+
+    Calls end_request on the load balancer instance to decrement active_requests.
+    This is critical for proper load balancing - without it, active_requests
+    keeps incrementing and never decrements, causing load imbalance.
+    """
+    import asyncio
+    from smolrouter.load_balancer import model_load_balancer
+
+    try:
+        response_time = time.time() - start_time
+        # Schedule the async end_request call
+        try:
+            asyncio.get_running_loop()
+            asyncio.create_task(model_load_balancer.end_request(lb_instance, response_time, success))
+        except RuntimeError:
+            # No running loop - create one for this call
+            asyncio.run(model_load_balancer.end_request(lb_instance, response_time, success))
+        logger.debug(f"Load balancer: completed request for {lb_instance.model_id} (success={success})")
+    except Exception as e:
+        logger.error(f"Failed to complete load balancer request tracking: {e}")
+
+
 def complete_request_log(
-    log_entry, start_time: float, response_data: dict, request_body: bytes = None, response_body: bytes = None
+    log_entry,
+    start_time: float,
+    response_data: dict,
+    request_body: bytes = None,
+    response_body: bytes = None,
+    metadata=None,
 ):
-    """Complete the log entry when request finishes"""
+    """Complete the log entry when request finishes.
+
+    Args:
+        log_entry: The log entry to complete
+        start_time: Request start time
+        response_data: Dict with status_code, error_message etc
+        request_body: Request body bytes (optional)
+        response_body: Response body bytes (optional)
+        metadata: RequestMetadata with lb_instance for load balancer tracking (optional)
+    """
     if not ENABLE_LOGGING or not log_entry:
+        # Still need to complete load balancer tracking even if logging disabled
+        if metadata and hasattr(metadata, "lb_instance") and metadata.lb_instance:
+            _complete_lb_request(metadata.lb_instance, start_time, response_data.get("status_code", 200) < 400)
         return
 
     try:
@@ -708,6 +749,11 @@ def complete_request_log(
 
         if response_data.get("error_message"):
             logger.warning(f"[{request_id}] Request had error: {response_data['error_message']}")
+
+        # Complete load balancer tracking if LB instance present in metadata
+        if metadata and hasattr(metadata, "lb_instance") and metadata.lb_instance:
+            success = response_data.get("status_code", 200) < 400
+            _complete_lb_request(metadata.lb_instance, start_time, success)
     except Exception as e:
         logger.error(f"Failed to complete request log: {e}")
 
@@ -832,7 +878,11 @@ async def proxy_request(path: str, request: Request):
 
                 # Complete logging for streaming request
                 complete_request_log(
-                    log_entry, start_time, {"status_code": status_code}, request_body=request_body_bytes
+                    log_entry,
+                    start_time,
+                    {"status_code": status_code},
+                    request_body=request_body_bytes,
+                    metadata=metadata,
                 )
 
                 return data  # data should be a StreamingResponse for streaming requests
@@ -893,6 +943,7 @@ async def proxy_request(path: str, request: Request):
             {"status_code": status_code, "error_message": str(data)},
             request_body=request_body_bytes,
             response_body=response_body_bytes,
+            metadata=metadata,
         )
         return JSONResponse(content=data, status_code=status_code)
 
@@ -927,6 +978,7 @@ async def proxy_request(path: str, request: Request):
         {"status_code": status_code},
         request_body=request_body_bytes,
         response_body=response_body_bytes,
+        metadata=metadata,
     )
 
     # Add custom header with our internal request ID for easier tracking

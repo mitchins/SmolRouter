@@ -16,6 +16,7 @@ from .providers import IModelProvider
 from .google_genai_provider import GoogleGenAIProvider
 from .dummy_provider import DummyProvider
 from .load_balancer import model_load_balancer
+from .request_metadata import RequestMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +131,10 @@ class ModelMediator:
             # Find the corresponding ModelInfo for the selected instance
             for model in available_models:
                 if model.name == instance.model_id and model.endpoint == instance.provider_url:
-                    # Mark request start for load tracking
-                    await model_load_balancer.start_request(instance)
-                    # Store instance for completion tracking
-                    self._active_lb_instance = instance
                     # Store the selected instance name for request mutation
                     model._lb_selected_instance = instance.model_id
+                    # Store the full LB instance for completion tracking (to call end_request)
+                    model._lb_instance = instance
                     return model
 
         # Step 3: Fall back to strategy resolution (single model or no load balancing needed)
@@ -337,6 +336,9 @@ class ModelMediator:
                     None,  # No metadata for error case
                 )
 
+            # Extract load balancer instance if present (for tracking request completion)
+            lb_instance = getattr(resolved_model, "_lb_instance", None)
+
             # Check if load balancer selected a specific instance and mutate request
             if hasattr(resolved_model, "_lb_selected_instance"):
                 # Update the request payload to use the selected instance name
@@ -347,6 +349,14 @@ class ModelMediator:
                         f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
                     )
 
+            # Helper to attach LB instance to metadata
+            def attach_lb_instance(metadata):
+                if lb_instance:
+                    if metadata is None:
+                        metadata = RequestMetadata()
+                    metadata.lb_instance = lb_instance
+                return metadata
+
             # Get the provider for this model
             provider = await self._get_provider_by_id(resolved_model.provider_id)
             if not provider:
@@ -354,14 +364,19 @@ class ModelMediator:
                     {"error": {"type": "internal_server_error", "message": "Provider not available"}},
                     500,
                     resolved_model.endpoint,
-                    None,  # No metadata for error case
+                    attach_lb_instance(None),  # Include LB instance even for errors
                 )
 
             # Handle Google GenAI provider requests
             if isinstance(provider, GoogleGenAIProvider):
                 try:
                     response_data, metadata = await provider.generate_completion(request_payload)
-                    return response_data, 200, f"google-genai:{resolved_model.provider_id}", metadata
+                    return (
+                        response_data,
+                        200,
+                        f"google-genai:{resolved_model.provider_id}",
+                        attach_lb_instance(metadata),
+                    )
                 except Exception as e:
                     error_msg = str(e)
                     status_code = 500
@@ -378,7 +393,7 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
                         status_code,
                         f"google-genai:{resolved_model.provider_id}",
-                        None,  # No metadata for error case
+                        attach_lb_instance(None),  # Include LB instance for errors
                     )
 
             # Handle OpenAI provider requests
@@ -389,8 +404,8 @@ class ModelMediator:
                         response_data,
                         status_code,
                         f"openai:{resolved_model.provider_id}",
-                        None,
-                    )  # OpenAI provider doesn't return metadata yet
+                        attach_lb_instance(None),  # OpenAI provider doesn't return metadata yet
+                    )
                 except Exception as e:
                     logger.error(f"OpenAI provider error: {e}")
                     # Return OpenAI-compatible error response
@@ -398,7 +413,7 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": str(e), "provider": "openai"}},
                         500,
                         f"openai:{resolved_model.provider_id}",
-                        None,  # No metadata for error case
+                        attach_lb_instance(None),  # Include LB instance for errors
                     )
 
             # Handle Dummy provider requests
@@ -409,15 +424,15 @@ class ModelMediator:
                         response_data,
                         200,
                         f"dummy:{resolved_model.provider_id}",
-                        None,
-                    )  # Dummy provider doesn't return metadata
+                        attach_lb_instance(None),  # Dummy provider doesn't return metadata
+                    )
                 except Exception as e:
                     logger.error(f"Dummy provider error: {e}")
                     return (
                         {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
                         500,
                         f"dummy:{resolved_model.provider_id}",
-                        None,  # No metadata for error case
+                        attach_lb_instance(None),  # Include LB instance for errors
                     )
 
             # For other providers, fall back to legacy HTTP routing
@@ -430,7 +445,7 @@ class ModelMediator:
                 },
                 501,
                 resolved_model.endpoint,
-                None,
+                attach_lb_instance(None),
             )
 
         except Exception as e:
