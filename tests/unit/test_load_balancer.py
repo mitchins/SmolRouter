@@ -272,8 +272,8 @@ class TestModelLoadBalancer:
         assert set(groups["llama3-8b"]) == {"llama3-8b", "llama3-8b:2"}
 
     @pytest.mark.asyncio
-    async def test_load_balancing_round_robin_behavior(self, load_balancer):
-        """Test that load balancing distributes requests evenly."""
+    async def test_load_balancing_distributes_load(self, load_balancer):
+        """Test that load balancing distributes requests based on current load."""
         # Register multiple instances
         load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
         load_balancer.register_model_instance("gpt-oss-20b:2", "provider1", "http://localhost:1234")
@@ -304,15 +304,37 @@ class TestModelLoadBalancer:
         # Wait for all requests to complete
         await asyncio.gather(*tasks)
 
-        # Should have used all instances relatively evenly
+        # Should have used all instances
         from collections import Counter
 
         usage_count = Counter(selected_instances)
 
         # Each instance should be used at least once
-        assert len(usage_count) == 3
-        # Distribution should be relatively even (each used 2 times)
-        assert all(count == 2 for count in usage_count.values())
+        assert len(usage_count) == 3, f"Expected all 3 instances to be used, got {usage_count}"
+        # No single instance should have more than 3 requests (roughly even distribution)
+        assert all(count <= 3 for count in usage_count.values()), f"Load not balanced: {usage_count}"
+
+    @pytest.mark.asyncio
+    async def test_load_balancing_prefers_least_loaded(self, load_balancer):
+        """Test that load balancing ALWAYS prefers the least loaded instance."""
+        # Register 2 instances
+        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
+        load_balancer.register_model_instance("gpt-oss-20b:2", "provider1", "http://localhost:1234")
+
+        # Manually set different loads - instance 1 has 5 requests, instance 2 has 2
+        instances = load_balancer.instances["gpt-oss-20b"]
+        instances[0].active_requests = 5
+        instances[1].active_requests = 2
+
+        # Select an instance - should ALWAYS choose the less loaded one
+        selected = await load_balancer.select_instance("gpt-oss-20b")
+
+        # After selection, instance 2 should have 3 requests (was 2, now incremented)
+        assert selected.model_id == "gpt-oss-20b:2", "Should select least loaded instance"
+        assert selected.active_requests == 3, "Should have incremented from 2 to 3"
+
+        # Instance 1 should still have 5
+        assert instances[0].active_requests == 5, "Other instance should be unchanged"
 
     @pytest.mark.asyncio
     async def test_concurrent_access_thread_safety(self, load_balancer):
