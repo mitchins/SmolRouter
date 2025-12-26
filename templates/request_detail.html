@@ -399,6 +399,12 @@
                         <div class="metric-label">API Key{% if log.api_key_index and log.api_key_total %} #{{ log.api_key_index }}/{{ log.api_key_total }}{% endif %}</div>
                     </div>
                     {% endif %}
+                    {% if log.proxy_used %}
+                    <div class="metric-item">
+                        <div class="metric-value" style="font-size: 0.9rem;">{{ log.proxy_used }}</div>
+                        <div class="metric-label">Proxy</div>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
             
