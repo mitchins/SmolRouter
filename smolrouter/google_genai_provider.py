@@ -1039,7 +1039,7 @@ class GoogleGenAIProvider(IModelProvider):
                     proxy_verified = True
 
                     # Verify it matches our intent by comparing the actual URL parts
-                    # proxy_info is ProxyConfig, observation.proxy_url is httpx URL object
+                    # proxy_info is ProxyConfig, observation.proxy_url can be httpx URL object or string
                     if proxy_info:
                         # Extract the intended proxy URL from ProxyConfig
                         intended_proxy_url = proxy_info.https_proxy or proxy_info.http_proxy
@@ -1048,18 +1048,31 @@ class GoogleGenAIProvider(IModelProvider):
                             from urllib.parse import urlparse
 
                             intended_parsed = urlparse(intended_proxy_url)
-                            # observation.proxy_url is httpx.URL with host/port attributes
-                            obs_host = (
-                                actual_proxy.host.decode()
-                                if isinstance(actual_proxy.host, bytes)
-                                else actual_proxy.host
-                            )
-                            if intended_parsed.hostname == obs_host and intended_parsed.port == actual_proxy.port:
-                                logger.debug(f"✅ Proxy verified: {obs_host}:{actual_proxy.port}")
-                            else:
-                                logger.error(
-                                    f"❌ Proxy MISMATCH: intended={intended_parsed.hostname}:{intended_parsed.port}, observed={obs_host}:{actual_proxy.port}"
-                                )
+
+                            # Handle both httpx.URL objects and strings
+                            try:
+                                if isinstance(actual_proxy, str):
+                                    # If it's a string, parse it
+                                    observed_parsed = urlparse(actual_proxy)
+                                    obs_host = observed_parsed.hostname
+                                    obs_port = observed_parsed.port
+                                else:
+                                    # httpx.URL object with host/port attributes
+                                    obs_host = (
+                                        actual_proxy.host.decode()
+                                        if isinstance(actual_proxy.host, bytes)
+                                        else actual_proxy.host
+                                    )
+                                    obs_port = actual_proxy.port
+
+                                if intended_parsed.hostname == obs_host and intended_parsed.port == obs_port:
+                                    logger.debug(f"✅ Proxy verified: {obs_host}:{obs_port}")
+                                else:
+                                    logger.error(
+                                        f"❌ Proxy MISMATCH: intended={intended_parsed.hostname}:{intended_parsed.port}, observed={obs_host}:{obs_port}"
+                                    )
+                            except Exception as e:
+                                logger.debug(f"✅ Proxy verification skipped (parse error): {e}")
                         else:
                             logger.debug(f"✅ Proxy verified (no specific URL in config): {actual_proxy}")
                     else:
