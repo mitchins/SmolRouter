@@ -597,7 +597,11 @@ class RedisApiKeyQuota:
             return QuotaRecord(quota_data), False
 
         # Create new quota entry
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Use Pacific timezone for Google API quota resets (midnight Pacific)
+        import pytz
+
+        pacific_tz = pytz.timezone("US/Pacific")
+        today = datetime.now(pacific_tz).strftime("%Y-%m-%d")
         quota_data = {
             "provider_id": provider_id,
             "key_hash": key_hash,
@@ -663,7 +667,11 @@ class RedisApiKeyQuota:
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Use Pacific timezone for Google API quota resets (midnight Pacific)
+        import pytz
+
+        pacific_tz = pytz.timezone("US/Pacific")
+        today = datetime.now(pacific_tz).strftime("%Y-%m-%d")
         timestamp = datetime.now(timezone.utc).isoformat()
 
         try:

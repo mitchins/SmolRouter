@@ -1038,12 +1038,32 @@ class GoogleGenAIProvider(IModelProvider):
                     actual_proxy = observation.proxy_url
                     proxy_verified = True
 
-                    # Verify it matches our intent
-                    expected_proxy_str = str(proxy_info) if proxy_info else None
-                    if expected_proxy_str and expected_proxy_str not in str(actual_proxy):
-                        logger.error(f"❌ Proxy MISMATCH: intended={expected_proxy_str}, observed={actual_proxy}")
+                    # Verify it matches our intent by comparing the actual URL parts
+                    # proxy_info is ProxyConfig, observation.proxy_url is httpx URL object
+                    if proxy_info:
+                        # Extract the intended proxy URL from ProxyConfig
+                        intended_proxy_url = proxy_info.https_proxy or proxy_info.http_proxy
+                        if intended_proxy_url:
+                            # Parse intended URL and compare host:port with observed
+                            from urllib.parse import urlparse
+
+                            intended_parsed = urlparse(intended_proxy_url)
+                            # observation.proxy_url is httpx.URL with host/port attributes
+                            obs_host = (
+                                actual_proxy.host.decode()
+                                if isinstance(actual_proxy.host, bytes)
+                                else actual_proxy.host
+                            )
+                            if intended_parsed.hostname == obs_host and intended_parsed.port == actual_proxy.port:
+                                logger.debug(f"✅ Proxy verified: {obs_host}:{actual_proxy.port}")
+                            else:
+                                logger.error(
+                                    f"❌ Proxy MISMATCH: intended={intended_parsed.hostname}:{intended_parsed.port}, observed={obs_host}:{actual_proxy.port}"
+                                )
+                        else:
+                            logger.debug(f"✅ Proxy verified (no specific URL in config): {actual_proxy}")
                     else:
-                        logger.debug(f"✅ Proxy verified: {actual_proxy}")
+                        logger.debug(f"✅ Proxy observed (none intended): {actual_proxy}")
                 elif not proxy_info:
                     # No proxy in observation, none intended - verified
                     proxy_verified = True
