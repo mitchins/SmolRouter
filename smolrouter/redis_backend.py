@@ -814,6 +814,35 @@ class RedisApiKeyQuota:
 
         logger.debug(f"Marked quota as exhausted: {quota_key}")
 
+    @staticmethod
+    async def mark_error(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
+        """Mark an error for a quota entry and persist to Redis.
+
+        Args:
+            api_key: The API key
+            provider_id: The provider ID
+            model_name: The model name
+            error: Error message to store
+        """
+        client = await get_redis()
+
+        key_hash = RedisApiKeyQuota.hash_api_key(api_key)
+        quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
+
+        # Update fields in Redis
+        updates = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if error:
+            updates["last_error"] = error
+
+        # Increment error count
+        await client.hincrby(quota_key, "error_count", 1)
+        await client.hset(quota_key, mapping=updates)
+
+        logger.debug(f"Marked error for quota: {quota_key}, error={error[:100] if error else 'N/A'}")
+
 
 # Production-hardened safe wrapper for quota operations
 async def _safe_increment_usage(

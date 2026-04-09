@@ -185,3 +185,8 @@ blob_storage/
 # Configuration - ignore actual configs with secrets
 config/routes.yaml
 config/google_api_keys.txt
+
+# Internal management scripts - not part of public repo
+scripts/
+scripts/*.py
+scripts/README.md

@@ -501,9 +501,18 @@ class GoogleGenAIProvider(IModelProvider):
         return best_key
 
     async def _update_api_key_stats(
-        self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None
+        self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None, status_code: int = None
     ):
-        """Update statistics for an API key + model combination after a request"""
+        """Update statistics for an API key + model combination after a request
+
+        Args:
+            api_key: The API key used
+            model_name: Model name
+            success: Whether request succeeded
+            tokens: Token count if successful
+            error: Error message if failed
+            status_code: HTTP status code (for detecting 403s without error messages)
+        """
         from .redis_backend import RedisApiKeyQuota
 
         quota = await self._get_quota_record(api_key, model_name)
@@ -531,14 +540,27 @@ class GoogleGenAIProvider(IModelProvider):
                 quota.mark_request_success(tokens=tokens)
         else:
             # Check error type and handle appropriately
-            if self._is_invalid_key_error(error):
+            # IMPORTANT: Check both error message AND status code (403 errors may have empty error string)
+            if self._is_invalid_key_error(error, status_code):
                 # Mark invalid across all models for this key
                 key_hash = ApiKeyQuota.hash_api_key(api_key)
                 try:
                     await ApiKeyQuota.mark_invalid_by_hash(key_hash, self.config.name)
+                    logger.error(f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error})")
+
+                    # DYNAMIC REMOVAL: Immediately remove from in-memory pool
+                    try:
+                        self.config.api_keys.remove(api_key)
+                        logger.warning(
+                            f"🗑️  Removed API key {api_key[:8]}... from selection pool ({len(self.config.api_keys)} keys remaining)"
+                        )
+                    except ValueError:
+                        pass  # Key already removed
                 except Exception as e:
-                    logger.error(f"Failed to mark API key as invalid: {e}")
-                logger.error(f"🚫 API key {api_key[:8]}... INVALID/EXPIRED: {error}")
+                    logger.error(f"❌ Failed to mark API key as invalid: {e}")
+                    import traceback
+
+                    logger.error(traceback.format_exc())
 
             # Check if this is a quota exhaustion error
             elif self._is_quota_exhausted_error(error):
@@ -565,6 +587,16 @@ class GoogleGenAIProvider(IModelProvider):
                 # Regular error - still count the request
                 quota.mark_request_failure(error=error)
 
+                # CRITICAL FIX: Persist error to Redis (was only updating in-memory)
+                try:
+                    await ApiKeyQuota.mark_error(api_key, self.config.name, model_name, error)
+                except Exception as e:
+                    logger.error(f"❌ Failed to persist error to Redis: {e}")
+
+                # Log if this looks like it should have been caught
+                if status_code == 403:
+                    logger.warning(f"⚠️  403 error but not marked invalid - status={status_code}, error={error!r}")
+
             logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error}")
 
         # Log quota status if approaching limits for this model
@@ -579,24 +611,43 @@ class GoogleGenAIProvider(IModelProvider):
                 f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
             )
 
-    def _is_invalid_key_error(self, error_msg: str) -> bool:
-        """Check if error indicates invalid/expired API key"""
-        if not error_msg:
-            return False
-        error_lower = error_msg.lower()
-        invalid_key_indicators = [
-            "permission denied",
-            "api key not valid",
-            "invalid api key",
-            "api_key_invalid",
-            "authentication failed",
-            "unauthorized",
-            "forbidden",
-            "invalid_argument",  # Often used for bad keys in Google APIs
-            "credentials are missing or invalid",
-            "api key expired",
-        ]
-        return any(indicator in error_lower for indicator in invalid_key_indicators)
+    def _is_invalid_key_error(self, error_msg: str = None, status_code: int = None) -> bool:
+        """Check if error indicates invalid/expired API key
+
+        Args:
+            error_msg: Error message text (may be None or empty)
+            status_code: HTTP status code
+
+        Returns:
+            True if this error indicates an invalid/expired API key
+        """
+        # CRITICAL FIX: 403 status code is an invalid key error even without error message
+        # This handles cases where Google returns 403 but no error text
+        if status_code == 403:
+            return True
+
+        # Check error message for known invalid key indicators
+        if error_msg:
+            error_lower = error_msg.lower()
+            invalid_key_indicators = [
+                "permission denied",
+                "permission_denied",  # With underscore (PERMISSION_DENIED from Google)
+                "permissiondenied",  # Sometimes without space or underscore
+                "api key not valid",
+                "invalid api key",
+                "api_key_invalid",
+                "authentication failed",
+                "unauthorized",
+                "forbidden",
+                "invalid_argument",  # Often used for bad keys in Google APIs
+                "credentials are missing or invalid",
+                "api key expired",
+                "403",  # Explicit 403 in error message
+                "denied access",  # "Your project has been denied access"
+            ]
+            return any(indicator in error_lower for indicator in invalid_key_indicators)
+
+        return False
 
     def _is_quota_exhausted_error(self, error_msg: str) -> bool:
         """Check if error indicates quota exhaustion"""
@@ -1126,16 +1177,30 @@ class GoogleGenAIProvider(IModelProvider):
             raise quota_error
         except PermissionDenied as e:
             error_msg = f"Google GenAI permission denied: {e}"
-            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=403)
             raise Exception(error_msg)
         except InvalidArgument as e:
             error_msg = f"Google GenAI invalid argument: {e}"
-            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+            # InvalidArgument can indicate API key issues
+            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=400)
             raise Exception(error_msg)
         except Exception as e:
             error_msg = f"Google GenAI error: {e}"
             if "api_key" in locals() and "model_name" in locals():
-                await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+                # Extract status code from error message if present
+                # Handles cases where exception isn't caught by specific handlers
+                extracted_status = None
+                error_str = str(e).lower()
+                if "403" in error_str or "permission" in error_str:
+                    extracted_status = 403
+                elif "429" in error_str or "quota" in error_str or "resource_exhausted" in error_str:
+                    extracted_status = 429
+                elif "401" in error_str or "unauthorized" in error_str:
+                    extracted_status = 401
+
+                await self._update_api_key_stats(
+                    api_key, model_name, success=False, error=error_msg, status_code=extracted_status
+                )
             raise Exception(error_msg)
 
     async def get_api_key_stats(self, include_unused_models: bool = False) -> Dict[str, Dict[str, Any]]:
