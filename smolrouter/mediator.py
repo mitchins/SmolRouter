@@ -396,23 +396,23 @@ class ModelMediator:
                         attach_lb_instance(None),  # Include LB instance for errors
                     )
 
-            # Handle OpenAI provider requests
-            if hasattr(provider, "generate_completion") and resolved_model.provider_type == "openai":
+            # Handle OpenAI-compatible provider requests
+            if hasattr(provider, "generate_completion") and resolved_model.provider_type in {"openai", "zai-coding"}:
                 try:
                     response_data, status_code = await provider.generate_completion(request_payload, headers, path)
                     return (
                         response_data,
                         status_code,
-                        f"openai:{resolved_model.provider_id}",
+                        f"{resolved_model.provider_type}:{resolved_model.provider_id}",
                         attach_lb_instance(None),  # OpenAI provider doesn't return metadata yet
                     )
                 except Exception as e:
-                    logger.error(f"OpenAI provider error: {e}")
+                    logger.error(f"{resolved_model.provider_type} provider error: {e}")
                     # Return OpenAI-compatible error response
                     return (
-                        {"error": {"type": "api_error", "message": str(e), "provider": "openai"}},
+                        {"error": {"type": "api_error", "message": str(e), "provider": resolved_model.provider_type}},
                         500,
-                        f"openai:{resolved_model.provider_id}",
+                        f"{resolved_model.provider_type}:{resolved_model.provider_id}",
                         attach_lb_instance(None),  # Include LB instance for errors
                     )
 

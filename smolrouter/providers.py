@@ -6,8 +6,10 @@ AI model serving platforms like Ollama and OpenAI-compatible APIs.
 """
 
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 import httpx
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import urljoin
 
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig
@@ -150,7 +152,10 @@ class OpenAIProvider(BaseModelProvider):
         super().__init__(config)
 
     def _get_health_check_url(self) -> str:
-        return urljoin(self.config.url, "/v1/models")
+        return self._build_request_url("/v1/models")
+
+    def _build_request_url(self, endpoint: str) -> str:
+        return urljoin(self.config.url, endpoint)
 
     async def health_check(self) -> bool:
         """OpenAI provider health check - always healthy when configured for client passthrough"""
@@ -170,7 +175,7 @@ class OpenAIProvider(BaseModelProvider):
 
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                url = urljoin(self.config.url, "/v1/models")
+                url = self._build_request_url("/v1/models")
                 headers = self._get_headers()
 
                 logger.debug(f"Discovering OpenAI models from {url}")
@@ -306,7 +311,7 @@ class OpenAIProvider(BaseModelProvider):
                     elif key.lower() in ["openai-organization", "openai-project", "user-agent"]:
                         headers[key] = value
 
-            url = urljoin(self.config.url, endpoint)
+            url = self._build_request_url(endpoint)
 
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 response = await client.post(
@@ -355,12 +360,138 @@ class OpenAIProvider(BaseModelProvider):
             return {"error": {"message": f"Failed to call OpenAI API: {error_msg}", "type": "api_error"}}, 500
 
 
+@dataclass
+class ZaiCodingConfig(ProviderConfig):
+    """Configuration for Z.AI GLM Coding Plan provider"""
+
+    api_key_file: Optional[str] = None
+
+    def __init__(self, **kwargs):
+        self.api_key_file = kwargs.pop("api_key_file", None)
+
+        # Use the dedicated coding endpoint by default.
+        if "url" not in kwargs:
+            kwargs["url"] = "https://api.z.ai/api/coding/paas/v4"
+
+        if not kwargs.get("api_key") and self.api_key_file:
+            kwargs["api_key"] = self._load_api_key_from_file(self.api_key_file)
+
+        super().__init__(**kwargs)
+
+        if not self.api_key:
+            raise ValueError("Z.AI Coding provider requires api_key or api_key_file")
+
+    @staticmethod
+    def _load_api_key_from_file(api_key_file: str) -> str:
+        path = Path(api_key_file).expanduser()
+        if not path.exists():
+            raise ValueError(f"API key file not found: {api_key_file}")
+
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+
+            if "=" in line:
+                _, value = line.split("=", 1)
+                line = value.strip().split("#", 1)[0].strip()
+
+            line = line.strip().strip('"').strip("'")
+            if line:
+                return line
+
+        raise ValueError(f"No API key found in file: {api_key_file}")
+
+
+class ZaiCodingProvider(OpenAIProvider):
+    """Provider for the Z.AI GLM Coding Plan endpoint"""
+
+    CODING_BASE_PATH = "api/coding/paas/v4"
+    SUPPORTED_MODELS = ["glm-5.1", "glm-5-turbo", "glm-4.7", "glm-4.5-air"]
+
+    def __init__(self, config: ProviderConfig):
+        if not isinstance(config, ZaiCodingConfig):
+            config = ZaiCodingConfig(**config.__dict__)
+
+        super().__init__(config)
+        self.config.type = "zai-coding"
+
+    def _build_request_url(self, endpoint: str) -> str:
+        base_url = self._get_coding_base_url()
+        normalized_endpoint = endpoint.lstrip("/")
+
+        if normalized_endpoint.startswith("v1/"):
+            normalized_endpoint = normalized_endpoint[3:]
+
+        if not normalized_endpoint:
+            return base_url
+
+        return f"{base_url}/{normalized_endpoint}"
+
+    def _get_coding_base_url(self) -> str:
+        base_url = self.config.url.rstrip("/")
+        suffix = f"/{self.CODING_BASE_PATH}"
+
+        if not base_url.endswith(suffix):
+            base_url = f"{base_url}{suffix}"
+
+        return base_url
+
+    def get_provider_type(self) -> str:
+        return "zai-coding"
+
+    def get_endpoint(self) -> str:
+        return self._get_coding_base_url()
+
+    async def generate_completion(
+        self,
+        openai_request: Dict[str, Any],
+        client_headers: Dict[str, str] = None,
+        endpoint: str = "/v1/chat/completions",
+    ) -> Tuple[Dict[str, Any], int]:
+        """Generate a completion using the configured Z.AI coding key."""
+        passthrough_headers: Dict[str, str] = {}
+
+        if client_headers:
+            for key, value in client_headers.items():
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
+
+                if key.lower() in ["openai-organization", "openai-project", "user-agent"]:
+                    passthrough_headers[key] = value
+
+        return await super().generate_completion(openai_request, passthrough_headers, endpoint)
+
+    async def health_check(self) -> bool:
+        if not self.config.api_key:
+            logger.error(f"Z.AI provider {self.get_provider_id()} has no API key configured")
+            return False
+
+        return await super().health_check()
+
+    async def discover_models(self) -> List[ModelInfo]:
+        """Return the supported GLM Coding Plan models."""
+        return [
+            self._create_model_info(
+                model_id=model_id,
+                model_name=model_id,
+                aliases=[model_id],
+                metadata={"static": True, "coding_plan": True},
+            )
+            for model_id in self.SUPPORTED_MODELS
+        ]
+
+
 class ProviderFactory:
     """Factory for creating model providers from configuration"""
 
     _provider_classes = {
         "ollama": OllamaProvider,
         "openai": OpenAIProvider,
+        "zai-coding": ZaiCodingProvider,
         "google-genai": GoogleGenAIProvider,
         "anthropic": AnthropicProvider,
         "dummy": DummyProvider,
@@ -429,6 +560,8 @@ class ProviderFactory:
                     config = AnthropicConfig(**processed_config)
                 elif processed_config.get("type") == "dummy":
                     config = DummyConfig(**processed_config)
+                elif processed_config.get("type") == "zai-coding":
+                    config = ZaiCodingConfig(**processed_config)
                 else:
                     config = ProviderConfig(**processed_config)
 

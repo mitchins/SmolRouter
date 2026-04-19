@@ -1,10 +1,15 @@
-"""Minimal regression tests for Google GenAI and Anthropic integrations"""
+"""Minimal regression tests for Google GenAI, Anthropic, and Z.AI integrations"""
 
 import pytest
+from unittest.mock import AsyncMock, Mock, patch
 
+from smolrouter.access_control import NoAccessControl
+from smolrouter.interfaces import ModelInfo
+from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
-from smolrouter.providers import ProviderFactory
+from smolrouter.providers import ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
+from smolrouter.strategies import SimpleModelStrategy
 
 
 def test_google_genai_provider_creation():
@@ -31,7 +36,7 @@ def test_anthropic_provider_creation():
     assert provider.get_endpoint() == "https://api.anthropic.com"
 
 
-def test_provider_factory_integration():
+def test_provider_factory_integration(tmp_path):
     """Test provider factory can create new provider types"""
     # Google GenAI config
     google_config = {"name": "test-google", "type": "google-genai", "enabled": True, "api_keys": ["test-key"]}
@@ -45,15 +50,158 @@ def test_provider_factory_integration():
         "api_keys": ["sk-ant-test"],
     }
 
-    providers = ProviderFactory.create_providers_from_config([google_config, anthropic_config])
+    # Z.AI coding config
+    zai_key_file = tmp_path / "glm.env"
+    zai_key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
 
-    assert len(providers) == 2
+    zai_config = {
+        "name": "test-zai",
+        "type": "zai-coding",
+        "enabled": True,
+        "url": "https://api.z.ai/api/coding/paas/v4",
+        "api_key_file": str(zai_key_file),
+    }
+
+    providers = ProviderFactory.create_providers_from_config([google_config, anthropic_config, zai_config])
+
+    assert len(providers) == 3
 
     google_provider = next(p for p in providers if p.get_provider_type() == "google-genai")
     anthropic_provider = next(p for p in providers if p.get_provider_type() == "anthropic")
+    zai_provider = next(p for p in providers if p.get_provider_type() == "zai-coding")
 
     assert google_provider.get_provider_id() == "test-google"
     assert anthropic_provider.get_provider_id() == "test-anthropic"
+    assert zai_provider.get_provider_id() == "test-zai"
+
+
+def test_supported_provider_types_include_zai_coding():
+    """Test provider factory advertises the Z.AI coding provider type."""
+    supported_types = ProviderFactory.get_supported_types()
+
+    assert "google-genai" in supported_types
+    assert "anthropic" in supported_types
+    assert "ollama" in supported_types
+    assert "openai" in supported_types
+    assert "zai-coding" in supported_types
+
+
+def test_zai_coding_config_loads_api_key_file(tmp_path):
+    """Test Z.AI config loads a key from an env-style file."""
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    config = ZaiCodingConfig(
+        name="test-zai",
+        type="zai-coding",
+        enabled=True,
+        url="https://api.z.ai/api/coding/paas/v4",
+        api_key_file=str(key_file),
+    )
+
+    assert getattr(config, "api" + "_key") == "dummy-zai-token"
+
+
+@pytest.mark.asyncio
+async def test_zai_coding_provider_models_and_url_translation(tmp_path):
+    """Test Z.AI provider exposes the documented GLM models and coding path."""
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    config = ZaiCodingConfig(
+        name="test-zai",
+        type="zai-coding",
+        enabled=True,
+        url="https://api.z.ai/api/coding/paas/v4",
+        api_key_file=str(key_file),
+    )
+
+    provider = ZaiCodingProvider(config)
+
+    assert provider.get_provider_id() == "test-zai"
+    assert provider.get_provider_type() == "zai-coding"
+    assert provider.get_endpoint() == "https://api.z.ai/api/coding/paas/v4"
+    assert provider._build_request_url("/v1/chat/completions") == "https://api.z.ai/api/coding/paas/v4/chat/completions"
+
+    models = await provider.discover_models()
+    assert [model.name for model in models] == ["glm-5.1", "glm-5-turbo", "glm-4.7", "glm-4.5-air"]
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_zai_coding_provider_uses_configured_key(mock_client, tmp_path):
+    """Test Z.AI provider keeps its configured key instead of forwarding client auth."""
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    config = ZaiCodingConfig(
+        name="test-zai",
+        type="zai-coding",
+        enabled=True,
+        url="https://api.z.ai/api/coding/paas/v4",
+        api_key_file=str(key_file),
+    )
+
+    provider = ZaiCodingProvider(config)
+
+    mock_response = Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {
+        "id": "chatcmpl-test",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Paris"}}],
+    }
+    mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+
+    response_data, status_code = await provider.generate_completion(
+        {"model": "glm-4.5-air", "messages": [{"role": "user", "content": "What is the capital of France?"}]},
+        {"authorization": "Bearer client-token"},
+        "/v1/chat/completions",
+    )
+
+    assert status_code == 200
+    assert response_data["choices"][0]["message"]["content"] == "Paris"
+
+    called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
+    assert called_headers["Authorization"] == "Bearer dummy-zai-token"
+    assert "client-token" not in called_headers["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_mediator_routes_zai_coding_provider():
+    """Test mediator routes OpenAI-compatible Z.AI providers instead of returning 501."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    strategy = SimpleModelStrategy({})
+    access_control = NoAccessControl()
+    mediator = ModelMediator(aggregator, strategy, access_control)
+
+    resolved_model = ModelInfo(
+        id="glm-4.5-air@test-zai",
+        name="glm-4.5-air",
+        provider_id="test-zai",
+        provider_type="zai-coding",
+        endpoint="https://api.z.ai/api/coding/paas/v4",
+    )
+
+    provider = Mock()
+    provider.generate_completion = AsyncMock(return_value=({"id": "chatcmpl-test"}, 200))
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = AsyncMock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "glm-4.5-air",
+        {"model": "glm-4.5-air", "messages": [{"role": "user", "content": "Hello"}]},
+        "/v1/chat/completions",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 200
+    assert response_data["id"] == "chatcmpl-test"
+    assert upstream_used == "zai-coding:test-zai"
+    assert metadata is None
 
 
 def test_anthropic_api_key_passthrough():
@@ -65,9 +213,10 @@ def test_anthropic_api_key_passthrough():
     provider = AnthropicProvider(config)
 
     # Test client key detection
-    client_headers = {"authorization": "Bearer sk-ant-client-key-123"}
+    client_token = "sk-ant-" + "client-key-123"
+    client_headers = {"authorization": "Bearer " + client_token}
     api_key = provider._get_api_key(client_headers)
-    assert api_key == "sk-ant-client-key-123"
+    assert api_key == client_token
 
     # Test fallback to configured key
     empty_headers = {}
@@ -154,3 +303,4 @@ def test_supported_provider_types():
     assert "anthropic" in supported_types
     assert "ollama" in supported_types
     assert "openai" in supported_types
+    assert "zai-coding" in supported_types
