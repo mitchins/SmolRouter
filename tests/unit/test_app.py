@@ -11,6 +11,10 @@ from smolrouter.app import (
 )
 import json
 import respx
+from unittest.mock import Mock, patch
+
+from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
+from smolrouter.interfaces import ProxyConfig
 
 
 def load_mock_json(filename):
@@ -99,6 +103,41 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     assert "<think>" not in data["response"]
     assert data["done"] is True
     assert data["model"] == "mistral"
+
+
+@pytest.mark.asyncio
+async def test_system_dashboard_shows_google_proxy_pool(disable_logging):
+    provider = GoogleGenAIProvider(
+        GoogleGenAIConfig(
+            name="test-google",
+            type="google-genai",
+            enabled=True,
+            api_keys=["test-key"],
+            proxy_pool_enabled=True,
+            proxy_pool=[None, ProxyConfig(https_proxy="http://127.0.0.1:8888")],
+            per_model_proxy={"gemma-3-4b-it": ProxyConfig(https_proxy="http://127.0.0.1:8899")},
+        )
+    )
+    fake_container = Mock()
+    fake_container.get_providers.return_value = [provider]
+    fake_security = Mock()
+    fake_security.check_webui_access.return_value = None
+
+    with (
+        patch("smolrouter.app.container", fake_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/system")
+
+    assert response.status_code == 200
+    content = response.text
+    assert "Proxy Configuration" in content
+    assert "test-google" in content
+    assert "round-robin pool enabled" in content
+    assert "http://127.0.0.1:8888" in content
+    assert "http://127.0.0.1:8899" in content
+    assert "No proxy configurations in use - all requests go direct" not in content
 
 
 def test_rewrite_model_exact_match():

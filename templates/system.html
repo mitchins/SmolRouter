@@ -245,32 +245,169 @@
             </div>
 
             <!-- Proxy Configuration -->
-            {% if routing.proxy_mappings %}
+            {% if routing.proxy_summary.configured %}
             <div style="margin-top: 2rem;">
                 <h3 style="margin: 0 0 1rem 0; color: #4a5568; font-size: 1.1rem; display: flex; align-items: center; gap: 0.5rem;">
                     <span class="material-icons" style="color: #667eea;">swap_horiz</span>
                     Proxy Configuration
                 </h3>
                 <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1.5rem;">
-                    <div style="margin-bottom: 1rem; color: #718096; font-size: 0.95rem;">
-                        Showing {{ routing.proxy_mappings|length }} proxy configuration{{ 's' if routing.proxy_mappings|length != 1 else '' }} in use
+                    <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem;">
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #edf2f7; color: #2d3748; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.configured_provider_count }} provider{{ 's' if routing.proxy_summary.configured_provider_count != 1 else '' }} with proxy routing
+                        </span>
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #edf2f7; color: #2d3748; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.proxy_count }} configured prox{{ 'ies' if routing.proxy_summary.proxy_count != 1 else 'y' }}
+                        </span>
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #edf2f7; color: #2d3748; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.pool_provider_count }} round-robin pool{{ 's' if routing.proxy_summary.pool_provider_count != 1 else '' }}
+                        </span>
+                        {% if routing.proxy_summary.healthy_count %}
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #d4edda; color: #155724; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.healthy_count }} healthy
+                        </span>
+                        {% endif %}
+                        {% if routing.proxy_summary.unhealthy_count %}
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #f8d7da; color: #721c24; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.unhealthy_count }} unhealthy
+                        </span>
+                        {% endif %}
+                        {% if routing.proxy_summary.unknown_count %}
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #fff3cd; color: #856404; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.unknown_count }} unknown
+                        </span>
+                        {% endif %}
+                        {% if routing.proxy_summary.direct_entry_count %}
+                        <span style="padding: 0.35rem 0.75rem; border-radius: 999px; background: #e2e8f0; color: #2d3748; font-size: 0.875rem;">
+                            {{ routing.proxy_summary.direct_entry_count }} direct pool entr{{ 'ies' if routing.proxy_summary.direct_entry_count != 1 else 'y' }}
+                        </span>
+                        {% endif %}
                     </div>
-                    {% for proxy in routing.proxy_mappings %}
-                    <div style="margin-bottom: 1.5rem; padding: 1rem; background: #f7fafc; border-radius: 6px; border-left: 4px solid #667eea;">
-                        <div style="margin-bottom: 0.75rem;">
-                            <strong style="color: #2d3748; font-family: 'Courier New', monospace;">{{ proxy.url }}</strong>
-                            <span style="margin-left: 0.75rem; padding: 0.25rem 0.5rem; border-radius: 12px; font-size: 0.875rem; background: #e2e8f0; color: #4a5568;">
-                                {{ proxy.model_count }} model{{ 's' if proxy.model_count != 1 else '' }}
-                            </span>
+
+                    <div style="margin-bottom: 1.5rem; color: #718096; font-size: 0.95rem;">
+                        Proxy routing is explicit here. Unknown means configured but not yet probed; unhealthy means the runtime has recently observed or confirmed a connectivity failure.
+                    </div>
+
+                    {% for provider_proxy in routing.proxy_providers %}
+                    <div style="margin-bottom: 1.5rem; padding: 1rem; background: #f7fafc; border-radius: 6px; border-left: 4px solid {{ '#e53e3e' if provider_proxy.summary.unhealthy_count else '#667eea' }};">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                            <div>
+                                <strong style="color: #2d3748; font-size: 1rem;">{{ provider_proxy.provider_id }}</strong>
+                                <div style="color: #718096; font-size: 0.9rem; margin-top: 0.25rem;">
+                                    {{ provider_proxy.provider_type }}
+                                    {% if provider_proxy.pool_enabled %}
+                                    · round-robin pool enabled
+                                    {% elif provider_proxy.default_proxy or provider_proxy.model_overrides %}
+                                    · static proxy routing
+                                    {% else %}
+                                    · direct
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                                <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background: {{ '#d4edda' if provider_proxy.pool_enabled else '#edf2f7' }}; color: {{ '#155724' if provider_proxy.pool_enabled else '#4a5568' }};">
+                                    {{ 'Pool enabled' if provider_proxy.pool_enabled else 'No pool' }}
+                                </span>
+                                {% if provider_proxy.health_check_interval_seconds %}
+                                <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background: {{ '#d4edda' if provider_proxy.monitor_running else '#fff3cd' }}; color: {{ '#155724' if provider_proxy.monitor_running else '#856404' }};">
+                                    {{ 'Health monitor running' if provider_proxy.monitor_running else 'Health monitor idle' }}
+                                </span>
+                                {% endif %}
+                            </div>
                         </div>
-                        <div style="color: #718096; font-size: 0.9rem;">
-                            <strong>Models using this proxy:</strong>
-                            <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem;">
-                                {% for model in proxy.models %}
-                                <span style="padding: 0.25rem 0.5rem; background: white; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 0.85rem;">{{ model }}</span>
+
+                        {% if provider_proxy.health_check_interval_seconds %}
+                        <div style="margin-bottom: 1rem; color: #718096; font-size: 0.85rem;">
+                            Probe interval {{ provider_proxy.health_check_interval_seconds }}s · failure cooldown {{ provider_proxy.failure_cooldown_seconds }}s
+                        </div>
+                        {% endif %}
+
+                        {% if provider_proxy.default_proxy %}
+                        <div style="margin-bottom: 1rem;">
+                            <div style="font-size: 0.85rem; color: #718096; margin-bottom: 0.5rem;">Default proxy</div>
+                            <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+                                <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem;">
+                                    <strong style="color: #2d3748; font-family: 'Courier New', monospace;">{{ provider_proxy.default_proxy.url }}</strong>
+                                    <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background:
+                                        {% if provider_proxy.default_proxy.status == 'healthy' %}#d4edda; color: #155724;
+                                        {% elif provider_proxy.default_proxy.status == 'unhealthy' %}#f8d7da; color: #721c24;
+                                        {% else %}#fff3cd; color: #856404;{% endif %}">
+                                        {{ provider_proxy.default_proxy.status }}
+                                    </span>
+                                </div>
+                                {% if provider_proxy.default_proxy.last_error %}
+                                <div style="color: #721c24; font-size: 0.85rem;">Last error: {{ provider_proxy.default_proxy.last_error }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        {% if provider_proxy.model_overrides %}
+                        <div style="margin-bottom: 1rem;">
+                            <div style="font-size: 0.85rem; color: #718096; margin-bottom: 0.5rem;">Per-model proxy overrides</div>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.75rem;">
+                                {% for entry in provider_proxy.model_overrides %}
+                                <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+                                    <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.4rem;">
+                                        <strong style="color: #2d3748;">{{ entry.label }}</strong>
+                                        <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background:
+                                            {% if entry.status == 'healthy' %}#d4edda; color: #155724;
+                                            {% elif entry.status == 'unhealthy' %}#f8d7da; color: #721c24;
+                                            {% else %}#fff3cd; color: #856404;{% endif %}">
+                                            {{ entry.status }}
+                                        </span>
+                                    </div>
+                                    <div style="color: #4a5568; font-family: 'Courier New', monospace; font-size: 0.85rem;">{{ entry.url }}</div>
+                                    {% if entry.cooldown_remaining_seconds %}
+                                    <div style="color: #856404; font-size: 0.8rem; margin-top: 0.35rem;">Cooldown: {{ entry.cooldown_remaining_seconds }}s</div>
+                                    {% endif %}
+                                    {% if entry.last_error %}
+                                    <div style="color: #721c24; font-size: 0.8rem; margin-top: 0.35rem;">{{ entry.last_error }}</div>
+                                    {% endif %}
+                                </div>
                                 {% endfor %}
                             </div>
                         </div>
+                        {% endif %}
+
+                        {% if provider_proxy.pool_entries %}
+                        <div>
+                            <div style="font-size: 0.85rem; color: #718096; margin-bottom: 0.5rem;">
+                                Round-robin pool
+                                {% if provider_proxy.next_pool_index %}
+                                · next slot {{ provider_proxy.next_pool_index }}
+                                {% endif %}
+                            </div>
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.75rem;">
+                                {% for entry in provider_proxy.pool_entries %}
+                                <div style="padding: 0.75rem; background: white; border: 1px solid #e2e8f0; border-radius: 6px;">
+                                    <div style="display: flex; justify-content: space-between; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.4rem;">
+                                        <strong style="color: #2d3748;">{{ entry.label }}</strong>
+                                        <div style="display: flex; gap: 0.35rem; flex-wrap: wrap;">
+                                            {% if entry.selected_next %}
+                                            <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.75rem; background: #bee3f8; color: #1a365d;">Next</span>
+                                            {% endif %}
+                                            <span style="padding: 0.25rem 0.6rem; border-radius: 999px; font-size: 0.8rem; background:
+                                                {% if entry.status == 'healthy' %}#d4edda; color: #155724;
+                                                {% elif entry.status == 'unhealthy' %}#f8d7da; color: #721c24;
+                                                {% elif entry.status == 'direct' %}#e2e8f0; color: #2d3748;
+                                                {% else %}#fff3cd; color: #856404;{% endif %}">
+                                                {{ entry.status }}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div style="color: #4a5568; font-family: 'Courier New', monospace; font-size: 0.85rem;">{{ entry.url }}</div>
+                                    {% if entry.cooldown_remaining_seconds %}
+                                    <div style="color: #856404; font-size: 0.8rem; margin-top: 0.35rem;">Cooldown: {{ entry.cooldown_remaining_seconds }}s</div>
+                                    {% endif %}
+                                    {% if entry.last_error %}
+                                    <div style="color: #721c24; font-size: 0.8rem; margin-top: 0.35rem;">{{ entry.last_error }}</div>
+                                    {% endif %}
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
                     </div>
                     {% endfor %}
                 </div>

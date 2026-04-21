@@ -24,7 +24,7 @@ SmolRouter 2.0.0 focuses on turning the project into a production-ready AI gatew
 
 1. Update to SmolRouter 2.0.0 via `pip install -U smolrouter` or rebuild your Docker image.
 2. Ensure the environment contains any new credentials required for Google GenAI, if used.
-3. Run `pytest` (160 tests) against your configuration or CI pipeline to confirm routing rules behave as expected.
+3. Run `pytest` against your configuration or CI pipeline to confirm routing rules behave as expected.
 4. Review new docs in `docs/` for configuration, operations, and feature overviews.
 
 Need help? Open an issue at [github.com/mitchins/smolrouter](https://github.com/mitchins/smolrouter).

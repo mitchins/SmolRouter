@@ -161,6 +161,7 @@ class RequestLogEntry:
             total_tokens = getattr(self, "total_tokens", None)
             api_key_suffix = getattr(self, "api_key_suffix", None)
             proxy_used = getattr(self, "proxy_used", None)
+            provider_id = getattr(self, "provider_id", None)
             request_body_bytes = getattr(self, "request_body", None)
             response_body_bytes = getattr(self, "response_body", None)
             existing_request_body_key = getattr(self, "request_body_key", None)
@@ -196,6 +197,7 @@ class RequestLogEntry:
                 response_body_key=resp_key,
                 api_key_suffix=api_key_suffix,
                 proxy_used=proxy_used,
+                provider_id=provider_id,
             )
 
     def set_request_body(self, body):
@@ -223,6 +225,7 @@ class RequestLog:
             "upstream_url": "upstream_url",
             "original_model": "original_model",
             "mapped_model": "mapped_model",
+            "provider_id": "provider_id",
             "request_id": "request_id",
             "user_agent": "user_agent",
             "auth_user": "auth_user",

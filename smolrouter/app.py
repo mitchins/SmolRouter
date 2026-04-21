@@ -6,7 +6,7 @@ import time
 import hashlib
 import yaml
 import uuid
-from typing import AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -26,6 +26,7 @@ from smolrouter.database import (
     extract_tokens_from_openai_response,
     estimate_token_count,
 )
+from smolrouter.dashboard_filters import DashboardFilterError, filter_request_logs, parse_dashboard_filter_query
 from smolrouter.storage import init_blob_storage
 from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
 from smolrouter.security import init_webui_security, get_webui_security
@@ -71,6 +72,15 @@ async def app_lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if container:
+            try:
+                for provider in container.get_providers():
+                    stop_monitor = getattr(provider, "stop_proxy_health_monitor", None)
+                    if callable(stop_monitor):
+                        await stop_monitor()
+            except Exception as e:
+                logger.warning(f"Failed to stop proxy health monitor cleanly: {e}")
+
         # Shutdown cleanup
         if ENABLE_LOGGING:
             from smolrouter.database import stop_background_cleanup
@@ -116,6 +126,7 @@ ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "y
 
 # Timeout configuration
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "3000.0"))
+DASHBOARD_FILTER_SCAN_LIMIT = int(os.getenv("DASHBOARD_FILTER_SCAN_LIMIT", "1000"))
 
 
 def validate_url(url: str, name: str) -> str:
@@ -299,6 +310,15 @@ async def init_new_architecture():
     global container
     try:
         container = await initialize_container()
+        for provider in container.get_providers():
+            start_monitor = getattr(provider, "start_proxy_health_monitor", None)
+            if callable(start_monitor):
+                try:
+                    start_monitor()
+                except Exception as provider_error:
+                    logger.warning(
+                        f"Failed to start proxy health monitor for {provider.get_provider_id()}: {provider_error}"
+                    )
         logger.info("New SmolRouter architecture initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize new architecture: {e}")
@@ -1490,33 +1510,89 @@ async def performance_dashboard(request: Request):
         return HTMLResponse(content="<h1>Error loading performance dashboard</h1>", status_code=500)
 
 
+def _invalid_dashboard_filter_response(error: DashboardFilterError) -> JSONResponse:
+    return JSONResponse(
+        content={
+            "error": "invalid_filter",
+            "message": str(error),
+            "invalid_terms": error.invalid_terms,
+        },
+        status_code=422,
+    )
+
+
+def _timestamp_now_for_log(timestamp: Optional[datetime]) -> datetime:
+    if isinstance(timestamp, datetime) and timestamp.tzinfo is not None:
+        return datetime.now(timestamp.tzinfo)
+    return datetime.now()
+
+
+def _serialize_request_log(log_entry) -> dict[str, Any]:
+    timestamp = getattr(log_entry, "timestamp", None)
+    status_code = getattr(log_entry, "status_code", None)
+    duration_ms = getattr(log_entry, "duration_ms", None)
+
+    if duration_ms is None and status_code in (None, "pending") and isinstance(timestamp, datetime):
+        elapsed_seconds = (_timestamp_now_for_log(timestamp) - timestamp).total_seconds()
+        duration_ms = max(int(elapsed_seconds * 1000), 0)
+
+    completed_at = getattr(log_entry, "completed_at", None)
+    provider_id = getattr(log_entry, "provider_id", None) or None
+    upstream_url = getattr(log_entry, "upstream_url", None)
+    normalized_status = None if status_code == "pending" else status_code
+
+    return {
+        "id": getattr(log_entry, "id", None),
+        "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
+        "source_ip": getattr(log_entry, "source_ip", None),
+        "method": getattr(log_entry, "method", None),
+        "path": getattr(log_entry, "path", None),
+        "service_type": getattr(log_entry, "service_type", None),
+        "provider_id": provider_id,
+        "original_model": getattr(log_entry, "original_model", None),
+        "mapped_model": getattr(log_entry, "mapped_model", None),
+        "duration_ms": duration_ms,
+        "request_size": getattr(log_entry, "request_size", 0) or 0,
+        "response_size": getattr(log_entry, "response_size", 0) or 0,
+        "status_code": normalized_status,
+        "error_message": getattr(log_entry, "error_message", None),
+        "completed_at": completed_at.isoformat() if isinstance(completed_at, datetime) else None,
+        "is_inflight": completed_at is None,
+        "upstream": upstream_url,
+        "upstream_url": upstream_url,
+        "is_duplicate": getattr(log_entry, "is_duplicate", False),
+        "duplicate_count": getattr(log_entry, "duplicate_count", 0),
+        "api_key_suffix": getattr(log_entry, "api_key_suffix", None),
+        "proxy_used": getattr(log_entry, "proxy_used", None),
+        "api_key_index": getattr(log_entry, "api_key_index", None),
+        "api_key_total": getattr(log_entry, "api_key_total", None),
+    }
+
+
+async def _get_dashboard_logs(limit: int = 100, q: str | None = None, service_type: str | None = None):
+    parsed_query = parse_dashboard_filter_query(q)
+    requires_scan = parsed_query.active or bool(service_type)
+    scan_limit = max(limit, DASHBOARD_FILTER_SCAN_LIMIT) if requires_scan else limit
+    logs = await get_recent_logs(limit=scan_limit)
+
+    if service_type:
+        service_name = service_type.casefold()
+        logs = [log for log in logs if str(getattr(log, "service_type", "")).casefold() == service_name]
+
+    if parsed_query.active:
+        logs = filter_request_logs(logs, parsed_query)
+
+    return logs[:limit], parsed_query
+
+
 @app.get("/api/logs")
-async def api_logs(limit: int = 100, service_type: str = None):
+async def api_logs(limit: int = 100, service_type: str = None, q: str = None):
     """API endpoint for getting logs as JSON"""
     try:
-        logs = await get_recent_logs(limit=limit, service_type=service_type)
-        return [
-            {
-                "id": log.id,
-                "timestamp": log.timestamp.isoformat(),
-                "source_ip": log.source_ip,
-                "method": log.method,
-                "path": log.path,
-                "service_type": log.service_type,
-                "original_model": log.original_model,
-                "mapped_model": log.mapped_model,
-                "duration_ms": log.duration_ms,
-                "request_size": log.request_size,
-                "response_size": log.response_size,
-                "status_code": log.status_code,
-                "error_message": log.error_message,
-                "completed_at": log.completed_at.isoformat() if log.completed_at else None,
-                "is_inflight": log.completed_at is None,
-                "is_duplicate": getattr(log, "is_duplicate", False),
-                "duplicate_count": getattr(log, "duplicate_count", 0),
-            }
-            for log in logs
-        ]
+        logs, _ = await _get_dashboard_logs(limit=limit, q=q, service_type=service_type)
+        return [_serialize_request_log(log) for log in logs]
+    except DashboardFilterError as e:
+        return _invalid_dashboard_filter_response(e)
     except Exception as e:
         logger.error(f"Error getting logs: {e}")
         return JSONResponse(content={"error": "Failed to get logs"}, status_code=500)
@@ -1533,49 +1609,21 @@ async def api_stats():
 
 
 @app.get("/api/dashboard")
-async def api_dashboard(limit: int = 100):
+async def api_dashboard(limit: int = 100, q: str = None):
     """Combined API endpoint for dashboard data (logs + stats)"""
-    from datetime import datetime
-
     try:
-        logs = await get_recent_logs(limit=limit)
+        logs, parsed_query = await _get_dashboard_logs(limit=limit, q=q)
         stats = await get_log_stats()
-
-        # Format logs for JSON response
-        formatted_logs = []
-        for log in logs:
-            # Calculate duration for pending requests
-            duration_ms = log.duration_ms
-            if duration_ms is None and log.status_code is None:
-                # Pending request - calculate elapsed time
-                elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
-                duration_ms = int(elapsed_seconds * 1000)
-
-            formatted_logs.append(
-                {
-                    "id": log.id,
-                    "timestamp": log.timestamp.isoformat(),
-                    "source_ip": log.source_ip,
-                    "method": log.method,
-                    "path": log.path,
-                    "service_type": log.service_type,
-                    "original_model": log.original_model,
-                    "mapped_model": log.mapped_model,
-                    "duration_ms": duration_ms,
-                    "status_code": log.status_code,
-                    "error_message": log.error_message,
-                    "upstream": log.upstream_url,
-                    "request_size": log.request_size,
-                    "is_duplicate": getattr(log, "is_duplicate", False),
-                    "duplicate_count": getattr(log, "duplicate_count", 0),
-                }
-            )
+        formatted_logs = [_serialize_request_log(log) for log in logs]
 
         return {
             "logs": formatted_logs,
             "stats": stats,
-            "timestamp": datetime.now().isoformat(),  # For cache busting
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "filter": parsed_query.to_meta(matched_count=len(formatted_logs), limit=limit),
         }
+    except DashboardFilterError as e:
+        return _invalid_dashboard_filter_response(e)
     except Exception as e:
         logger.error(f"Error getting dashboard data: {e}")
         return JSONResponse(content={"error": f"Failed to get dashboard data. {e}"}, status_code=500)
@@ -1971,6 +2019,206 @@ async def google_genai_dashboard(request: Request):
     return RedirectResponse(url="/providers", status_code=301)
 
 
+def _proxy_config_to_url(proxy_config: Any) -> Optional[str]:
+    if proxy_config is None:
+        return None
+    if hasattr(proxy_config, "to_httpx_proxy"):
+        return proxy_config.to_httpx_proxy()
+    return str(proxy_config)
+
+
+def _mask_proxy_url(proxy_url: Optional[str]) -> Optional[str]:
+    if not proxy_url:
+        return None
+
+    parsed = urlparse(proxy_url)
+    if not parsed.scheme or not parsed.hostname:
+        return proxy_url
+
+    netloc = parsed.hostname
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def _build_proxy_entry(
+    label: str,
+    *,
+    kind: str,
+    url: str,
+    status: str = "unknown",
+    model_name: Optional[str] = None,
+    pool_index: Optional[int] = None,
+    selected_next: bool = False,
+    health: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    health = health or {}
+    return {
+        "label": label,
+        "kind": kind,
+        "url": url,
+        "status": status,
+        "model_name": model_name,
+        "pool_index": pool_index,
+        "selected_next": selected_next,
+        "last_checked_at": health.get("last_checked_at"),
+        "last_success_at": health.get("last_success_at"),
+        "last_failure_at": health.get("last_failure_at"),
+        "last_error": health.get("last_error"),
+        "failure_count": health.get("failure_count", 0),
+        "success_count": health.get("success_count", 0),
+        "cooldown_remaining_seconds": health.get("cooldown_remaining_seconds", 0),
+    }
+
+
+def _summarize_proxy_entries(entries: list[Dict[str, Any]]) -> Dict[str, int]:
+    return {
+        "entry_count": len(entries),
+        "proxy_count": sum(1 for entry in entries if entry["status"] != "direct"),
+        "pool_entry_count": sum(1 for entry in entries if entry["kind"] in {"pool", "direct"}),
+        "direct_entry_count": sum(1 for entry in entries if entry["status"] == "direct"),
+        "healthy_count": sum(1 for entry in entries if entry["status"] == "healthy"),
+        "unhealthy_count": sum(1 for entry in entries if entry["status"] == "unhealthy"),
+        "unknown_count": sum(1 for entry in entries if entry["status"] == "unknown"),
+    }
+
+
+def _build_generic_default_proxy_entry(provider_config: Any) -> Optional[Dict[str, Any]]:
+    default_proxy_url = _proxy_config_to_url(getattr(provider_config, "proxy_config", None))
+    if not default_proxy_url:
+        return None
+
+    return _build_proxy_entry(
+        "Default",
+        kind="default",
+        url=_mask_proxy_url(default_proxy_url) or default_proxy_url,
+    )
+
+
+def _build_generic_model_override_entries(provider_config: Any) -> list[Dict[str, Any]]:
+    entries = []
+    per_model_proxy = getattr(provider_config, "per_model_proxy", {}) or {}
+    for model_name, proxy_config in sorted(per_model_proxy.items()):
+        proxy_url = _proxy_config_to_url(proxy_config)
+        if not proxy_url:
+            continue
+        entries.append(
+            _build_proxy_entry(
+                model_name,
+                kind="override",
+                url=_mask_proxy_url(proxy_url) or proxy_url,
+                model_name=model_name,
+            )
+        )
+    return entries
+
+
+def _build_generic_pool_entries(provider: Any, provider_config: Any) -> list[Dict[str, Any]]:
+    entries = []
+    next_pool_index = getattr(provider, "_proxy_pool_index", None)
+    proxy_pool = getattr(provider_config, "proxy_pool", None) or []
+
+    for idx, proxy_config in enumerate(proxy_pool):
+        if proxy_config is None:
+            entries.append(
+                _build_proxy_entry(
+                    f"Pool #{idx + 1}",
+                    kind="direct",
+                    url="direct",
+                    status="direct",
+                    pool_index=idx + 1,
+                    selected_next=next_pool_index == idx,
+                )
+            )
+            continue
+
+        proxy_url = _proxy_config_to_url(proxy_config)
+        if not proxy_url:
+            continue
+        entries.append(
+            _build_proxy_entry(
+                f"Pool #{idx + 1}",
+                kind="pool",
+                url=_mask_proxy_url(proxy_url) or proxy_url,
+                pool_index=idx + 1,
+                selected_next=next_pool_index == idx,
+            )
+        )
+
+    return entries
+
+
+def _build_generic_provider_proxy_diagnostics(provider: Any) -> Dict[str, Any]:
+    provider_config = getattr(provider, "config", None)
+    if provider_config is None:
+        return {
+            "provider_id": provider.get_provider_id(),
+            "provider_type": provider.get_provider_type(),
+            "configured": False,
+            "pool_enabled": False,
+            "monitor_running": False,
+            "health_check_interval_seconds": None,
+            "failure_cooldown_seconds": None,
+            "next_pool_index": None,
+            "default_proxy": None,
+            "model_overrides": [],
+            "pool_entries": [],
+            "summary": _summarize_proxy_entries([]),
+        }
+
+    default_proxy = _build_generic_default_proxy_entry(provider_config)
+    model_overrides = _build_generic_model_override_entries(provider_config)
+    next_pool_index = getattr(provider, "_proxy_pool_index", None)
+    proxy_pool = getattr(provider_config, "proxy_pool", None) or []
+    pool_entries = _build_generic_pool_entries(provider, provider_config)
+
+    all_entries = [entry for entry in [default_proxy] if entry] + model_overrides + pool_entries
+    pool_enabled = bool(getattr(provider_config, "proxy_pool_enabled", False) and proxy_pool)
+    return {
+        "provider_id": provider.get_provider_id(),
+        "provider_type": provider.get_provider_type(),
+        "configured": bool(default_proxy or model_overrides or pool_enabled),
+        "pool_enabled": pool_enabled,
+        "monitor_running": False,
+        "health_check_interval_seconds": None,
+        "failure_cooldown_seconds": None,
+        "next_pool_index": next_pool_index + 1 if next_pool_index is not None and proxy_pool else None,
+        "default_proxy": default_proxy,
+        "model_overrides": model_overrides,
+        "pool_entries": pool_entries,
+        "summary": _summarize_proxy_entries(all_entries),
+    }
+
+
+def _build_proxy_configuration_report(providers_list: list[Any]) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+    proxy_providers = []
+
+    for provider in providers_list:
+        try:
+            if hasattr(provider, "get_proxy_diagnostics") and callable(provider.get_proxy_diagnostics):
+                diagnostics = provider.get_proxy_diagnostics()
+            else:
+                diagnostics = _build_generic_provider_proxy_diagnostics(provider)
+
+            if diagnostics.get("configured"):
+                proxy_providers.append(diagnostics)
+        except Exception as e:
+            logger.warning(f"Could not analyze proxy configuration for {provider.get_provider_id()}: {e}")
+
+    summary = {
+        "configured": bool(proxy_providers),
+        "configured_provider_count": len(proxy_providers),
+        "pool_provider_count": sum(1 for provider in proxy_providers if provider.get("pool_enabled")),
+        "proxy_count": sum(provider["summary"].get("proxy_count", 0) for provider in proxy_providers),
+        "healthy_count": sum(provider["summary"].get("healthy_count", 0) for provider in proxy_providers),
+        "unhealthy_count": sum(provider["summary"].get("unhealthy_count", 0) for provider in proxy_providers),
+        "unknown_count": sum(provider["summary"].get("unknown_count", 0) for provider in proxy_providers),
+        "direct_entry_count": sum(provider["summary"].get("direct_entry_count", 0) for provider in proxy_providers),
+    }
+
+    return proxy_providers, summary
+
+
 @app.get("/system", response_class=HTMLResponse)
 async def system_dashboard(request: Request):
     """Web UI for viewing system configuration and tuneables"""
@@ -2068,58 +2316,21 @@ async def system_dashboard(request: Request):
             }
 
         # Proxy configuration analysis
-        proxy_mappings = []
+        proxy_providers = []
+        proxy_summary = {
+            "configured": False,
+            "configured_provider_count": 0,
+            "pool_provider_count": 0,
+            "proxy_count": 0,
+            "healthy_count": 0,
+            "unhealthy_count": 0,
+            "unknown_count": 0,
+            "direct_entry_count": 0,
+        }
         if container:
             try:
-                # Collect all proxy configurations from providers
-                proxy_to_models = {}  # Maps proxy URL to list of models
-
                 providers_list = container.get_providers()
-                logger.debug(f"Found {len(providers_list)} providers for proxy analysis")
-
-                for provider in providers_list:
-                    provider_config = provider.config
-                    logger.debug(f"Analyzing provider {provider.get_provider_id()}")
-                    logger.debug(f"Has proxy_config: {hasattr(provider_config, 'proxy_config')}")
-                    logger.debug(f"Has per_model_proxy: {hasattr(provider_config, 'per_model_proxy')}")
-
-                    # Check default proxy for all models from this provider
-                    default_proxy = getattr(provider_config, "proxy_config", None)
-                    if default_proxy and default_proxy.to_httpx_proxy():
-                        proxy_url = default_proxy.to_httpx_proxy()
-                        if proxy_url not in proxy_to_models:
-                            proxy_to_models[proxy_url] = []
-                        # Add all models from this provider to the default proxy
-                        try:
-                            provider_models = provider.get_models()
-                            for model in provider_models:
-                                proxy_to_models[proxy_url].append(f"{model.name} [{provider.get_provider_id()}]")
-                        except Exception:
-                            # If we can't get models, just add a generic entry
-                            proxy_to_models[proxy_url].append(f"All models [{provider.get_provider_id()}]")
-
-                    # Check per-model proxy overrides
-                    per_model_proxy = getattr(provider_config, "per_model_proxy", {})
-                    if per_model_proxy:
-                        for model_name, proxy_config in per_model_proxy.items():
-                            if proxy_config and proxy_config.to_httpx_proxy():
-                                proxy_url = proxy_config.to_httpx_proxy()
-                                if proxy_url not in proxy_to_models:
-                                    proxy_to_models[proxy_url] = []
-                                proxy_to_models[proxy_url].append(f"{model_name} [{provider.get_provider_id()}]")
-
-                # Convert to list format for template
-                for proxy_url, models in proxy_to_models.items():
-                    proxy_mappings.append(
-                        {
-                            "url": proxy_url,
-                            "models": sorted(list(set(models))),  # Remove duplicates and sort
-                            "model_count": len(set(models)),
-                        }
-                    )
-
-                # Sort by model count (most used proxies first)
-                proxy_mappings.sort(key=lambda x: x["model_count"], reverse=True)
+                proxy_providers, proxy_summary = _build_proxy_configuration_report(providers_list)
 
             except Exception as e:
                 logger.warning(f"Could not analyze proxy configurations: {e}")
@@ -2133,7 +2344,8 @@ async def system_dashboard(request: Request):
             "cache_ttl": 300,  # Default cache TTL
             "auto_refresh": True,
             "load_balancing": load_balancing,
-            "proxy_mappings": proxy_mappings,
+            "proxy_providers": proxy_providers,
+            "proxy_summary": proxy_summary,
         }
 
         # Environment information
@@ -2141,8 +2353,8 @@ async def system_dashboard(request: Request):
             "version": "SmolRouter v1.0.0",
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "platform": platform.system(),
-            "host": "0.0.0.0",
-            "port": "8080",
+            "host": LISTEN_HOST,
+            "port": str(LISTEN_PORT),
             "start_time": "Runtime Info",
             "uptime": "N/A",
         }
@@ -2368,7 +2580,13 @@ async def get_available_models_for_testing(request: Request):
 
         # Return simplified model list for dropdown
         model_list = [
-            {"id": model.id, "name": model.name, "display_name": model.display_name, "provider": model.provider_id}
+            {
+                "id": model.id,
+                "name": model.name,
+                "display_name": model.display_name,
+                "provider": model.provider_id,
+                "request_model": model.display_name,
+            }
             for model in sorted_models
         ]
 
@@ -2531,65 +2749,17 @@ async def broadcast_request_event(event_type: str, log_entry=None):
             f"broadcast_request_event called: {event_type}, connected clients: {len(manager.active_connections)}"
         )
         if event_type == "new_request" and log_entry:
-            # Calculate real-time duration for pending requests
-            duration_ms = log_entry.duration_ms
-            if duration_ms is None and log_entry.status_code is None:
-                elapsed_seconds = (datetime.now() - log_entry.timestamp).total_seconds()
-                duration_ms = int(elapsed_seconds * 1000)
-
-            event_data = {
-                "type": "new_request",
-                "data": {
-                    "id": log_entry.id,
-                    "timestamp": log_entry.timestamp.isoformat(),
-                    "source_ip": log_entry.source_ip,
-                    "user_agent": log_entry.user_agent or "Unknown",
-                    "path": log_entry.path,
-                    "method": log_entry.method,
-                    "original_model": log_entry.original_model,
-                    "mapped_model": log_entry.mapped_model,
-                    "upstream_url": log_entry.upstream_url,
-                    "request_size": log_entry.request_size or 0,
-                    "status_code": log_entry.status_code,
-                    "duration_ms": duration_ms,
-                    "response_size": log_entry.response_size or 0,
-                    "error_message": log_entry.error_message,
-                    "prompt_tokens": log_entry.prompt_tokens or 0,
-                    "completion_tokens": log_entry.completion_tokens or 0,
-                    "total_tokens": log_entry.total_tokens or 0,
-                },
-            }
+            event_data = {"type": "new_request", "data": _serialize_request_log(log_entry)}
             await manager.broadcast(event_data, source_ip=log_entry.source_ip)
 
         elif event_type == "request_completed" and log_entry:
-            event_data = {
-                "type": "request_completed",
-                "data": {
-                    "id": log_entry.id,
-                    "timestamp": log_entry.timestamp.isoformat(),
-                    "source_ip": log_entry.source_ip,
-                    "user_agent": log_entry.user_agent or "Unknown",
-                    "path": log_entry.path,
-                    "method": log_entry.method,
-                    "original_model": log_entry.original_model,
-                    "mapped_model": log_entry.mapped_model,
-                    "upstream_url": log_entry.upstream_url,
-                    "request_size": log_entry.request_size or 0,
-                    "status_code": log_entry.status_code,
-                    "duration_ms": log_entry.duration_ms,
-                    "response_size": log_entry.response_size or 0,
-                    "error_message": log_entry.error_message,
-                    "prompt_tokens": log_entry.prompt_tokens or 0,
-                    "completion_tokens": log_entry.completion_tokens or 0,
-                    "total_tokens": log_entry.total_tokens or 0,
-                },
-            }
+            event_data = {"type": "request_completed", "data": _serialize_request_log(log_entry)}
             await manager.broadcast(event_data, source_ip=log_entry.source_ip)
 
         elif event_type == "dashboard_update":
             # Send updated dashboard stats
             stats = await get_log_stats()
-            event_data = {"type": "dashboard_update", "data": stats}
+            event_data = {"type": "dashboard_update", "stats": stats}
             await manager.broadcast(event_data)
 
     except Exception as e:
@@ -2604,38 +2774,27 @@ async def websocket_dashboard(websocket: WebSocket):
     try:
         # Send initial data
         try:
-            logs = await get_recent_logs(limit=100)
+            logs, parsed_query = await _get_dashboard_logs(limit=100, q=websocket.query_params.get("q"))
             stats = await get_log_stats()
 
-            # Format logs with real-time duration calculation
-            formatted_logs = []
-            for log in logs:
-                duration_ms = log.duration_ms
-                if duration_ms is None and log.status_code is None:
-                    elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
-                    duration_ms = int(elapsed_seconds * 1000)
-
-                formatted_logs.append(
-                    {
-                        "id": log.id,
-                        "timestamp": log.timestamp.isoformat(),
-                        "source_ip": log.source_ip,
-                        "method": log.method,
-                        "path": log.path,
-                        "service_type": log.service_type,
-                        "original_model": log.original_model,
-                        "mapped_model": log.mapped_model,
-                        "duration_ms": duration_ms,
-                        "status_code": log.status_code,
-                        "error_message": log.error_message,
-                        "upstream": log.upstream_url,
-                        "request_size": log.request_size,
-                    }
-                )
-
-            initial_data = {"type": "dashboard_update", "logs": formatted_logs, "stats": stats}
+            initial_data = {
+                "type": "dashboard_update",
+                "logs": [_serialize_request_log(log) for log in logs],
+                "stats": stats,
+                "filter": parsed_query.to_meta(matched_count=len(logs), limit=100),
+            }
             await manager.send_personal_message(initial_data, websocket)
 
+        except DashboardFilterError as e:
+            await manager.send_personal_message(
+                {
+                    "type": "filter_error",
+                    "error": "invalid_filter",
+                    "message": str(e),
+                    "invalid_terms": e.invalid_terms,
+                },
+                websocket,
+            )
         except Exception as e:
             logger.error(f"Failed to send initial dashboard data: {e}")
 

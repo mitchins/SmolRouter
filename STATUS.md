@@ -53,6 +53,5 @@
 
 ## Test Status
 
-- 79 tests passing, 1 expected failure
-- All major functionality verified
-- Directory reorganization did not break any tests
+- The automated unit and integration suites are active and release-gated through pytest
+- Keep this file focused on roadmap/status rather than brittle exact pass-count snapshots
