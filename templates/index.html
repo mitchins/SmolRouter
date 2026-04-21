@@ -71,6 +71,65 @@
             font-size: 1.25rem;
         }
 
+        .table-header-content {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .filter-status {
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .filter-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            background: #fff;
+            flex-wrap: wrap;
+        }
+
+        .filter-input-wrapper {
+            flex: 1;
+            min-width: 280px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background: #fff;
+        }
+
+        .filter-input-wrapper:focus-within {
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.12);
+        }
+
+        .filter-input-wrapper .material-icons {
+            color: #6c757d;
+            font-size: 1.1rem;
+        }
+
+        .filter-input {
+            width: 100%;
+            border: none;
+            outline: none;
+            padding: 0.75rem 0;
+            font-size: 0.95rem;
+            background: transparent;
+        }
+
+        .filter-help {
+            padding: 0 1.5rem 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            color: #666;
+            font-size: 0.8rem;
+        }
+
         .action-buttons {
             display: flex;
             gap: 0.5rem;
@@ -179,6 +238,56 @@
 
         .model-mapped {
             color: #333;
+            font-weight: 500;
+        }
+
+        .cell-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .cell-secondary {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .token-button {
+            padding: 0;
+            border: none;
+            background: none;
+            color: #007bff;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        .token-button:hover {
+            color: #0056b3;
+            text-decoration: underline;
+        }
+
+        .token-button.secondary {
+            color: #495057;
+            font-size: 0.8rem;
+        }
+
+        .icon-link {
+            display: inline-flex;
+            align-items: center;
+            color: #6c757d;
+            text-decoration: none;
+        }
+
+        .icon-link:hover {
+            color: #007bff;
+        }
+
+        .provider-primary {
             font-weight: 500;
         }
 
@@ -301,6 +410,18 @@
                 align-items: stretch;
             }
 
+            .filter-toolbar {
+                padding: 1rem;
+            }
+
+            .filter-input-wrapper {
+                min-width: 100%;
+            }
+
+            .filter-help {
+                padding: 0 1rem 1rem 1rem;
+            }
+
             .action-buttons {
                 justify-content: center;
             }
@@ -343,7 +464,10 @@
     <div class="container">
         <div class="table-container">
             <div class="table-header">
-                <h2>Recent Requests</h2>
+                <div class="table-header-content">
+                    <h2>Recent Requests</h2>
+                    <div class="filter-status" id="filter-status">Showing latest 100 requests</div>
+                </div>
                 <div class="action-buttons">
                     <button class="action-btn secondary" onclick="refreshData()">
                         <span class="material-icons" style="font-size: 1rem;">refresh</span>
@@ -351,6 +475,25 @@
                     </button>
                     <span class="auto-refresh-status" id="connection-status">🔴 Connecting...</span>
                 </div>
+            </div>
+
+            <form class="filter-toolbar" id="filter-form">
+                <div class="filter-input-wrapper">
+                    <span class="material-icons">filter_alt</span>
+                    <input
+                        class="filter-input"
+                        id="dashboard-query"
+                        type="search"
+                        placeholder="host:192.168.1.14 provider:google-gen-ai model:gemma3-12b"
+                        autocomplete="off"
+                    >
+                </div>
+                <button class="action-btn" type="submit">Apply</button>
+                <button class="action-btn secondary" type="button" id="clear-filter-btn">Clear</button>
+            </form>
+
+            <div class="filter-help">
+                Space-separated clauses are ANDed. Supported fields: <strong>host</strong>, <strong>provider</strong>, and <strong>model</strong>. Bare words also search across the visible request fields.
             </div>
 
             <div id="error-container"></div>
@@ -361,7 +504,7 @@
                         <th></th>
                         <th>Time</th>
                         <th>Source</th>
-                        <th>Service</th>
+                        <th>Provider</th>
                         <th>Path</th>
                         <th>Model</th>
                         <th>Size</th>
@@ -385,213 +528,205 @@
     <script>
         let websocket = null;
         let reconnectAttempts = 0;
-        const MAX_RECONNECT_ATTEMPTS = 5;
-        const RECONNECT_INTERVAL = 3000; // 3 seconds
+        let currentQuery = '';
+        let scheduledRefreshHandle = null;
 
-        // Format timestamp for display
-        function formatTimestamp(isoString) {
-            const date = new Date(isoString);
-            return date.toLocaleTimeString();
+        const DEFAULT_LIMIT = 100;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        const RECONNECT_INTERVAL = 3000;
+
+        function getUrlFilterQuery() {
+            return (new URLSearchParams(globalThis.location.search).get('q') || '').trim();
         }
 
-        // Format file size
+        function syncUrlFilterQuery(query, historyMode = 'replace') {
+            if (historyMode === 'none') {
+                return;
+            }
+
+            const normalizedQuery = (query || '').trim();
+            const url = new URL(globalThis.location.href);
+            const currentUrlQuery = (url.searchParams.get('q') || '').trim();
+
+            if (normalizedQuery) {
+                url.searchParams.set('q', normalizedQuery);
+            } else {
+                url.searchParams.delete('q');
+            }
+
+            const method = historyMode === 'push' && currentUrlQuery !== normalizedQuery ? 'pushState' : 'replaceState';
+            globalThis.history[method]({}, '', `${url.pathname}${url.search}${url.hash}`);
+        }
+
+        function buildDashboardApiUrl(query = currentQuery) {
+            const params = new URLSearchParams({ limit: String(DEFAULT_LIMIT) });
+            if (query) {
+                params.set('q', query);
+            }
+            return `/api/dashboard?${params.toString()}`;
+        }
+
+        function buildWebSocketUrl() {
+            const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const params = new URLSearchParams();
+            if (currentQuery) {
+                params.set('q', currentQuery);
+            }
+            const suffix = params.toString() ? `?${params.toString()}` : '';
+            return `${protocol}//${globalThis.location.host}/ws/dashboard${suffix}`;
+        }
+
+        function formatTimestamp(isoString) {
+            if (!isoString) return '-';
+            return new Date(isoString).toLocaleTimeString();
+        }
+
         function formatSize(bytes) {
             if (!bytes) return '-';
             return (bytes / 1024).toFixed(1) + ' KB';
         }
 
-        // Format duration
         function formatDuration(ms) {
             if (ms === null || ms === undefined || ms === 0) return '-';
-            if (ms < 0) return '-'; // Handle negative values from pending requests
-            return ms + 'ms';
+            if (ms < 0) return '-';
+            return `${ms}ms`;
         }
 
-        // Format status code
         function formatStatus(statusCode) {
             if (!statusCode) {
                 return '<span class="status" style="background: #f0f0f0; color: #666;">PENDING</span>';
             }
-            const category = Math.floor(statusCode / 100) * 100;
-            return `<span class="status status-${category}">${statusCode}</span>`;
+            const category = Math.floor(Number(statusCode) / 100) * 100;
+            return `<span class="status status-${category}">${escapeHtml(String(statusCode))}</span>`;
         }
 
-        // Format model info
-        function formatModel(originalModel, mappedModel) {
-            if (mappedModel && mappedModel !== originalModel) {
-                return `
-                    <div class="model-info">
-                        <div class="model-original">${originalModel || 'N/A'}</div>
-                        <div class="model-mapped">→ ${mappedModel}</div>
-                    </div>
-                `;
-            } else {
-                return `
-                    <div class="model-info">
-                        <div class="model-mapped">${originalModel || 'N/A'}</div>
-                    </div>
-                `;
-            }
-        }
-
-        // Format JSON with syntax highlighting
-        function formatJSON(jsonString, maxLines = 20) {
-            if (!jsonString) return '<span style="color: #666; font-style: italic;">No data</span>';
-
-            try {
-                const parsed = JSON.parse(jsonString);
-                const formatted = JSON.stringify(parsed, null, 2);
-                const lines = formatted.split('\n');
-
-                // Truncate if too long
-                const truncated = lines.length > maxLines;
-                const displayLines = truncated ? lines.slice(0, maxLines) : lines;
-                const truncatedText = truncated ? `\n... (${lines.length - maxLines} more lines)` : '';
-
-                return highlightJSON(displayLines.join('\n') + truncatedText);
-            } catch (e) {
-                // If not valid JSON, show as plain text
-                return `<span style="color: #666;">${escapeHtml(jsonString)}</span>`;
-            }
-        }
-
-        // Add JSON syntax highlighting
-        function highlightJSON(json) {
-            return json
-                .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")\s*:/g, '<span class="json-key">$1</span>:')
-                .replace(/: ("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")/g, ': <span class="json-string">$1</span>')
-                .replace(/: (-?\d+\.?\d*)/g, ': <span class="json-number">$1</span>')
-                .replace(/: (true|false)/g, ': <span class="json-boolean">$1</span>')
-                .replace(/: (null)/g, ': <span class="json-null">$1</span>');
-        }
-
-        // Escape HTML
         function escapeHtml(text) {
             const div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = text ?? '';
             return div.innerHTML;
         }
 
-        // Create JSON display component
-        function createJSONDisplay(title, content, id) {
-            if (!content) return '';
+        function escapeClassName(text) {
+            return String(text || 'unknown').toLowerCase().replaceAll(/[^a-z0-9_-]+/g, '-');
+        }
 
-            const displayId = `json-${id}-${title.toLowerCase().replace(/\s+/g, '-')}`;
+        function renderFilterButton(field, value, label, extraClass = '') {
+            if (!value) {
+                return escapeHtml(label || '-');
+            }
+
+            const classSuffix = extraClass ? ` ${extraClass}` : '';
             return `
-                <div class="json-container">
-                    <div class="json-header">
-                        <span>${title}</span>
-                        <button class="json-toggle" onclick="toggleJSON('${displayId}')">Hide</button>
-                    </div>
-                    <div class="json-content" id="${displayId}">
-                        ${formatJSON(content)}
+                <button
+                    type="button"
+                    class="token-button${classSuffix}"
+                    data-filter-field="${escapeHtml(field)}"
+                    data-filter-value="${encodeURIComponent(value)}"
+                >
+                    ${escapeHtml(label || value)}
+                </button>
+            `;
+        }
+
+        function renderSourceCell(log) {
+            if (!log.source_ip) {
+                return '-';
+            }
+
+            const sourceIp = String(log.source_ip);
+            return `
+                <div class="cell-stack">
+                    ${renderFilterButton('host', sourceIp, sourceIp)}
+                    <div class="cell-secondary">
+                        <a class="icon-link client-dashboard-link" href="/clients/${encodeURIComponent(sourceIp)}" title="Open client dashboard">
+                            <span class="material-icons" style="font-size: 0.95rem;">open_in_new</span>
+                        </a>
                     </div>
                 </div>
             `;
         }
 
-        // Toggle JSON visibility
-        function toggleJSON(elementId) {
-            const element = document.getElementById(elementId);
-            const button = element.parentElement.querySelector('.json-toggle');
-
-            if (element.classList.contains('collapsed')) {
-                element.classList.remove('collapsed');
-                button.textContent = 'Hide';
-            } else {
-                element.classList.add('collapsed');
-                button.textContent = 'Show';
-            }
+        function renderProviderCell(log) {
+            const providerLabel = log.provider_id || log.service_type || 'unknown';
+            const serviceType = log.service_type || 'unknown';
+            return `
+                <div class="cell-stack">
+                    <div class="provider-primary">${renderFilterButton('provider', providerLabel, providerLabel)}</div>
+                    <div class="cell-secondary">
+                        <span class="service-badge service-${escapeClassName(serviceType)}">${escapeHtml(serviceType)}</span>
+                    </div>
+                </div>
+            `;
         }
 
-        // Toggle row expansion
-        function toggleRowExpansion(requestId) {
-            const detailsRow = document.getElementById(`details-${requestId}`);
-            const expandIcon = document.querySelector(`[onclick="toggleRowExpansion('${requestId}')"] .expand-icon`);
-
-            if (detailsRow.style.display === 'none') {
-                detailsRow.style.display = '';
-                expandIcon.classList.add('expanded');
-                // Load request details if not already loaded
-                loadRequestDetails(requestId);
-            } else {
-                detailsRow.style.display = 'none';
-                expandIcon.classList.remove('expanded');
+        function renderModelValue(value, className) {
+            if (!value) {
+                return '<span class="cell-secondary">N/A</span>';
             }
+            return renderFilterButton('model', value, value, className);
         }
 
-        // Load detailed request/response data
-        async function loadRequestDetails(requestId) {
-            const detailsCell = document.getElementById(`details-content-${requestId}`);
-            if (detailsCell.dataset.loaded === 'true') return; // Already loaded
+        function formatModel(originalModel, mappedModel) {
+            const resolvedOriginal = originalModel || mappedModel;
+            const resolvedMapped = mappedModel || originalModel;
 
-            try {
-                detailsCell.innerHTML = '<div style="text-align: center; padding: 1rem; color: #666;">Loading details...</div>';
-
-                const response = await fetch(`/api/requests/${requestId}`);
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-
-                let detailsHTML = '';
-
-                // Request details
-                if (data.request_body) {
-                    detailsHTML += createJSONDisplay('Request Body', data.request_body, requestId);
-                }
-
-                // Response details
-                if (data.response_body) {
-                    detailsHTML += createJSONDisplay('Response Body', data.response_body, requestId);
-                }
-
-                // Additional metadata
-                const metadata = {
-                    upstream_url: data.upstream_url,
-                    error_message: data.error_message
-                };
-
-                if (Object.values(metadata).some(v => v)) {
-                    detailsHTML += createJSONDisplay('Metadata', JSON.stringify(metadata, null, 2), requestId);
-                }
-
-                if (!detailsHTML) {
-                    detailsHTML = '<div style="text-align: center; padding: 1rem; color: #666; font-style: italic;">No detailed data available</div>';
-                }
-
-                detailsCell.innerHTML = detailsHTML;
-                detailsCell.dataset.loaded = 'true';
-
-            } catch (error) {
-                console.error('Failed to load request details:', error);
-                detailsCell.innerHTML = `
-                    <div style="text-align: center; padding: 1rem; color: #721c24; background: #f8d7da; border-radius: 4px;">
-                        Failed to load details: ${error.message}
+            if (resolvedMapped && resolvedOriginal && resolvedMapped !== resolvedOriginal) {
+                return `
+                    <div class="model-info">
+                        <div class="model-original">${renderModelValue(resolvedOriginal, 'secondary')}</div>
+                        <div class="model-mapped">→ ${renderModelValue(resolvedMapped)}</div>
                     </div>
                 `;
             }
+
+            return `
+                <div class="model-info">
+                    <div class="model-mapped">${renderModelValue(resolvedOriginal || resolvedMapped)}</div>
+                </div>
+            `;
         }
 
-        // Update stats display
+        function formatDuplicate(item) {
+            const count = item && (item.duplicate_count || 0);
+            const isDuplicate = item && (item.is_duplicate || count > 0);
+            if (!isDuplicate) return '';
+            let title = 'Duplicate';
+            if (count > 0) {
+                const suffix = count === 1 ? '' : 's';
+                title = `${count} other instance${suffix}`;
+            }
+            return `<span class="material-icons" style="font-size: 1rem; color: #c62828;" title="${escapeHtml(title)}">content_copy</span>`;
+        }
+
         function updateStats(stats) {
+            const processedRequests = stats.completed_requests ?? stats.successful_requests ?? ((stats.openai_requests || 0) + (stats.ollama_requests || 0));
+            const recentRequests = stats.recent_requests ?? stats.total_requests ?? 0;
+
             document.getElementById('total-requests').textContent = stats.total_requests || 0;
-            document.getElementById('successful-requests').textContent = (stats.openai_requests || 0) + (stats.ollama_requests || 0);
-            document.getElementById('requests-24h').textContent = stats.recent_requests || 0;
+            document.getElementById('successful-requests').textContent = processedRequests || 0;
+            document.getElementById('requests-24h').textContent = recentRequests || 0;
             document.getElementById('inflight-requests').textContent = stats.inflight_requests || 0;
         }
 
-        // Update requests table
+        function updateFilterStatus(filterMeta) {
+            const status = document.getElementById('filter-status');
+            if (filterMeta && filterMeta.active) {
+                status.textContent = `Showing ${filterMeta.matched_count || 0} matching requests for ${filterMeta.query}`;
+                return;
+            }
+
+            status.textContent = `Showing latest ${DEFAULT_LIMIT} requests`;
+        }
+
         function updateRequestsTable(logs) {
             const tbody = document.getElementById('requests-tbody');
 
             if (!logs || logs.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="9" class="no-data">
+                        <td colspan="10" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
-                            No requests logged yet
+                            No matching requests found
                         </td>
                     </tr>
                 `;
@@ -599,18 +734,14 @@
             }
 
             tbody.innerHTML = logs.map(log => `
-                <tr class="expandable-row" onclick="window.location.href='/request/${log.id}'" style="cursor: pointer;">
+                <tr class="expandable-row" onclick="window.location.href='/request/${encodeURIComponent(log.id || '')}'" style="cursor: pointer;">
                     <td>
                         <span class="material-icons expand-icon">chevron_right</span>
                     </td>
                     <td class="timestamp">${formatTimestamp(log.timestamp)}</td>
-                    <td><a href="/clients/${log.source_ip}" style="color: #007bff; text-decoration: none;">${log.source_ip || '-'}</a></td>
-                    <td>
-                        <span class="service-badge service-${log.service_type}">
-                            ${log.service_type || 'unknown'}
-                        </span>
-                    </td>
-                    <td>${log.path || '-'}</td>
+                    <td>${renderSourceCell(log)}</td>
+                    <td>${renderProviderCell(log)}</td>
+                    <td>${escapeHtml(log.path || '-')}</td>
                     <td>${formatModel(log.original_model, log.mapped_model)}</td>
                     <td>${formatSize(log.request_size)}</td>
                     <td class="duration">${formatDuration(log.duration_ms)}</td>
@@ -620,59 +751,80 @@
             `).join('');
         }
 
-        // Show error message
         function showError(message) {
             const errorContainer = document.getElementById('error-container');
             errorContainer.innerHTML = `
                 <div class="error-message">
-                    <strong>Error:</strong> ${message}
+                    <strong>Error:</strong> ${escapeHtml(message)}
                 </div>
             `;
         }
 
-        // Clear error message
         function clearError() {
             document.getElementById('error-container').innerHTML = '';
         }
 
-        // Fetch and update dashboard data
-        async function refreshData() {
+        async function refreshData(query = currentQuery, historyMode = 'replace') {
             const table = document.getElementById('requests-table');
+            const normalizedQuery = (query || '').trim();
             table.classList.add('loading');
             clearError();
 
             try {
-                const response = await fetch('/api/dashboard?limit=100');
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                const response = await fetch(buildDashboardApiUrl(normalizedQuery));
+                let payload = null;
+
+                try {
+                    payload = await response.json();
+                } catch {
+                    payload = null;
                 }
 
-                const data = await response.json();
-                updateStats(data.stats);
-                updateRequestsTable(data.logs);
+                if (!response.ok) {
+                    const message = payload?.message || payload?.detail || payload?.error || `HTTP ${response.status}: ${response.statusText}`;
+                    throw new Error(message);
+                }
 
-                // Update last refresh time
-                const now = new Date().toLocaleTimeString();
-                console.log(`Dashboard refreshed at ${now}`);
+                currentQuery = normalizedQuery;
+                document.getElementById('dashboard-query').value = currentQuery;
+                syncUrlFilterQuery(currentQuery, historyMode);
+                updateStats(payload.stats || {});
+                updateRequestsTable(payload.logs || []);
+                updateFilterStatus(payload.filter);
 
+                console.log(`Dashboard refreshed at ${new Date().toLocaleTimeString()}`);
+                return true;
             } catch (error) {
                 console.error('Failed to refresh dashboard:', error);
                 showError(`Failed to refresh data: ${error.message}`);
+                return false;
             } finally {
                 table.classList.remove('loading');
             }
         }
 
-        // WebSocket connection management
+        function scheduleRefreshData() {
+            if (scheduledRefreshHandle !== null) {
+                return;
+            }
+
+            scheduledRefreshHandle = globalThis.setTimeout(async () => {
+                scheduledRefreshHandle = null;
+                await refreshData(currentQuery, 'none');
+            }, 200);
+        }
+
+        function updateConnectionStatus(indicator, tooltip) {
+            const status = document.getElementById('connection-status');
+            status.textContent = indicator;
+            status.title = tooltip;
+        }
+
         function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/dashboard`;
-
             try {
-                websocket = new WebSocket(wsUrl);
+                websocket = new WebSocket(buildWebSocketUrl());
 
-                websocket.onopen = function(event) {
-                    console.log('WebSocket connected');
+                websocket.onopen = function() {
                     reconnectAttempts = 0;
                     updateConnectionStatus('🟢 Live', 'Connected - Real-time updates');
                 };
@@ -686,11 +838,9 @@
                     }
                 };
 
-                websocket.onclose = function(event) {
-                    console.log('WebSocket closed');
+                websocket.onclose = function() {
                     updateConnectionStatus('🔴 Disconnected', 'Connection lost');
 
-                    // Attempt to reconnect
                     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                         reconnectAttempts++;
                         updateConnectionStatus('🟡 Reconnecting...', `Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
@@ -705,139 +855,109 @@
                     console.error('WebSocket error:', error);
                     updateConnectionStatus('🔴 Error', 'Connection error');
                 };
-
             } catch (error) {
                 console.error('Failed to create WebSocket connection:', error);
                 updateConnectionStatus('🔴 Failed', 'Cannot connect');
             }
         }
 
-        function updateConnectionStatus(indicator, tooltip) {
-            const status = document.getElementById('connection-status');
-            status.textContent = indicator;
-            status.title = tooltip;
-        }
-
         function handleWebSocketMessage(data) {
-            console.log('WebSocket message received:', data.type, data);
             switch (data.type) {
                 case 'dashboard_update':
-                    updateStats(data.stats);
-                    updateRequestsTable(data.logs);
+                    if (data.stats) {
+                        updateStats(data.stats);
+                    }
+                    if (Array.isArray(data.logs)) {
+                        updateRequestsTable(data.logs);
+                    }
+                    if (data.filter) {
+                        updateFilterStatus(data.filter);
+                    }
                     break;
                 case 'new_request':
-                    console.log('Adding new request to table:', data.data);
-                    // Add new request to top of table
-                    addNewRequestToTable(data.data);
-                    break;
                 case 'request_completed':
-                    console.log('Updating completed request:', data.data);
-                    // Update existing request in table
-                    updateRequestInTable(data.data);
+                    scheduleRefreshData();
                     break;
                 case 'stats_update':
-                    updateStats(data.stats);
+                    if (data.stats) {
+                        updateStats(data.stats);
+                    }
+                    break;
+                case 'filter_error':
+                    showError(data.message || 'Invalid filter query');
                     break;
                 default:
                     console.log('Unknown WebSocket message type:', data.type);
             }
         }
 
-        // Add helper functions for live updates
-        function addNewRequestToTable(request) {
-            const tbody = document.getElementById('requests-tbody');
-            const existingRows = tbody.querySelectorAll('tr');
-
-            // Remove "no data" row if present
-            if (existingRows.length === 1 && existingRows[0].querySelector('.no-data')) {
-                tbody.innerHTML = '';
+        function quoteFilterValue(value) {
+            if (!/\s/.test(value)) {
+                return value;
             }
 
-            // Create new row
-            const newRow = document.createElement('tr');
-            newRow.className = 'expandable-row';
-            newRow.onclick = () => window.location.href = `/request/${request.id}`;
-            newRow.innerHTML = `
-                <td>
-                    <span class="material-icons expand-icon">chevron_right</span>
-                </td>
-                <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                <td><a href="/clients/${request.source_ip}" style="color: #007bff; text-decoration: none;">${request.source_ip || '-'}</a></td>
-                <td>
-                    <span class="service-badge service-${request.service_type}">
-                        ${request.service_type || 'unknown'}
-                    </span>
-                </td>
-                <td>${request.path || '-'}</td>
-                <td>${formatModel(request.original_model, request.mapped_model)}</td>
-                <td>${formatSize(request.request_size)}</td>
-                <td class="duration">${formatDuration(request.duration_ms)}</td>
-                <td>${formatStatus(request.status_code)}</td>
-                <td>${formatDuplicate(request)}</td>
-            `;
+            return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+        }
 
-            // Add row to top of table
-            tbody.insertBefore(newRow, tbody.firstChild);
+        function upsertFilterClause(query, field, value) {
+            const clausePattern = new RegExp(`(^|\\s)${field}:(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|\\S+)`, 'gi');
+            const cleanedQuery = (query || '').replace(clausePattern, ' ').replace(/\s+/g, ' ').trim();
+            const nextClause = `${field}:${quoteFilterValue(value)}`;
+            return [cleanedQuery, nextClause].filter(Boolean).join(' ').trim();
+        }
 
-            // Remove excess rows (keep last 100 requests)
-            while (tbody.children.length > 100) {
-                tbody.removeChild(tbody.lastChild);
+        async function applyFieldFilter(field, value) {
+            const input = document.getElementById('dashboard-query');
+            const nextQuery = upsertFilterClause(currentQuery || input.value.trim(), field, value);
+            input.value = nextQuery;
+            await refreshData(nextQuery, 'push');
+        }
+
+        async function handleFilterSubmit(event) {
+            event.preventDefault();
+            const nextQuery = document.getElementById('dashboard-query').value.trim();
+            await refreshData(nextQuery, 'push');
+        }
+
+        async function clearFilter() {
+            document.getElementById('dashboard-query').value = '';
+            await refreshData('', 'push');
+        }
+
+        function handleTableClick(event) {
+            const filterButton = event.target.closest('[data-filter-field]');
+            if (filterButton) {
+                event.preventDefault();
+                event.stopPropagation();
+                const field = filterButton.dataset.filterField;
+                const value = decodeURIComponent(filterButton.dataset.filterValue || '');
+                applyFieldFilter(field, value);
+                return;
             }
-        }
 
-        function formatDuplicate(item) {
-            const count = item && (item.duplicate_count || 0);
-            const isDup = item && (item.is_duplicate || count > 0);
-            if (!isDup) return '';
-            const title = count > 0 ? `${count} other instance${count === 1 ? '' : 's'}` : 'Duplicate';
-            return `<span class="material-icons" style="font-size: 1rem; color: #c62828;" title="${title}">content_copy</span>`;
-        }
-
-        function updateRequestInTable(request) {
-            const tbody = document.getElementById('requests-tbody');
-            const rows = tbody.querySelectorAll('tr.expandable-row');
-
-            for (const row of rows) {
-                if (row.onclick && row.onclick.toString().includes(request.id)) {
-                    // Update the row
-                    row.innerHTML = `
-                        <td>
-                            <span class="material-icons expand-icon">chevron_right</span>
-                        </td>
-                        <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                        <td><a href="/clients/${request.source_ip}" style="color: #007bff; text-decoration: none;">${request.source_ip || '-'}</a></td>
-                        <td>
-                            <span class="service-badge service-${request.service_type}">
-                                ${request.service_type || 'unknown'}
-                            </span>
-                        </td>
-                        <td>${request.path || '-'}</td>
-                        <td>${formatModel(request.original_model, request.mapped_model)}</td>
-                        <td>${formatSize(request.request_size)}</td>
-                        <td class="duration">${formatDuration(request.duration_ms)}</td>
-                        <td>${formatStatus(request.status_code)}</td>
-                        <td>${formatDuplicate(request)}</td>
-                    `;
-
-                    // Restore click handler
-                    row.onclick = () => window.location.href = `/request/${request.id}`;
-                    break;
-                }
+            const clientLink = event.target.closest('.client-dashboard-link');
+            if (clientLink) {
+                event.stopPropagation();
             }
         }
 
-        // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
-            console.log('Real-time dashboard loaded');
+            currentQuery = getUrlFilterQuery();
+            document.getElementById('dashboard-query').value = currentQuery;
+            document.getElementById('filter-form').addEventListener('submit', handleFilterSubmit);
+            document.getElementById('clear-filter-btn').addEventListener('click', clearFilter);
+            document.getElementById('requests-tbody').addEventListener('click', handleTableClick, true);
 
-            // Initial data load
-            refreshData();
-
-            // Connect WebSocket for real-time updates
+            refreshData(currentQuery, 'replace');
             connectWebSocket();
         });
 
-        // Cleanup on page unload
+        window.addEventListener('popstate', function() {
+            const queryFromUrl = getUrlFilterQuery();
+            document.getElementById('dashboard-query').value = queryFromUrl;
+            refreshData(queryFromUrl, 'none');
+        });
+
         window.addEventListener('beforeunload', function() {
             if (websocket) {
                 websocket.close();

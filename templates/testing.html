@@ -343,14 +343,14 @@
 
                 data.models.forEach(model => {
                     const option = document.createElement('option');
-                    option.value = model.name;
-                    option.textContent = `${model.display_name || model.name} (${model.provider})`;
+                    option.value = model.request_model || model.display_name || model.name;
+                    option.textContent = model.display_name || `${model.name} (${model.provider})`;
                     select.appendChild(option);
                 });
 
                 // Pre-select first model if available
                 if (data.models.length > 0) {
-                    select.value = data.models[0].name;
+                    select.value = data.models[0].request_model || data.models[0].display_name || data.models[0].name;
                     updateModelStatus();
                 }
             } catch (error) {
@@ -365,7 +365,7 @@
             const status = document.getElementById('model-status');
 
             if (select.value) {
-                const model = availableModels.find(m => m.name === select.value);
+                const model = availableModels.find(m => (m.request_model || m.display_name || m.name) === select.value);
                 status.textContent = `Model: ${model?.display_name || select.value}`;
             } else {
                 status.textContent = 'No model selected';

@@ -9,9 +9,10 @@ import logging
 import json
 import asyncio
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 import pytz
 import httpx
 
@@ -82,6 +83,44 @@ class ApiKeyModelStats:
         self.error_count = 0
         self.quota_exhausted_at = None  # Clear exhaustion marker
         logger.info(f"Reset daily stats for API key {self.api_key[:8]}...")
+
+
+@dataclass
+class ProxyHealthStatus:
+    """Runtime health state for a configured proxy endpoint."""
+
+    url: str
+    status: str = "unknown"
+    last_checked_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    last_failure_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    failure_count: int = 0
+    success_count: int = 0
+    unhealthy_until: Optional[datetime] = None
+
+
+class GoogleGenAIRequestError(RuntimeError):
+    """Request-scoped Google GenAI error with provider metadata attached."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key_suffix: Optional[str] = None,
+        api_key_index: Optional[int] = None,
+        api_key_total: Optional[int] = None,
+        proxy_used: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.provider_id = provider_id
+        self.model_name = model_name
+        self.api_key_suffix = api_key_suffix
+        self.api_key_index = api_key_index
+        self.api_key_total = api_key_total
+        self.proxy_used = proxy_used
 
 
 @dataclass
@@ -160,6 +199,9 @@ class GoogleGenAIProvider(IModelProvider):
 
     # No mappings - let Google handle their own model aliasing
     MODEL_MAPPINGS = {}
+    PROXY_HEALTH_CHECK_INTERVAL_SECONDS = 30
+    PROXY_FAILURE_COOLDOWN_SECONDS = 45
+    PROXY_PROBE_TIMEOUT_SECONDS = 2.0
 
     def __init__(self, config: GoogleGenAIConfig):
         if not isinstance(config, GoogleGenAIConfig):
@@ -189,6 +231,10 @@ class GoogleGenAIProvider(IModelProvider):
 
         # Proxy pool round-robin counter (thread-safe via atomicity of +=)
         self._proxy_pool_index = 0
+        self._proxy_health: Dict[str, ProxyHealthStatus] = {}
+        self._proxy_health_task: Optional[asyncio.Task] = None
+        self._proxy_probe_tasks: Dict[str, asyncio.Task] = {}
+        self._ensure_proxy_health_entries()
 
         logger.info(f"Initialized GoogleGenAI provider with {len(self.config.api_keys)} API keys")
         logger.info(f"Rate limiting: {'enabled' if self.config.rate_limiting_enabled else 'disabled'}")
@@ -201,33 +247,402 @@ class GoogleGenAIProvider(IModelProvider):
         else:
             logger.info("Proxy pool: disabled")
 
-    def _get_next_proxy_from_pool(self) -> Optional["ProxyConfig"]:
+    def _utc_now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _proxy_config_to_url(self, proxy_config: Optional[ProxyConfig]) -> Optional[str]:
+        if proxy_config is None:
+            return None
+        if hasattr(proxy_config, "to_httpx_proxy"):
+            return proxy_config.to_httpx_proxy()
+        return str(proxy_config)
+
+    def _configured_proxy_urls(self) -> List[str]:
+        proxy_urls: List[str] = []
+        seen_urls = set()
+
+        def add_url(proxy_config: Optional[ProxyConfig]):
+            proxy_url = self._proxy_config_to_url(proxy_config)
+            if proxy_url and proxy_url not in seen_urls:
+                seen_urls.add(proxy_url)
+                proxy_urls.append(proxy_url)
+
+        add_url(self.config.proxy_config)
+
+        for proxy_config in self.config.per_model_proxy.values():
+            add_url(proxy_config)
+
+        for proxy_config in self.config.proxy_pool or []:
+            add_url(proxy_config)
+
+        return proxy_urls
+
+    def _ensure_proxy_health_entries(self):
+        for proxy_url in self._configured_proxy_urls():
+            self._proxy_health.setdefault(proxy_url, ProxyHealthStatus(url=proxy_url))
+
+    def _mask_proxy_url(self, proxy_url: Optional[str]) -> Optional[str]:
+        if not proxy_url:
+            return None
+
+        parsed = urlparse(proxy_url)
+        if not parsed.scheme or not parsed.hostname:
+            return proxy_url
+
+        netloc = parsed.hostname
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        return parsed._replace(netloc=netloc).geturl()
+
+    def _proxy_probe_due(self, proxy_url: str) -> bool:
+        status = self._proxy_health.get(proxy_url)
+        if status is None or status.last_checked_at is None:
+            return True
+
+        age_seconds = (self._utc_now() - status.last_checked_at).total_seconds()
+        return age_seconds >= self.PROXY_HEALTH_CHECK_INTERVAL_SECONDS
+
+    def _proxy_available_for_use(self, proxy_url: str) -> bool:
+        status = self._proxy_health.get(proxy_url)
+        if status is None or status.status != "unhealthy":
+            return True
+
+        if status.unhealthy_until is None:
+            return False
+
+        return status.unhealthy_until <= self._utc_now()
+
+    def _mark_proxy_health(self, proxy_url: str, success: bool, error: Optional[str] = None):
+        self._ensure_proxy_health_entries()
+        health = self._proxy_health.setdefault(proxy_url, ProxyHealthStatus(url=proxy_url))
+        now = self._utc_now()
+        health.last_checked_at = now
+
+        if success:
+            health.status = "healthy"
+            health.last_success_at = now
+            health.success_count += 1
+            health.last_error = None
+            health.unhealthy_until = None
+            return
+
+        health.status = "unhealthy"
+        health.last_failure_at = now
+        health.failure_count += 1
+        health.last_error = error
+        health.unhealthy_until = now + timedelta(seconds=self.PROXY_FAILURE_COOLDOWN_SECONDS)
+
+    def _proxy_health_snapshot(self, proxy_url: Optional[str]) -> Dict[str, Any]:
+        if not proxy_url:
+            return {
+                "status": "direct",
+                "last_checked_at": None,
+                "last_success_at": None,
+                "last_failure_at": None,
+                "last_error": None,
+                "failure_count": 0,
+                "success_count": 0,
+                "cooldown_remaining_seconds": 0,
+            }
+
+        self._ensure_proxy_health_entries()
+        health = self._proxy_health.get(proxy_url)
+        if health is None:
+            return {
+                "status": "unknown",
+                "last_checked_at": None,
+                "last_success_at": None,
+                "last_failure_at": None,
+                "last_error": None,
+                "failure_count": 0,
+                "success_count": 0,
+                "cooldown_remaining_seconds": 0,
+            }
+
+        cooldown_remaining_seconds = 0
+        if health.unhealthy_until and health.unhealthy_until > self._utc_now():
+            cooldown_remaining_seconds = max(int((health.unhealthy_until - self._utc_now()).total_seconds()), 0)
+
+        return {
+            "status": health.status,
+            "last_checked_at": health.last_checked_at.isoformat() if health.last_checked_at else None,
+            "last_success_at": health.last_success_at.isoformat() if health.last_success_at else None,
+            "last_failure_at": health.last_failure_at.isoformat() if health.last_failure_at else None,
+            "last_error": health.last_error,
+            "failure_count": health.failure_count,
+            "success_count": health.success_count,
+            "cooldown_remaining_seconds": cooldown_remaining_seconds,
+        }
+
+    async def _probe_proxy_url(self, proxy_url: str):
+        parsed = urlparse(proxy_url)
+        host = parsed.hostname
+        if not host:
+            self._mark_proxy_health(proxy_url, success=False, error="Invalid proxy URL")
+            return
+
+        if parsed.port:
+            port = parsed.port
+        elif parsed.scheme in {"https", "socks5", "socks5h", "socks5s"}:
+            port = 443
+        else:
+            port = 80
+
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=self.PROXY_PROBE_TIMEOUT_SECONDS,
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            self._mark_proxy_health(proxy_url, success=True)
+        except Exception as exc:
+            self._mark_proxy_health(proxy_url, success=False, error=f"{type(exc).__name__}: {exc}")
+
+    def _schedule_proxy_probe(self, proxy_url: Optional[str], force: bool = False):
+        if not proxy_url:
+            return
+
+        self._ensure_proxy_health_entries()
+
+        if not force and not self._proxy_probe_due(proxy_url):
+            return
+
+        existing_task = self._proxy_probe_tasks.get(proxy_url)
+        if existing_task and not existing_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        task = loop.create_task(self._probe_proxy_url(proxy_url))
+        self._proxy_probe_tasks[proxy_url] = task
+
+        def _cleanup_probe(done_task: asyncio.Task, url: str = proxy_url):
+            if self._proxy_probe_tasks.get(url) is done_task:
+                self._proxy_probe_tasks.pop(url, None)
+            if done_task.cancelled():
+                return
+            try:
+                done_task.result()
+            except Exception as exc:
+                logger.debug(f"Proxy health probe failed for {self._mask_proxy_url(url)}: {exc}")
+
+        task.add_done_callback(_cleanup_probe)
+
+    async def refresh_proxy_health(self, force: bool = False):
+        self._ensure_proxy_health_entries()
+        probes = []
+        for proxy_url in self._configured_proxy_urls():
+            if force or self._proxy_probe_due(proxy_url):
+                probes.append(self._probe_proxy_url(proxy_url))
+
+        if probes:
+            await asyncio.gather(*probes, return_exceptions=True)
+
+    async def _proxy_health_monitor_loop(self):
+        try:
+            while True:
+                await self.refresh_proxy_health(force=False)
+                await asyncio.sleep(self.PROXY_HEALTH_CHECK_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Proxy health monitor stopped unexpectedly for {self.config.name}: {exc}")
+
+    def start_proxy_health_monitor(self):
+        if not self._configured_proxy_urls():
+            return
+
+        if self._proxy_health_task and not self._proxy_health_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        self._proxy_health_task = loop.create_task(self._proxy_health_monitor_loop())
+        logger.info(f"Started proxy health monitor for provider {self.config.name}")
+
+    async def stop_proxy_health_monitor(self):
+        tasks = []
+        if self._proxy_health_task is not None:
+            tasks.append(self._proxy_health_task)
+            self._proxy_health_task = None
+
+        if self._proxy_probe_tasks:
+            tasks.extend(self._proxy_probe_tasks.values())
+            self._proxy_probe_tasks = {}
+
+        for task in tasks:
+            if task and not task.done():
+                task.cancel()
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _build_proxy_entry(
+        self,
+        label: str,
+        proxy_config: Optional[ProxyConfig],
+        *,
+        kind: str,
+        model_name: Optional[str] = None,
+        pool_index: Optional[int] = None,
+        selected_next: bool = False,
+    ) -> Dict[str, Any]:
+        proxy_url = self._proxy_config_to_url(proxy_config)
+        health = self._proxy_health_snapshot(proxy_url)
+        return {
+            "label": label,
+            "kind": kind,
+            "model_name": model_name,
+            "pool_index": pool_index,
+            "selected_next": selected_next,
+            "url": self._mask_proxy_url(proxy_url) if proxy_url else "direct",
+            **health,
+        }
+
+    def get_proxy_diagnostics(self) -> Dict[str, Any]:
+        self._ensure_proxy_health_entries()
+
+        default_proxy = None
+        if self.config.proxy_config is not None:
+            default_proxy = self._build_proxy_entry("Default", self.config.proxy_config, kind="default")
+
+        model_overrides = []
+        for model_name, proxy_config in sorted(self.config.per_model_proxy.items()):
+            if proxy_config is None:
+                continue
+            model_overrides.append(
+                self._build_proxy_entry(model_name, proxy_config, kind="override", model_name=model_name)
+            )
+
+        pool_entries = []
+        for idx, proxy_config in enumerate(self.config.proxy_pool or []):
+            if proxy_config is None:
+                pool_entries.append(
+                    {
+                        "label": f"Pool #{idx + 1}",
+                        "kind": "direct",
+                        "model_name": None,
+                        "pool_index": idx + 1,
+                        "selected_next": idx == self._proxy_pool_index,
+                        "url": "direct",
+                        "status": "direct",
+                        "last_checked_at": None,
+                        "last_success_at": None,
+                        "last_failure_at": None,
+                        "last_error": None,
+                        "failure_count": 0,
+                        "success_count": 0,
+                        "cooldown_remaining_seconds": 0,
+                    }
+                )
+                continue
+
+            pool_entries.append(
+                self._build_proxy_entry(
+                    f"Pool #{idx + 1}",
+                    proxy_config,
+                    kind="pool",
+                    pool_index=idx + 1,
+                    selected_next=idx == self._proxy_pool_index,
+                )
+            )
+
+        all_entries = [entry for entry in [default_proxy] if entry] + model_overrides + pool_entries
+        status_counts = {
+            "healthy": sum(1 for entry in all_entries if entry["status"] == "healthy"),
+            "unhealthy": sum(1 for entry in all_entries if entry["status"] == "unhealthy"),
+            "unknown": sum(1 for entry in all_entries if entry["status"] == "unknown"),
+            "direct": sum(1 for entry in all_entries if entry["status"] == "direct"),
+        }
+
+        configured = bool(default_proxy or model_overrides or (self.config.proxy_pool_enabled and self.config.proxy_pool))
+        return {
+            "provider_id": self.get_provider_id(),
+            "provider_type": self.get_provider_type(),
+            "configured": configured,
+            "pool_enabled": bool(self.config.proxy_pool_enabled and self.config.proxy_pool),
+            "monitor_running": bool(self._proxy_health_task and not self._proxy_health_task.done()),
+            "health_check_interval_seconds": self.PROXY_HEALTH_CHECK_INTERVAL_SECONDS,
+            "failure_cooldown_seconds": self.PROXY_FAILURE_COOLDOWN_SECONDS,
+            "next_pool_index": self._proxy_pool_index + 1 if self.config.proxy_pool else None,
+            "default_proxy": default_proxy,
+            "model_overrides": model_overrides,
+            "pool_entries": pool_entries,
+            "summary": {
+                "proxy_count": len(self._configured_proxy_urls()),
+                "entry_count": len(all_entries),
+                "pool_entry_count": len(pool_entries),
+                "direct_entry_count": status_counts["direct"],
+                "healthy_count": status_counts["healthy"],
+                "unhealthy_count": status_counts["unhealthy"],
+                "unknown_count": status_counts["unknown"],
+            },
+        }
+
+    def _is_proxy_connectivity_error(self, error: Exception) -> bool:
+        if isinstance(error, (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout)):
+            return True
+
+        error_text = str(error).lower()
+        proxy_error_markers = [
+            "connection refused",
+            "proxyerror",
+            "proxy error",
+            "all connection attempts failed",
+            "nodename nor servname",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "connect timeout",
+            "timed out",
+            "network is unreachable",
+        ]
+        return any(marker in error_text for marker in proxy_error_markers)
+
+    def _get_next_proxy_from_pool(self) -> tuple[Optional["ProxyConfig"], Optional[int]]:
         """Get next proxy from pool using round-robin selection.
 
         Returns None for "direct" entries (no proxy).
         Thread-safe via atomic increment.
         """
         if not self.config.proxy_pool_enabled or not self.config.proxy_pool:
-            return None
+            return None, None
 
         pool = self.config.proxy_pool
-        # Atomic increment and modulo for round-robin
-        idx = self._proxy_pool_index
-        self._proxy_pool_index = (idx + 1) % len(pool)
+        pool_size = len(pool)
+        start_idx = self._proxy_pool_index
+        blocked_entries = []
 
-        selected = pool[idx]
-        if selected is None:
-            logger.debug(f"Proxy pool: selected DIRECT (index {idx + 1}/{len(pool)})")
-        else:
-            proxy_url = selected.to_httpx_proxy()
-            # Mask the proxy URL for logging
-            if proxy_url and "@" in proxy_url:
-                masked = proxy_url.split("@")[-1]
-            else:
-                masked = proxy_url
-            logger.debug(f"Proxy pool: selected {masked} (index {idx + 1}/{len(pool)})")
+        for offset in range(pool_size):
+            idx = (start_idx + offset) % pool_size
+            selected = pool[idx]
+            self._proxy_pool_index = (idx + 1) % pool_size
 
-        return selected
+            if selected is None:
+                logger.debug(f"Proxy pool: selected DIRECT (index {idx + 1}/{pool_size})")
+                return None, idx
+
+            proxy_url = self._proxy_config_to_url(selected)
+            if proxy_url and not self._proxy_available_for_use(proxy_url):
+                blocked_entries.append(self._mask_proxy_url(proxy_url) or proxy_url)
+                self._schedule_proxy_probe(proxy_url)
+                continue
+
+            self._schedule_proxy_probe(proxy_url)
+            logger.debug(f"Proxy pool: selected {self._mask_proxy_url(proxy_url)} (index {idx + 1}/{pool_size})")
+            return selected, idx
+
+        blocked_label = ", ".join(blocked_entries) if blocked_entries else "all configured entries"
+        raise RuntimeError(f"No healthy proxies available in pool for provider {self.config.name}: {blocked_label}")
 
     def _should_use_proxy_pool(self, model_name: str) -> bool:
         """Check if this model should use the proxy pool.
@@ -343,6 +758,12 @@ class GoogleGenAIProvider(IModelProvider):
 
         logger.debug(f"🚫 No proxy configured (proxy_config={proxy_config}, default={self.config.proxy_config})")
         return None, None
+
+    def _proxy_info_to_string(self, proxy_info: Optional[ProxyConfig]) -> Optional[str]:
+        """Convert proxy configuration to a storable/displayable string."""
+        if proxy_info:
+            return self._proxy_config_to_url(proxy_info)
+        return "direct"
 
     def get_provider_id(self) -> str:
         return self.config.name
@@ -978,6 +1399,24 @@ class GoogleGenAIProvider(IModelProvider):
 
         # Generate observation ID for ground truth tracking
         observation_id = f"obs_{uuid.uuid4().hex[:12]}"
+        model_name: Optional[str] = None
+        api_key_suffix: Optional[str] = None
+        api_key_index: Optional[int] = None
+        api_key_total: Optional[int] = None
+        proxy_info: Optional[ProxyConfig] = None
+        proxy_url: Optional[str] = None
+        proxy_pool_index: Optional[int] = None
+
+        def _build_request_error(message: str) -> GoogleGenAIRequestError:
+            return GoogleGenAIRequestError(
+                message,
+                provider_id=self.config.name,
+                model_name=model_name or original_model or None,
+                api_key_suffix=api_key_suffix,
+                api_key_index=api_key_index,
+                api_key_total=api_key_total,
+                proxy_used=self._proxy_info_to_string(proxy_info),
+            )
 
         try:
             # Convert request format
@@ -998,14 +1437,22 @@ class GoogleGenAIProvider(IModelProvider):
             # Create client with proxy transport
             # Check if we should use proxy pool (round-robin) or per-model proxy
             if self._should_use_proxy_pool(model_name):
-                proxy_config = self._get_next_proxy_from_pool()
+                proxy_config, proxy_pool_index = self._get_next_proxy_from_pool()
                 pool_info = (
-                    f" (pool #{self._proxy_pool_index}/{len(self.config.proxy_pool)})" if self.config.proxy_pool else ""
+                    f" (pool #{(proxy_pool_index or 0) + 1}/{len(self.config.proxy_pool)})" if self.config.proxy_pool else ""
                 )
             else:
                 proxy_config = self.config.get_proxy_for_model(model_name)
                 pool_info = ""
             proxy_info = proxy_config if proxy_config else None
+            proxy_url = self._proxy_config_to_url(proxy_info)
+            if proxy_url and not self._proxy_available_for_use(proxy_url):
+                health = self._proxy_health_snapshot(proxy_url)
+                raise _build_request_error(
+                    f"Configured proxy {self._mask_proxy_url(proxy_url)} is currently unhealthy"
+                    + (f": {health['last_error']}" if health.get("last_error") else "")
+                )
+            self._schedule_proxy_probe(proxy_url)
             key_position_str = f" key #{api_key_index}/{api_key_total}" if api_key_index else ""
             logger.info(
                 f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}{key_position_str}, proxy={proxy_info or 'direct'}{pool_info} [obs={observation_id}]"
@@ -1048,6 +1495,8 @@ class GoogleGenAIProvider(IModelProvider):
             # Update API key statistics
             tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
             await self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
+            if proxy_url:
+                self._mark_proxy_health(proxy_url, success=True)
 
             # Verify ground truth via observer (prefer observation over intent)
             observer = get_observer()
@@ -1055,15 +1504,7 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Defaults (intent-based) - convert ProxyConfig to string for storage
             actual_key_suffix = api_key_suffix
-            actual_proxy = None
-            if proxy_info:
-                # Convert ProxyConfig to URL string
-                if hasattr(proxy_info, "to_httpx_proxy"):
-                    actual_proxy = proxy_info.to_httpx_proxy()
-                else:
-                    actual_proxy = str(proxy_info)
-            else:
-                actual_proxy = "direct"  # Explicitly mark direct connections
+            actual_proxy = self._proxy_info_to_string(proxy_info)
             key_verified = False
             proxy_verified = False
 
@@ -1172,20 +1613,22 @@ class GoogleGenAIProvider(IModelProvider):
                         break
 
             # Create a custom exception that the container can handle with proper HTTP response
-            quota_error = Exception(error_msg)
+            quota_error = _build_request_error(error_msg)
             quota_error.retry_after_seconds = retry_after_seconds
             raise quota_error
         except PermissionDenied as e:
             error_msg = f"Google GenAI permission denied: {e}"
             await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=403)
-            raise Exception(error_msg)
+            raise _build_request_error(error_msg)
         except InvalidArgument as e:
             error_msg = f"Google GenAI invalid argument: {e}"
             # InvalidArgument can indicate API key issues
             await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=400)
-            raise Exception(error_msg)
+            raise _build_request_error(error_msg)
         except Exception as e:
             error_msg = f"Google GenAI error: {e}"
+            if proxy_url and self._is_proxy_connectivity_error(e):
+                self._mark_proxy_health(proxy_url, success=False, error=str(e))
             if "api_key" in locals() and "model_name" in locals():
                 # Extract status code from error message if present
                 # Handles cases where exception isn't caught by specific handlers
@@ -1201,7 +1644,7 @@ class GoogleGenAIProvider(IModelProvider):
                 await self._update_api_key_stats(
                     api_key, model_name, success=False, error=error_msg, status_code=extracted_status
                 )
-            raise Exception(error_msg)
+            raise _build_request_error(error_msg)
 
     async def get_api_key_stats(self, include_unused_models: bool = False) -> Dict[str, Dict[str, Any]]:
         """Get current API key usage statistics (grouped by API key)

@@ -136,16 +136,22 @@ providers:
     api_keys:
       - "YOUR_GOOGLE_API_KEY_1"
       - "YOUR_GOOGLE_API_KEY_2"  # Multiple keys for rotation
-    max_requests_per_day: 1500  # Google's free tier limit
+    max_requests_per_day: 1500  # Tune this to your quota plan
 ```
 
-Available models:
-- `gemini-2.0-flash-exp` - Fast, experimental model
-- `gemini-1.5-flash` - Production flash model
-- `gemini-1.5-pro` - Advanced capabilities
-- `gemini-2.0-flash-thinking-exp` - Reasoning-focused model
+Google GenAI models are discovered live from the provider. Use the provider and system dashboards to inspect configured backends, quotas, and proxy status.
 
-Access the Google GenAI dashboard at `http://localhost:1234/google-genai` to view quota usage, key status, and reset times.
+OpenAI-compatible providers can also point at vendor-prefixed API bases such as `/openai/v1` or `/zen/go/v1`. When a vendor does not expose a usable `/v1/models` listing, set `static_models` explicitly in YAML:
+
+```yaml
+providers:
+  - name: "groq-scout"
+    type: "openai"
+    url: "https://api.groq.com/openai/v1"
+    api_key: "YOUR_GROQ_KEY"
+    static_models:
+      - "meta-llama/llama-4-scout-17b-16e-instruct"
+```
 
 ## Features
 
@@ -185,13 +191,13 @@ Access the Google GenAI dashboard at `http://localhost:1234/google-genai` to vie
 
 **Logging & Retention:**
 - `ENABLE_LOGGING=false` disables the request log and UI for ultra-lightweight proxies
-- Logs and payloads are persisted via SQLite and blob storage
+- Request metadata uses the Redis-backed logging path, with blob storage for large request/response payloads
 - Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost
 - Background cleanup jobs run automatically during the FastAPI lifespan events
 
 ## Testing
 
-SmolRouter ships with 160 automated tests covering model remapping, routing, logging, and quota enforcement:
+SmolRouter ships with an automated pytest suite covering model remapping, routing, logging, and quota enforcement:
 
 ```bash
 pip install -e .[dev]

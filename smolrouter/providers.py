@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import httpx
 from typing import List, Dict, Any, Tuple, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
@@ -155,7 +155,31 @@ class OpenAIProvider(BaseModelProvider):
         return self._build_request_url("/v1/models")
 
     def _build_request_url(self, endpoint: str) -> str:
-        return urljoin(self.config.url, endpoint)
+        normalized_endpoint = (endpoint or "").strip()
+        if not normalized_endpoint:
+            return self.config.url.rstrip("/")
+        if normalized_endpoint.startswith(("http://", "https://")):
+            return normalized_endpoint
+
+        parsed_base = urlsplit(self.config.url.rstrip("/"))
+        base_segments = [segment for segment in parsed_base.path.split("/") if segment]
+        endpoint_segments = [segment for segment in normalized_endpoint.lstrip("/").split("/") if segment]
+
+        if base_segments and endpoint_segments and endpoint_segments[0] == base_segments[-1]:
+            endpoint_segments = endpoint_segments[1:]
+
+        path_segments = [*base_segments, *endpoint_segments]
+        combined_path = f"/{'/'.join(path_segments)}" if path_segments else "/"
+
+        return urlunsplit(
+            (
+                parsed_base.scheme,
+                parsed_base.netloc,
+                combined_path,
+                parsed_base.query,
+                parsed_base.fragment,
+            )
+        )
 
     async def health_check(self) -> bool:
         """OpenAI provider health check - always healthy when configured for client passthrough"""
@@ -164,11 +188,41 @@ class OpenAIProvider(BaseModelProvider):
             logger.debug(f"OpenAI provider {self.get_provider_id()} in client passthrough mode - marking as healthy")
             return True
 
+        if self.config.static_models:
+            try:
+                async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+                    response = await client.get(self._get_health_check_url(), headers=self._get_headers())
+                if response.status_code == 200:
+                    return True
+                if response.status_code in {404, 405}:
+                    logger.info(
+                        "OpenAI provider %s uses configured static models and does not expose %s; marking healthy",
+                        self.get_provider_id(),
+                        self._get_health_check_url(),
+                    )
+                    return True
+                logger.debug(
+                    "OpenAI provider %s static-model health check returned %s",
+                    self.get_provider_id(),
+                    response.status_code,
+                )
+                return False
+            except Exception:
+                logger.debug(
+                    "OpenAI provider %s static-model health check failed unexpectedly",
+                    self.get_provider_id(),
+                    exc_info=True,
+                )
+                return False
+
         # If we have an API key, do normal health check
         return await super().health_check()
 
     async def discover_models(self) -> List[ModelInfo]:
         """Discover models from OpenAI /v1/models endpoint or return static list"""
+        if self.config.static_models:
+            return self._get_configured_static_models()
+
         # If no API key, return static list for client passthrough
         if not self.config.api_key:
             return self._get_static_openai_models()
@@ -220,6 +274,23 @@ class OpenAIProvider(BaseModelProvider):
         except Exception as e:
             logger.error(f"Error discovering OpenAI models from {self.get_provider_id()}: {e}")
             return self._get_static_openai_models()
+
+    def _get_configured_static_models(self) -> List[ModelInfo]:
+        models = []
+
+        for model_name in self.config.static_models:
+            model_info = self._create_model_info(
+                model_id=model_name,
+                model_name=model_name,
+                aliases=[model_name],
+                metadata={"object": "model", "owned_by": self.get_provider_id(), "static": True, "configured": True},
+            )
+            models.append(model_info)
+
+        logger.info(
+            f"Loaded {len(models)} configured static models for OpenAI provider {self.get_provider_id()}"
+        )
+        return models
 
     def _get_static_openai_models(self) -> List[ModelInfo]:
         """Return static list of OpenAI models from JSON file"""
@@ -296,7 +367,6 @@ class OpenAIProvider(BaseModelProvider):
     ) -> Tuple[Dict[str, Any], int]:
         """Generate completion by passing through to OpenAI API"""
         try:
-            # Use client's Authorization header if provided, otherwise fall back to config
             headers = self._get_headers()
             if client_headers:
                 for key, value in client_headers.items():
@@ -304,8 +374,9 @@ class OpenAIProvider(BaseModelProvider):
                     if isinstance(value, bytes):
                         value = value.decode("utf-8")
 
-                    # Handle authorization header (case insensitive)
-                    if key.lower() == "authorization":
+                    # Only use client Authorization for passthrough providers.
+                    # Configured OpenAI-compatible providers must keep their own upstream key.
+                    if key.lower() == "authorization" and not self.config.api_key:
                         headers["Authorization"] = value
                     # Pass through other relevant headers
                     elif key.lower() in ["openai-organization", "openai-project", "user-agent"]:

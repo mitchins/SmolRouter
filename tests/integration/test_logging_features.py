@@ -27,7 +27,8 @@ def sample_logs(isolated_db):
                 service_type="openai",
                 upstream_url="http://localhost:8000",
                 original_model="gpt-3.5-turbo",
-                mapped_model="llama3-8b",
+                mapped_model="gemma3-12b",
+                provider_id="google-gen-ai",
                 duration_ms=1200,
                 request_size=256,
                 response_size=1024,
@@ -43,6 +44,7 @@ def sample_logs(isolated_db):
                 upstream_url="http://localhost:8000",
                 original_model="mistral",
                 mapped_model="mistral",
+                provider_id="local-ollama",
                 duration_ms=2500,
                 request_size=128,
                 response_size=512,
@@ -56,6 +58,9 @@ def sample_logs(isolated_db):
                 path="/v1/models",
                 service_type="openai",
                 upstream_url="http://localhost:8000",
+                original_model="gemma3-12b",
+                mapped_model="gemma3-12b",
+                provider_id="google-gen-ai",
                 duration_ms=150,
                 request_size=0,
                 response_size=2048,
@@ -69,6 +74,7 @@ def sample_logs(isolated_db):
                 path="/v1/chat/completions",
                 service_type="openai",
                 upstream_url="http://localhost:8000",
+                provider_id="openai-fallback",
                 status_code=500,
                 error_message="Connection timeout",
                 completed_at=now - timedelta(days=10),
@@ -192,6 +198,40 @@ async def test_api_logs_endpoint(isolated_db, sample_logs, disable_logging):
 
 
 @pytest.mark.asyncio
+async def test_api_dashboard_supports_combinable_field_filters(isolated_db, sample_logs, disable_logging):
+    """Test host, provider, and model filters together on the dashboard API."""
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/dashboard",
+            params={"q": "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["filter"]["active"] is True
+        assert payload["filter"]["query"] == "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"
+
+        logs = payload["logs"]
+        assert len(logs) == 2
+        assert all(log["source_ip"] == "192.168.1.100" for log in logs)
+        assert all(log["provider_id"] == "google-gen-ai" for log in logs)
+        assert all("gemma3-12b" in {log.get("original_model"), log.get("mapped_model")} for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_api_dashboard_rejects_unknown_filter_fields(isolated_db, sample_logs, disable_logging):
+    """Test invalid primitiveQL clauses return an explicit API error."""
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/dashboard", params={"q": "status:200"})
+
+        assert response.status_code == 422
+        payload = response.json()
+        assert payload["error"] == "invalid_filter"
+        assert "status:200" in payload["invalid_terms"]
+        assert "Supported fields" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_api_stats_endpoint(isolated_db, sample_logs, disable_logging):
     """Test the stats API endpoint"""
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -248,6 +288,7 @@ async def test_request_detail_view(isolated_db, sample_logs, disable_logging):
         upstream_url="http://localhost:8000",
         original_model="gpt-4",
         mapped_model="llama3-70b",
+        provider_id="test-zai",
         duration_ms=1500,
         request_size=512,
         response_size=1024,
@@ -270,6 +311,10 @@ async def test_request_detail_view(isolated_db, sample_logs, disable_logging):
         assert "Request Information" in content
         assert "Response Information" in content
         assert "192.168.1.100" in content
+        assert "Protocol:" in content
+        assert "OpenAI-compatible" in content
+        assert "Provider:" in content
+        assert "test-zai" in content
         assert "gpt-4" in content
         assert "llama3-70b" in content
         assert "Request Body" in content
@@ -321,6 +366,7 @@ async def test_request_log_model_fields(isolated_db):
         upstream_url="http://localhost:8000",
         original_model="gpt-4",
         mapped_model="claude-3-opus",
+        provider_id="google-gen-ai",
         duration_ms=1500,
         request_size=512,
         response_size=2048,
@@ -344,6 +390,7 @@ async def test_request_log_model_fields(isolated_db):
     assert retrieved_log.service_type == "openai"
     assert retrieved_log.original_model == "gpt-4"
     assert retrieved_log.mapped_model == "claude-3-opus"
+    assert retrieved_log.provider_id == "google-gen-ai"
     assert retrieved_log.duration_ms == 1500
     assert retrieved_log.request_size == 512
     assert retrieved_log.response_size == 2048

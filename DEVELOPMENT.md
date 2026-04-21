@@ -8,14 +8,14 @@ source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-This installs runtime dependencies (FastAPI, redis, google-genai, aiohttp) plus the development toolchain (pytest, flake8, ruff, pre-commit).
+This installs runtime dependencies (FastAPI, redis, google-genai, aiohttp) plus the development toolchain (pytest, ruff, vulture, and pre-commit).
 
 ## Common tasks
 
 ```bash
 make dev-install   # optional helper that runs pip install -e .[dev]
-make test          # run the full pytest suite (160 tests)
-make lint          # flake8 + ruff checks
+make test          # run the full pytest suite
+make lint          # ruff + vulture checks
 make check         # lint + tests in one go
 make pre-commit    # execute the configured pre-commit hooks
 ```

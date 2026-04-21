@@ -236,12 +236,15 @@ class ProviderConfig:
     enabled: bool = True
     priority: int = 0  # Lower numbers have higher priority
     metadata: Dict[str, Any] = None
+    static_models: Optional[List[str]] = None
     proxy_config: Optional[ProxyConfig] = None  # Default proxy for all models
     per_model_proxy: Dict[str, ProxyConfig] = None  # Model-specific proxy overrides
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.static_models is None:
+            self.static_models = []
         if self.per_model_proxy is None:
             self.per_model_proxy = {}
 

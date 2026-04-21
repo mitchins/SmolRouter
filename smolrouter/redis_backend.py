@@ -323,8 +323,9 @@ return {
 }
 """
 
-# Precompute script SHA for EVALSHA optimization
-QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode()).hexdigest()
+# Precompute script SHA for EVALSHA optimization. Redis script SHAs are protocol identifiers,
+# not security hashes, so mark this accordingly for security scanners.
+QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode(), usedforsecurity=False).hexdigest()
 
 
 async def get_redis():
@@ -344,6 +345,7 @@ class RedisRequestLog:
         upstream_url: str = "unknown",
         original_model: Optional[str] = None,
         mapped_model: Optional[str] = None,
+        provider_id: Optional[str] = None,
         request_id: Optional[str] = None,
         user_agent: Optional[str] = None,
         auth_user: Optional[str] = None,
@@ -374,6 +376,7 @@ class RedisRequestLog:
             "upstream_url": upstream_url,
             "original_model": original_model or "",
             "mapped_model": mapped_model or "",
+            "provider_id": provider_id or "",
             "user_agent": user_agent or "",
             "auth_user": auth_user or "",
             "request_size": str(request_size or 0),

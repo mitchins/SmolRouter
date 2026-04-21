@@ -102,7 +102,7 @@ extend-ignore = ["E203", "E501", "B009"]
 # Pytest configuration migrated from setup.cfg
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 python_classes = "Test*"

@@ -1,14 +1,15 @@
 """Minimal regression tests for Google GenAI, Anthropic, and Z.AI integrations"""
 
+import httpx
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 
 from smolrouter.access_control import NoAccessControl
-from smolrouter.interfaces import ModelInfo
+from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
 from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
-from smolrouter.providers import ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
+from smolrouter.providers import OpenAIProvider, ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
 from smolrouter.strategies import SimpleModelStrategy
 
 
@@ -21,6 +22,54 @@ def test_google_genai_provider_creation():
     assert provider.get_provider_id() == "test-google"
     assert provider.get_provider_type() == "google-genai"
     assert provider.get_endpoint() == "https://generativelanguage.googleapis.com"
+
+
+def test_google_genai_proxy_diagnostics_include_pool_and_overrides():
+    """Configured proxy pools and overrides should be visible to diagnostics."""
+    config = GoogleGenAIConfig(
+        name="test-google",
+        type="google-genai",
+        enabled=True,
+        api_keys=["test-key"],
+        proxy_pool_enabled=True,
+        proxy_pool=[None, ProxyConfig(https_proxy="http://127.0.0.1:8888")],
+        per_model_proxy={"gemma-3-4b-it": ProxyConfig(https_proxy="http://127.0.0.1:8899")},
+    )
+
+    provider = GoogleGenAIProvider(config)
+
+    diagnostics = provider.get_proxy_diagnostics()
+
+    assert diagnostics["configured"] is True
+    assert diagnostics["pool_enabled"] is True
+    assert diagnostics["summary"]["direct_entry_count"] == 1
+    assert any(entry["url"] == "http://127.0.0.1:8888" for entry in diagnostics["pool_entries"])
+    assert diagnostics["model_overrides"][0]["model_name"] == "gemma-3-4b-it"
+    assert diagnostics["model_overrides"][0]["url"] == "http://127.0.0.1:8899"
+
+
+def test_google_genai_proxy_pool_skips_unhealthy_entries():
+    """Round-robin pool selection should skip recently unhealthy proxies instead of failing silently."""
+    config = GoogleGenAIConfig(
+        name="test-google",
+        type="google-genai",
+        enabled=True,
+        api_keys=["test-key"],
+        proxy_pool_enabled=True,
+        proxy_pool=[
+            ProxyConfig(https_proxy="http://127.0.0.1:8888"),
+            ProxyConfig(https_proxy="http://127.0.0.1:8889"),
+        ],
+    )
+
+    provider = GoogleGenAIProvider(config)
+    provider._mark_proxy_health("http://127.0.0.1:8888", success=False, error="Connection refused")
+
+    selected_proxy, selected_index = provider._get_next_proxy_from_pool()
+
+    assert selected_index == 1
+    assert selected_proxy is not None
+    assert selected_proxy.to_httpx_proxy() == "http://127.0.0.1:8889"
 
 
 def test_anthropic_provider_creation():
@@ -84,6 +133,75 @@ def test_supported_provider_types_include_zai_coding():
     assert "ollama" in supported_types
     assert "openai" in supported_types
     assert "zai-coding" in supported_types
+
+
+def test_openai_provider_preserves_prefixed_base_path():
+    provider = OpenAIProvider(
+        ProviderConfig(
+            name="test-openai-compatible",
+            type="openai",
+            enabled=True,
+            url="https://opencode.ai/zen/go/v1",
+            api_key="test-key",
+        )
+    )
+
+    assert provider._build_request_url("/v1/models") == "https://opencode.ai/zen/go/v1/models"
+    assert provider._build_request_url("/v1/chat/completions") == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert OpenAIProvider(
+        ProviderConfig(
+            name="test-root-openai",
+            type="openai",
+            enabled=True,
+            url="https://integrate.api.nvidia.com",
+            api_key="test-key",
+        )
+    )._build_request_url("/v1/models") == "https://integrate.api.nvidia.com/v1/models"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_uses_configured_static_models():
+    provider = OpenAIProvider(
+        ProviderConfig(
+            name="test-groq",
+            type="openai",
+            enabled=True,
+            url="https://api.groq.com/openai/v1",
+            api_key="test-key",
+            static_models=["meta-llama/llama-4-scout-17b-16e-instruct"],
+        )
+    )
+
+    models = await provider.discover_models()
+
+    assert [model.name for model in models] == ["meta-llama/llama-4-scout-17b-16e-instruct"]
+    assert models[0].metadata["configured"] is True
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_openai_static_model_provider_tolerates_missing_models_endpoint(mock_client):
+    provider = OpenAIProvider(
+        ProviderConfig(
+            name="test-opencode",
+            type="openai",
+            enabled=True,
+            url="https://opencode.ai/zen/go/v1",
+            api_key="test-key",
+            static_models=["kimi-k2.6"],
+        )
+    )
+
+    response = Mock()
+    response.status_code = 404
+    response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "Not Found",
+        request=httpx.Request("GET", "https://opencode.ai/zen/go/v1/models"),
+        response=httpx.Response(404, request=httpx.Request("GET", "https://opencode.ai/zen/go/v1/models")),
+    )
+    mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+
+    assert await provider.health_check() is True
 
 
 def test_zai_coding_config_loads_api_key_file(tmp_path):
@@ -201,7 +319,65 @@ async def test_mediator_routes_zai_coding_provider():
     assert status_code == 200
     assert response_data["id"] == "chatcmpl-test"
     assert upstream_used == "zai-coding:test-zai"
-    assert metadata is None
+    assert metadata is not None
+    assert metadata.provider_id == "test-zai"
+    assert metadata.model_name == "glm-4.5-air"
+    provider.generate_completion.assert_awaited_once()
+    forwarded_payload = provider.generate_completion.await_args.args[0]
+    assert forwarded_payload["model"] == "glm-4.5-air"
+
+
+@pytest.mark.asyncio
+async def test_mediator_preserves_provider_metadata_for_google_errors():
+    """Test Google provider failures still keep downstream provider identity for logging/UI."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    strategy = SimpleModelStrategy({})
+    access_control = NoAccessControl()
+    mediator = ModelMediator(aggregator, strategy, access_control)
+
+    resolved_model = ModelInfo(
+        id="gemma-3-4b-it@test-google",
+        name="gemma-3-4b-it",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+
+    provider = GoogleGenAIProvider(
+        GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
+    )
+    provider_error = Exception("Google General error: [Errno 61] Connection refused")
+    provider_error.provider_id = "test-google"
+    provider_error.model_name = "gemma-3-4b-it"
+    provider_error.proxy_used = "http://127.0.0.1:8888"
+    provider_error.api_key_suffix = "abcd1234"
+    provider_error.api_key_index = 2
+    provider_error.api_key_total = 5
+    provider.generate_completion = AsyncMock(side_effect=provider_error)
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = AsyncMock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemma-3-4b-it [test-google]",
+        {"model": "gemma-3-4b-it [test-google]", "messages": [{"role": "user", "content": "Hello"}]},
+        "/v1/chat/completions",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 500
+    assert upstream_used == "google-genai:test-google"
+    assert response_data["error"]["provider"] == "google-genai"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemma-3-4b-it"
+    assert metadata.proxy_used == "http://127.0.0.1:8888"
+    assert metadata.api_key_suffix == "abcd1234"
+    assert metadata.api_key_index == 2
+    assert metadata.api_key_total == 5
 
 
 def test_anthropic_api_key_passthrough():

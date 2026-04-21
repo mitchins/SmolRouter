@@ -348,6 +348,8 @@ class ModelMediator:
                     logger.info(
                         f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
                     )
+            elif request_payload.get("model") != resolved_model.name:
+                request_payload["model"] = resolved_model.name
 
             # Helper to attach LB instance to metadata
             def attach_lb_instance(metadata):
@@ -389,22 +391,32 @@ class ModelMediator:
                     elif "invalid argument" in error_msg.lower() or "400" in error_msg:
                         status_code = 400
 
+                    error_metadata = RequestMetadata(
+                        api_key_suffix=getattr(e, "api_key_suffix", None),
+                        proxy_used=getattr(e, "proxy_used", None),
+                        provider_id=getattr(e, "provider_id", resolved_model.provider_id),
+                        model_name=getattr(e, "model_name", resolved_model.name),
+                        api_key_index=getattr(e, "api_key_index", None),
+                        api_key_total=getattr(e, "api_key_total", None),
+                    )
+
                     return (
                         {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
                         status_code,
                         f"google-genai:{resolved_model.provider_id}",
-                        attach_lb_instance(None),  # Include LB instance for errors
+                        attach_lb_instance(error_metadata),
                     )
 
             # Handle OpenAI-compatible provider requests
             if hasattr(provider, "generate_completion") and resolved_model.provider_type in {"openai", "zai-coding"}:
+                base_metadata = RequestMetadata(provider_id=resolved_model.provider_id, model_name=resolved_model.name)
                 try:
                     response_data, status_code = await provider.generate_completion(request_payload, headers, path)
                     return (
                         response_data,
                         status_code,
                         f"{resolved_model.provider_type}:{resolved_model.provider_id}",
-                        attach_lb_instance(None),  # OpenAI provider doesn't return metadata yet
+                        attach_lb_instance(base_metadata),
                     )
                 except Exception as e:
                     logger.error(f"{resolved_model.provider_type} provider error: {e}")
@@ -413,7 +425,7 @@ class ModelMediator:
                         {"error": {"type": "api_error", "message": str(e), "provider": resolved_model.provider_type}},
                         500,
                         f"{resolved_model.provider_type}:{resolved_model.provider_id}",
-                        attach_lb_instance(None),  # Include LB instance for errors
+                        attach_lb_instance(base_metadata),
                     )
 
             # Handle Dummy provider requests

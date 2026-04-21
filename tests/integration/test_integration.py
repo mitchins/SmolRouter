@@ -8,9 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 from importlib import import_module
+from unittest.mock import AsyncMock, Mock
 
 # Import the app
 from smolrouter.app import app
+from smolrouter.interfaces import ModelInfo
 
 
 # The real container test needs these imports
@@ -47,6 +49,29 @@ class TestWebUIIntegration:
         required_keys = ["total_providers", "healthy_providers", "total_models", "cache_enabled", "cache_entries"]
         for key in required_keys:
             assert key in summary
+
+    def test_testing_models_api_returns_exact_request_model(self):
+        """Test testing models API exposes a provider-qualified request model."""
+        fake_model = ModelInfo(
+            id="gemma-3-4b-it@test-google",
+            name="gemma-3-4b-it",
+            provider_id="test-google",
+            provider_type="google-genai",
+            endpoint="https://example.test",
+        )
+        fake_mediator = Mock()
+        fake_mediator.get_available_models = AsyncMock(return_value=[fake_model])
+        fake_container = Mock()
+        fake_container.create_client_context.return_value = Mock()
+        fake_container.get_mediator = AsyncMock(return_value=fake_mediator)
+
+        with patch("smolrouter.app.container", fake_container):
+            response = self.client.get("/api/testing/models")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["models"][0]["request_model"] == "gemma-3-4b-it [test-google]"
+        assert payload["models"][0]["display_name"] == "gemma-3-4b-it [test-google]"
 
 
 class TestModelAggregationEndpoints:
