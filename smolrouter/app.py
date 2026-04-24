@@ -31,6 +31,7 @@ from smolrouter.storage import init_blob_storage
 from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_request_auth
 from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
+from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +95,21 @@ app = FastAPI(
     lifespan=app_lifespan,
 )
 
+
+@app.middleware("http")
+async def disable_cache_for_html_and_json(request: Request, call_next):
+    response = await call_next(request)
+
+    content_type = response.headers.get("content-type", "")
+    if request.method == "GET" and (
+        content_type.startswith("text/html") or content_type.startswith("application/json")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+
+    return response
+
 # Setup rate limiting
 setup_rate_limiting(app)
 
@@ -116,7 +132,7 @@ DEFAULT_UPSTREAM = os.getenv("DEFAULT_UPSTREAM", "http://localhost:8000")
 LISTEN_HOST = os.getenv("LISTEN_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.getenv("LISTEN_PORT", "1234"))
 RAW_MODEL_MAP = os.getenv("MODEL_MAP", "{}")
-ROUTES_CONFIG = os.getenv("ROUTES_CONFIG", "config/routes.yaml")
+ROUTES_CONFIG = str(resolve_routes_config_path(os.getenv("ROUTES_CONFIG")))
 
 # Feature flags
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
@@ -187,15 +203,19 @@ def load_routes_config() -> Dict:
           model: "llama3-70b"                 # Optional: override model name
     """
     try:
-        if not os.path.exists(ROUTES_CONFIG):
+        routes_config_path = resolve_routes_config_path(os.getenv("ROUTES_CONFIG"))
+
+        if not routes_config_path.exists():
             logger.info(f"No routes config file found at {ROUTES_CONFIG}, using default routing")
             return {"routes": []}
 
-        with open(ROUTES_CONFIG, "r") as f:
+        with open(routes_config_path, "r") as f:
             if ROUTES_CONFIG.endswith(".json"):
                 config = json.load(f)
             else:  # Assume YAML
                 config = yaml.safe_load(f)
+
+        config = normalize_provider_file_references(config or {}, routes_config_path)
 
         # Validate config structure
         if not isinstance(config, dict) or "routes" not in config:
@@ -2229,8 +2249,10 @@ async def system_dashboard(request: Request):
         import platform
         import sys
         import os
+        from smolrouter.storage import get_blob_storage
 
         # Gather all system settings and configuration
+        blob_storage = get_blob_storage()
         settings = {
             "request_timeout": REQUEST_TIMEOUT,
             "default_upstream": DEFAULT_UPSTREAM,
@@ -2238,7 +2260,8 @@ async def system_dashboard(request: Request):
             "strip_json_markdown": STRIP_JSON_MARKDOWN,
             "disable_thinking": DISABLE_THINKING,
             "enable_logging": ENABLE_LOGGING,
-            "blob_storage_path": "blob_storage",
+            "blob_storage_type": type(blob_storage).__name__,
+            "blob_storage_path": str(getattr(blob_storage, "base_path", "")),
         }
 
         # Initialize container if not already done

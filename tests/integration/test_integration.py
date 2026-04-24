@@ -50,6 +50,22 @@ class TestWebUIIntegration:
         for key in required_keys:
             assert key in summary
 
+    def test_html_and_json_responses_disable_cache(self):
+        """Dashboard HTML and dashboard JSON should opt out of Safari caching."""
+        html_response = self.client.get("/")
+        json_response = self.client.get("/api/dashboard?limit=1")
+
+        assert html_response.status_code == 200
+        assert json_response.status_code == 200
+
+        assert "no-store" in html_response.headers.get("cache-control", "")
+        assert html_response.headers.get("pragma") == "no-cache"
+        assert html_response.headers.get("expires") == "0"
+
+        assert "no-store" in json_response.headers.get("cache-control", "")
+        assert json_response.headers.get("pragma") == "no-cache"
+        assert json_response.headers.get("expires") == "0"
+
     def test_testing_models_api_returns_exact_request_model(self):
         """Test testing models API exposes a provider-qualified request model."""
         fake_model = ModelInfo(
@@ -176,6 +192,34 @@ def test_web_ui_navigation():
         assert 'href="/"' in response.text  # Dashboard link
         assert 'href="/performance"' in response.text  # Performance link
         assert 'href="/providers"' in response.text  # Providers link
+
+
+def test_dashboard_renders_mobile_scroll_wrapper():
+    """Dashboard HTML should expose the responsive table scroll wrapper."""
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "table-scroll" in response.text
+    assert "smolrouter-nav-toggle" in response.text
+    assert "nav-label" in response.text
+    assert 'data-label="Time"' in response.text
+    assert 'data-label="Provider"' in response.text
+
+
+def test_client_dashboard_renders_mobile_scroll_wrapper():
+    """Client dashboard HTML should expose the responsive table scroll wrapper."""
+    client = TestClient(app)
+
+    response = client.get("/clients/192.168.1.26")
+
+    assert response.status_code == 200
+    assert "table-scroll" in response.text
+    assert "smolrouter-nav-toggle" in response.text
+    assert "Client Dashboard" in response.text
+    assert 'data-label="Service"' in response.text
+    assert 'data-label="Duration"' in response.text
 
 
 @pytest.mark.asyncio

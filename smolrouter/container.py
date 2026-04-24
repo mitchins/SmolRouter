@@ -17,6 +17,7 @@ from .interfaces import ClientContext
 from .providers import ProviderFactory, IModelProvider
 from .mediator import ModelMediatorFactory, ModelMediator
 from .caching import InMemoryModelCache, NoOpModelCache, IModelCache
+from .config_paths import normalize_provider_file_references, resolve_routes_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class SmolRouterContainer:
         # Load legacy environment variables
         default_upstream = os.getenv("DEFAULT_UPSTREAM", "http://localhost:8000")
         raw_model_map = os.getenv("MODEL_MAP", "{}")
-        routes_config_path = os.getenv("ROUTES_CONFIG", "config/routes.yaml")
+        routes_config_path = resolve_routes_config_path(os.getenv("ROUTES_CONFIG"))
 
         try:
             model_map = json.loads(raw_model_map)
@@ -129,18 +130,21 @@ class SmolRouterContainer:
             health_check_interval=health_check_interval,
         )
 
-    def _load_routes_config(self, config_path: str) -> Dict[str, Any]:
+    def _load_routes_config(self, config_path) -> Dict[str, Any]:
         """Load routes configuration from file"""
-        if not os.path.exists(config_path):
+        resolved_config_path = resolve_routes_config_path(str(config_path))
+        if not os.path.exists(resolved_config_path):
             logger.info(f"No routes config file found at {config_path}")
             return {"routes": [], "servers": {}, "aliases": {}}
 
         try:
-            with open(config_path, "r") as f:
-                if config_path.endswith(".json"):
-                    return json.load(f)
+            with open(resolved_config_path, "r") as f:
+                if resolved_config_path.suffix == ".json":
+                    config = json.load(f)
                 else:
-                    return yaml.safe_load(f) or {}
+                    config = yaml.safe_load(f) or {}
+
+            return normalize_provider_file_references(config, resolved_config_path)
         except Exception as e:
             logger.error(f"Failed to load routes config from {config_path}: {e}")
             return {"routes": [], "servers": {}, "aliases": {}}

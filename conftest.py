@@ -118,10 +118,11 @@ def disable_logging():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def init_runtime_components():
+def init_runtime_components(tmp_path_factory):
     """Initialize Redis (fakeredis), Lua scripts, and blob storage once per test session."""
     os.environ["APP_ENV"] = "test"
     os.environ.setdefault("REDIS_URL", "fake")
+    os.environ.setdefault("BLOB_STORAGE_PATH", str(tmp_path_factory.mktemp("smolrouter_blob_storage")))
 
     async def _init():
         from smolrouter.redis_backend import init_redis_db, RedisApiKeyQuota

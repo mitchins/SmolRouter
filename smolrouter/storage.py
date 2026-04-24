@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from abc import ABC, abstractmethod
 
+from .config_paths import resolve_blob_storage_path
+
 logger = logging.getLogger("model-rerouter")
 
 # Configuration constants
@@ -54,7 +56,7 @@ class FilesystemBlobStorage(BlobStorage):
     """Filesystem-based blob storage implementation"""
 
     def __init__(self, base_path: str = "blob_storage"):
-        self.base_path = Path(base_path)
+        self.base_path = resolve_blob_storage_path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Initialized filesystem blob storage at {self.base_path}")
         # Background janitor task handle (set by init/start functions)
@@ -465,7 +467,7 @@ def get_blob_storage() -> BlobStorage:
     global _blob_storage
     if _blob_storage is None:
         storage_type = os.getenv("BLOB_STORAGE_TYPE", "filesystem")
-        storage_path = os.getenv("BLOB_STORAGE_PATH", "blob_storage")
+        storage_path = os.getenv("BLOB_STORAGE_PATH")
         _blob_storage = create_blob_storage(storage_type, base_path=storage_path)
     return _blob_storage
 
