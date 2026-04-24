@@ -68,7 +68,7 @@ Use SmolRouter when you need to:
 | `LISTEN_HOST` | `127.0.0.1` | Bind address for the FastAPI app. Switch to `0.0.0.0` only behind a reverse proxy |
 | `LISTEN_PORT` | `1234` | Port that accepts OpenAI-compatible traffic |
 | `MODEL_MAP` | `{}` | JSON mapping of incoming model names to replacements (exact keys or regex) |
-| `ROUTES_CONFIG` | `config/routes.yaml` | Path to YAML or JSON smart-routing configuration |
+| `ROUTES_CONFIG` | `config/routes.yaml` | Path to YAML or JSON smart-routing configuration. Relative paths are resolved from the current working directory when explicitly set; the default is the repo-local `config/routes.yaml` |
 | `REQUEST_TIMEOUT` | `3000.0` | Upstream timeout in seconds |
 | `ENABLE_LOGGING` | `true` | Toggle request logging, database writes, and the Web UI dashboard |
 
@@ -82,7 +82,7 @@ Use SmolRouter when you need to:
 | `DB_PATH` | `requests.db` | SQLite database path for request metadata |
 | `MAX_LOG_AGE_DAYS` | `7` | Retention window for automatic log cleanup |
 | `BLOB_STORAGE_TYPE` | `filesystem` | Storage backend for request/response bodies (`filesystem` or `memory`) |
-| `BLOB_STORAGE_PATH` | `blob_storage` | Directory used when `BLOB_STORAGE_TYPE=filesystem` |
+| `BLOB_STORAGE_PATH` | `~/.smolrouter/blob_storage` | Directory used when `BLOB_STORAGE_TYPE=filesystem`. Set this to `./blob_storage` for checkout-local dev storage if desired |
 | `MAX_BLOB_SIZE` | `10485760` | Per-request blob size cap in bytes (10 MiB) |
 | `MAX_TOTAL_STORAGE_SIZE` | `1073741824` | Aggregate blob storage cap in bytes (1 GiB) |
 
@@ -194,6 +194,11 @@ providers:
 - Request metadata uses the Redis-backed logging path, with blob storage for large request/response payloads
 - Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost
 - Background cleanup jobs run automatically during the FastAPI lifespan events
+
+**Path guidance:**
+- Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
+- Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
+- For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
 
 ## Testing
 

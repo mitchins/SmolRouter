@@ -1,0 +1,459 @@
+<style>
+    :root {
+        --smolrouter-shell-max: 1200px;
+        --smolrouter-shell-gutter: clamp(0.75rem, 2vw, 2rem);
+        --smolrouter-shell-radius: 12px;
+        --smolrouter-shell-surface: #ffffff;
+        --smolrouter-shell-shadow-soft: 0 2px 8px rgba(15, 23, 42, 0.08);
+        --smolrouter-shell-text: #1f2937;
+    }
+
+    html {
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    body {
+        margin: 0;
+        padding: 0;
+        background: #f5f7fb;
+        color: var(--smolrouter-shell-text);
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    *, *::before, *::after {
+        box-sizing: border-box;
+    }
+
+    img,
+    svg,
+    canvas,
+    video {
+        max-width: 100%;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+        font: inherit;
+    }
+
+    a {
+        color: inherit;
+    }
+
+    .container {
+        width: min(var(--smolrouter-shell-max), calc(100% - (2 * var(--smolrouter-shell-gutter))));
+        margin: 0 auto;
+        padding: clamp(1rem, 2vw, 2rem) 0;
+    }
+
+    .page-header,
+    .controls,
+    .chat-container,
+    .table-container,
+    .provider-card,
+    .stat-card,
+    .summary-card,
+    .upstream-card,
+    .detail-card,
+    .surface-card {
+        background: var(--smolrouter-shell-surface);
+        border-radius: var(--smolrouter-shell-radius);
+        box-shadow: var(--smolrouter-shell-shadow-soft);
+        overflow: clip;
+    }
+
+    .table-scroll,
+    .scroll-x {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .table-scroll table,
+    .scroll-x table {
+        min-width: 920px;
+    }
+
+    @media (max-width: 1024px) {
+        .container {
+            width: min(100%, calc(100% - 1.5rem));
+        }
+    }
+
+    @media (max-width: 768px) {
+        .container {
+            width: calc(100% - 1rem);
+            padding: 0.875rem 0;
+        }
+
+        .page-header,
+        .controls,
+        .chat-container,
+        .table-container,
+        .provider-card,
+        .stat-card,
+        .summary-card,
+        .upstream-card,
+        .detail-card {
+            border-radius: 10px;
+        }
+
+        .table-header,
+        .chat-header,
+        .provider-header,
+        .status-bar,
+        .detail-header,
+        .controls,
+        .message-input,
+        .filter-toolbar,
+        .provider-actions,
+        .models-header {
+            flex-direction: column;
+            align-items: stretch;
+        }
+
+        .action-buttons,
+        .response-tabs {
+            width: 100%;
+        }
+
+        .action-buttons {
+            flex-direction: column;
+        }
+
+        .action-buttons .action-btn,
+        .action-buttons .action-button,
+        .send-button,
+        .view-all-models,
+        .show-more-models {
+            width: 100%;
+            justify-content: center;
+        }
+
+        .filter-input-wrapper {
+            min-width: 0 !important;
+            width: 100%;
+        }
+
+        .chart-wrapper {
+            height: 300px !important;
+        }
+
+        .response-tabs {
+            overflow-x: auto;
+            flex-wrap: nowrap;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .tab-button {
+            flex: 0 0 auto;
+        }
+
+        .stats,
+        .stats-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            gap: 0.65rem;
+        }
+
+        .stat-card,
+        .stats-grid .stat-card,
+        .stats .stat-card {
+            padding: 0.85rem 0.75rem;
+        }
+
+        .stat-card .number {
+            font-size: 1.75rem;
+            line-height: 1;
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-card .label {
+            font-size: 0.72rem;
+            letter-spacing: 0.04em;
+        }
+
+        .table-scroll,
+        .scroll-x {
+            overflow-x: visible;
+        }
+
+        .table-scroll table,
+        .scroll-x table {
+            display: block;
+            width: 100%;
+            min-width: 0;
+        }
+
+        .table-scroll thead,
+        .scroll-x thead {
+            display: none;
+        }
+
+        .table-scroll tbody,
+        .scroll-x tbody {
+            display: grid;
+            gap: 0.5rem;
+        }
+
+        .table-scroll tr,
+        .scroll-x tr {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.35rem 0.5rem;
+            padding: 0.65rem 0.75rem;
+            background: var(--smolrouter-shell-surface);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: var(--smolrouter-shell-radius);
+            box-shadow: var(--smolrouter-shell-shadow-soft);
+            overflow: clip;
+        }
+
+        .table-scroll td,
+        .scroll-x td {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            width: auto;
+            padding: 0;
+            border-bottom: none;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            min-width: 0;
+        }
+
+        .table-scroll td::before,
+        .scroll-x td::before {
+            content: attr(data-label);
+            flex: 0 0 auto;
+            font-size: 0.65rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #6b7280;
+        }
+
+        .table-scroll td[data-label=""]::before,
+        .scroll-x td[data-label=""]::before {
+            content: "";
+        }
+
+        .table-scroll td[data-label=""],
+        .scroll-x td[data-label=""] {
+            order: 99;
+            margin-left: auto;
+        }
+
+        .table-scroll td[data-label="Path"],
+        .scroll-x td[data-label="Path"] {
+            display: none;
+        }
+
+        .table-scroll td[data-label="Source"],
+        .scroll-x td[data-label="Source"],
+        .table-scroll td[data-label="Service"],
+        .scroll-x td[data-label="Service"],
+        .table-scroll td[data-label="Provider"],
+        .scroll-x td[data-label="Provider"],
+        .table-scroll td[data-label="Model"],
+        .scroll-x td[data-label="Model"] {
+            flex: 1 1 44%;
+        }
+
+        .table-scroll td[data-label="Time"],
+        .scroll-x td[data-label="Time"],
+        .table-scroll td[data-label="Size"],
+        .scroll-x td[data-label="Size"],
+        .table-scroll td[data-label="Duration"],
+        .scroll-x td[data-label="Duration"],
+        .table-scroll td[data-label="Status"],
+        .scroll-x td[data-label="Status"],
+        .table-scroll td[data-label="Dup"],
+        .scroll-x td[data-label="Dup"] {
+            flex: 0 0 auto;
+        }
+
+        .table-scroll td[data-label="Source"],
+        .scroll-x td[data-label="Source"],
+        .table-scroll td[data-label="Service"],
+        .scroll-x td[data-label="Service"] {
+            order: 1;
+        }
+
+        .table-scroll td[data-label="Provider"],
+        .scroll-x td[data-label="Provider"] {
+            order: 2;
+        }
+
+        .table-scroll td[data-label="Model"],
+        .scroll-x td[data-label="Model"] {
+            order: 3;
+        }
+
+        .table-scroll td[data-label="Time"],
+        .scroll-x td[data-label="Time"] {
+            order: 10;
+        }
+
+        .table-scroll td[data-label="Size"],
+        .scroll-x td[data-label="Size"] {
+            order: 11;
+        }
+
+        .table-scroll td[data-label="Duration"],
+        .scroll-x td[data-label="Duration"] {
+            order: 12;
+        }
+
+        .table-scroll td[data-label="Status"],
+        .scroll-x td[data-label="Status"] {
+            order: 13;
+        }
+
+        .table-scroll td[data-label="Dup"],
+        .scroll-x td[data-label="Dup"] {
+            display: none;
+        }
+
+        .table-scroll td.no-data,
+        .scroll-x td.no-data {
+            display: block;
+            padding: 2rem 1rem;
+            text-align: center;
+        }
+
+        .table-scroll table .cell-stack,
+        .scroll-x table .cell-stack,
+        .table-scroll table .model-info,
+        .scroll-x table .model-info {
+            min-width: 0;
+            width: auto;
+            display: inline-flex;
+            flex-direction: row;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .table-scroll table .cell-secondary,
+        .scroll-x table .cell-secondary,
+        .table-scroll table .provider-primary,
+        .scroll-x table .provider-primary {
+            min-width: 0;
+        }
+
+        .table-scroll table .model-original,
+        .scroll-x table .model-original,
+        .table-scroll table .model-mapped,
+        .scroll-x table .model-mapped {
+            display: inline;
+        }
+
+        .table-scroll table .token-button,
+        .scroll-x table .token-button {
+            width: auto;
+            display: inline-flex;
+            white-space: normal;
+        }
+
+        .table-scroll table .expand-icon,
+        .scroll-x table .expand-icon {
+            margin-right: 0;
+        }
+
+        .table-header.dashboard-table-header {
+            flex-direction: row;
+            align-items: center;
+            gap: 0.65rem;
+        }
+
+        .table-header.dashboard-table-header .dashboard-table-header-content {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        .table-header.dashboard-table-header .dashboard-table-header-content h2 {
+            font-size: 1.05rem;
+        }
+
+        .table-header.dashboard-table-header .filter-status {
+            font-size: 0.74rem;
+        }
+
+        .table-header.dashboard-table-header .dashboard-header-actions {
+            width: auto;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+        }
+
+        .table-header.dashboard-table-header .dashboard-header-actions .action-btn {
+            width: auto;
+            padding: 0.45rem 0.7rem;
+            font-size: 0.85rem;
+        }
+
+        .table-header.dashboard-table-header .dashboard-header-actions .action-label {
+            display: none;
+        }
+
+        .table-header.dashboard-table-header .auto-refresh-status {
+            margin-left: 0;
+            font-size: 0.74rem;
+            white-space: nowrap;
+        }
+
+        .filter-toolbar.dashboard-filter-toolbar {
+            flex-direction: row;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .filter-toolbar.dashboard-filter-toolbar .filter-input-wrapper {
+            flex: 1 1 100%;
+            min-width: 0 !important;
+        }
+
+        .filter-toolbar.dashboard-filter-toolbar .action-btn {
+            flex: 1 1 calc(50% - 0.25rem);
+        }
+
+        .filter-help.dashboard-filter-help {
+            padding: 0 1rem 0.75rem 1rem;
+            font-size: 0.75rem;
+            line-height: 1.35;
+        }
+    }
+
+    @media (max-width: 560px) {
+        .summary-cards,
+        .control-group,
+        .provider-stats,
+        .used-models-grid,
+        .metrics-grid {
+            grid-template-columns: 1fr !important;
+        }
+
+        th,
+        td {
+            padding: 0.5rem 0.65rem;
+        }
+    }
+
+    @media (orientation: landscape) and (max-height: 500px) {
+        .container {
+            width: calc(100% - 1rem);
+            padding: 0.75rem 0;
+        }
+
+        .chart-wrapper {
+            height: 260px !important;
+        }
+    }
+</style>

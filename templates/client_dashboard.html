@@ -348,6 +348,7 @@
             }
         }
     </style>
+    {% include 'responsive_shell.html' %}
 </head>
 <body>
     <!-- Keep existing navigation -->
@@ -400,6 +401,7 @@
 
             <div id="error-container"></div>
 
+            <div class="table-scroll">
             <table id="requests-table">
                 <thead>
                     <tr>
@@ -422,6 +424,7 @@
                     </tr>
                 </tbody>
             </table>
+            </div>
         </div>
     </div>
 
@@ -626,20 +629,20 @@
 
             tbody.innerHTML = logs.map(log => `
                 <tr class="expandable-row" onclick="window.location.href='/request/${log.id}'" style="cursor: pointer;">
-                    <td>
+                    <td data-label="" aria-hidden="true">
                         <span class="material-icons expand-icon">chevron_right</span>
                     </td>
-                    <td class="timestamp">${formatTimestamp(log.timestamp)}</td>
-                    <td>
+                    <td data-label="Time" class="timestamp">${formatTimestamp(log.timestamp)}</td>
+                    <td data-label="Service">
                         <span class="service-badge service-${log.service_type}">
                             ${log.service_type || 'unknown'}
                         </span>
                     </td>
-                    <td>${log.path || '-'}</td>
-                    <td>${formatModel(log.original_model, log.mapped_model)}</td>
-                    <td>${formatSize(log.request_size)}</td>
-                    <td class="duration">${formatDuration(log.duration_ms)}</td>
-                    <td>${formatStatus(log.status_code)}</td>
+                    <td data-label="Path">${log.path || '-'}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Size">${formatSize(log.request_size)}</td>
+                    <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
+                    <td data-label="Status">${formatStatus(log.status_code)}</td>
                 </tr>
             `).join('');
         }
@@ -773,20 +776,20 @@
             newRow.className = 'expandable-row';
             newRow.onclick = () => window.location.href = `/request/${request.id}`;
             newRow.innerHTML = `
-                <td>
+                <td data-label="" aria-hidden="true">
                     <span class="material-icons expand-icon">chevron_right</span>
                 </td>
-                <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                <td>
+                <td data-label="Time" class="timestamp">${formatTimestamp(request.timestamp)}</td>
+                <td data-label="Service">
                     <span class="service-badge service-${request.service_type}">
                         ${request.service_type || 'unknown'}
                     </span>
                 </td>
-                <td>${request.path || '-'}</td>
-                <td>${formatModel(request.original_model, request.mapped_model)}</td>
-                <td>${formatSize(request.request_size)}</td>
-                <td class="duration">${formatDuration(request.duration_ms)}</td>
-                <td>${formatStatus(request.status_code)}</td>
+                <td data-label="Path">${request.path || '-'}</td>
+                <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                <td data-label="Size">${formatSize(request.request_size)}</td>
+                <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
+                <td data-label="Status">${formatStatus(request.status_code)}</td>
             `;
 
             tbody.insertBefore(newRow, tbody.firstChild);
@@ -803,20 +806,20 @@
             for (const row of rows) {
                 if (row.onclick && row.onclick.toString().includes(request.id)) {
                     row.innerHTML = `
-                        <td>
+                        <td data-label="" aria-hidden="true">
                             <span class="material-icons expand-icon">chevron_right</span>
                         </td>
-                        <td class="timestamp">${formatTimestamp(request.timestamp)}</td>
-                        <td>
+                        <td data-label="Time" class="timestamp">${formatTimestamp(request.timestamp)}</td>
+                        <td data-label="Service">
                             <span class="service-badge service-${request.service_type}">
                                 ${request.service_type || 'unknown'}
                             </span>
                         </td>
-                        <td>${request.path || '-'}</td>
-                        <td>${formatModel(request.original_model, request.mapped_model)}</td>
-                        <td>${formatSize(request.request_size)}</td>
-                        <td class="duration">${formatDuration(request.duration_ms)}</td>
-                        <td>${formatStatus(request.status_code)}</td>
+                        <td data-label="Path">${request.path || '-'}</td>
+                        <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                        <td data-label="Size">${formatSize(request.request_size)}</td>
+                        <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
+                        <td data-label="Status">${formatStatus(request.status_code)}</td>
                     `;
 
                     row.onclick = () => window.location.href = `/request/${request.id}`;

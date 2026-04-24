@@ -435,13 +435,14 @@
             }
         }
     </style>
+    {% include 'responsive_shell.html' %}
 </head>
 <body>
     <!-- Keep existing navigation -->
     {% include 'navigation.html' %}
 
     <!-- Stats Section -->
-    <div class="stats">
+    <div class="stats dashboard-stats">
         <div class="stat-card">
             <div class="number" style="color: #1976d2;" id="total-requests">-</div>
             <div class="label">Total Requests</div>
@@ -463,21 +464,21 @@
     <!-- Recent Requests Table -->
     <div class="container">
         <div class="table-container">
-            <div class="table-header">
-                <div class="table-header-content">
+            <div class="table-header dashboard-table-header">
+                <div class="table-header-content dashboard-table-header-content">
                     <h2>Recent Requests</h2>
                     <div class="filter-status" id="filter-status">Showing latest 100 requests</div>
                 </div>
-                <div class="action-buttons">
-                    <button class="action-btn secondary" onclick="refreshData()">
+                <div class="action-buttons dashboard-header-actions">
+                    <button class="action-btn secondary" onclick="refreshData()" aria-label="Refresh data" title="Refresh data">
                         <span class="material-icons" style="font-size: 1rem;">refresh</span>
-                        Refresh
+                        <span class="action-label">Refresh</span>
                     </button>
                     <span class="auto-refresh-status" id="connection-status">🔴 Connecting...</span>
                 </div>
             </div>
 
-            <form class="filter-toolbar" id="filter-form">
+            <form class="filter-toolbar dashboard-filter-toolbar" id="filter-form">
                 <div class="filter-input-wrapper">
                     <span class="material-icons">filter_alt</span>
                     <input
@@ -492,12 +493,13 @@
                 <button class="action-btn secondary" type="button" id="clear-filter-btn">Clear</button>
             </form>
 
-            <div class="filter-help">
+            <div class="filter-help dashboard-filter-help">
                 Space-separated clauses are ANDed. Supported fields: <strong>host</strong>, <strong>provider</strong>, and <strong>model</strong>. Bare words also search across the visible request fields.
             </div>
 
             <div id="error-container"></div>
 
+            <div class="table-scroll">
             <table id="requests-table">
                 <thead>
                     <tr>
@@ -522,6 +524,7 @@
                     </tr>
                 </tbody>
             </table>
+            </div>
         </div>
     </div>
 
@@ -735,18 +738,18 @@
 
             tbody.innerHTML = logs.map(log => `
                 <tr class="expandable-row" onclick="window.location.href='/request/${encodeURIComponent(log.id || '')}'" style="cursor: pointer;">
-                    <td>
+                    <td data-label="" aria-hidden="true">
                         <span class="material-icons expand-icon">chevron_right</span>
                     </td>
-                    <td class="timestamp">${formatTimestamp(log.timestamp)}</td>
-                    <td>${renderSourceCell(log)}</td>
-                    <td>${renderProviderCell(log)}</td>
-                    <td>${escapeHtml(log.path || '-')}</td>
-                    <td>${formatModel(log.original_model, log.mapped_model)}</td>
-                    <td>${formatSize(log.request_size)}</td>
-                    <td class="duration">${formatDuration(log.duration_ms)}</td>
-                    <td>${formatStatus(log.status_code)}</td>
-                    <td>${formatDuplicate(log)}</td>
+                    <td data-label="Time" class="timestamp">${formatTimestamp(log.timestamp)}</td>
+                    <td data-label="Source">${renderSourceCell(log)}</td>
+                    <td data-label="Provider">${renderProviderCell(log)}</td>
+                    <td data-label="Path">${escapeHtml(log.path || '-')}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Size">${formatSize(log.request_size)}</td>
+                    <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
+                    <td data-label="Status">${formatStatus(log.status_code)}</td>
+                    <td data-label="Dup">${formatDuplicate(log)}</td>
                 </tr>
             `).join('');
         }
