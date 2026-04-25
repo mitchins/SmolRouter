@@ -646,6 +646,28 @@ def test_serialize_request_log_reuses_summary_metadata():
     assert payload["api_key_total"] == 5
 
 
+def test_serialize_request_log_normalizes_empty_provider_id():
+    log_entry = SimpleNamespace(
+        id="req-124",
+        timestamp=app_module.datetime.now(),
+        source_ip="127.0.0.1",
+        path="/v1/chat/completions",
+        service_type="openai",
+        provider_id="",
+        original_model="gpt-4o",
+        mapped_model="gemini-2.5-pro",
+        duration_ms=None,
+        request_size=12,
+        response_size=24,
+        status_code="pending",
+        completed_at=None,
+    )
+
+    payload = app_module._serialize_request_log(log_entry)
+
+    assert payload["provider_id"] is None
+
+
 def test_serialize_performance_point_uses_summary_fields():
     log_entry = SimpleNamespace(
         id="req-456",

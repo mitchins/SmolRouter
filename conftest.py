@@ -6,6 +6,7 @@ import pytest
 import os
 import asyncio
 import threading
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import httpx
@@ -22,7 +23,7 @@ def _run_async_fixture_step(coro):
     except RuntimeError:
         return asyncio.run(coro)
 
-    result = {"value": None, "error": None}
+    result: dict[str, Any] = {"value": None, "error": None}
 
     def _runner():
         loop = asyncio.new_event_loop()
@@ -107,7 +108,7 @@ def isolated_db():
         await redis_client.flushall()  # Clear any existing data
         return redis_client
 
-    client = _run_async_fixture_step(init_redis())
+    client = cast(Any, _run_async_fixture_step(init_redis()))
 
     yield client
 
@@ -151,7 +152,7 @@ def client():
 
 @pytest.fixture
 def webui_env(monkeypatch):
-    for key in os.environ:
+    for key in tuple(os.environ):
         if key.startswith("WEBUI_"):
             monkeypatch.delenv(key, raising=False)
 
