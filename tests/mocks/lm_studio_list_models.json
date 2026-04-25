@@ -1,0 +1,6 @@
+{
+    "data": [
+        {"id": "llama3-8b-local", "object": "model"},
+        {"id": "mistral-7b-local", "object": "model"}
+    ]
+}

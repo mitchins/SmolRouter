@@ -235,6 +235,7 @@
             }
         }
     </style>
+    {% include 'responsive_shell.html' %}
 </head>
 <body>
     <div class="header">
@@ -263,18 +264,25 @@
                         <span class="detail-value">{{ log.path }}</span>
                     </div>
                     
+                    {% if log.request_body_hash %}
+                    <div class="detail-row">
+                        <span class="detail-label">Body Hash:</span>
+                        <span class="detail-value">{{ log.request_body_hash }}</span>
+                    </div>
+                    {% endif %}
+                    
                     <div class="detail-row">
                         <span class="detail-label">Source IP:</span>
                         <span class="detail-value">{{ log.source_ip }}</span>
                     </div>
                     
                     <div class="detail-row">
-                        <span class="detail-label">Service:</span>
+                        <span class="detail-label">Protocol:</span>
                         <span class="detail-value">
                             <div class="service-icon service-{{ log.service_type }}">
                                 {% if log.service_type == 'openai' %}
                                 <span class="material-icons" style="font-size: 1rem;">smart_toy</span>
-                                OpenAI
+                                OpenAI-compatible
                                 {% else %}
                                 <span class="material-icons" style="font-size: 1rem;">psychology</span>
                                 Ollama
@@ -282,6 +290,15 @@
                             </div>
                         </span>
                     </div>
+                    
+                    {% if log.provider_id %}
+                    <div class="detail-row">
+                        <span class="detail-label">Provider:</span>
+                        <span class="detail-value">
+                            <strong>{{ log.provider_id }}</strong>
+                        </span>
+                    </div>
+                    {% endif %}
                 </div>
                 
                 <div class="detail-section">
@@ -292,7 +309,7 @@
                         <span class="detail-value">
                             {% if log.completed_at %}
                                 {% if log.status_code %}
-                                <span class="status-badge {% if log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
+                                <span class="status-badge {% if log.status_code is string %}status-inflight{% elif log.status_code < 400 %}status-success{% else %}status-error{% endif %}">
                                     {{ log.status_code }}
                                 </span>
                                 {% else %}
@@ -309,8 +326,8 @@
                         <span class="detail-value">
                             {% if log.duration_ms %}
                             {{ log.duration_ms }}ms
-                            {% elif not log.completed_at %}
-                            {{ ((log.timestamp.utcnow() - log.timestamp).total_seconds() * 1000) | int }}ms (ongoing)
+                            {% elif not log.completed_at and elapsed_ms %}
+                            {{ elapsed_ms }}ms (ongoing)
                             {% else %}
                             <span class="no-data">N/A</span>
                             {% endif %}
@@ -377,6 +394,18 @@
                         <div class="metric-value">{{ log.duration_ms or 'N/A' }}</div>
                         <div class="metric-label">Duration (ms)</div>
                     </div>
+                    {% if log.api_key_suffix %}
+                    <div class="metric-item">
+                        <div class="metric-value" style="font-size: 1rem;">...{{ log.api_key_suffix }}</div>
+                        <div class="metric-label">API Key{% if log.api_key_index and log.api_key_total %} #{{ log.api_key_index }}/{{ log.api_key_total }}{% endif %}</div>
+                    </div>
+                    {% endif %}
+                    {% if log.proxy_used %}
+                    <div class="metric-item">
+                        <div class="metric-value" style="font-size: 0.9rem;">{{ log.proxy_used }}</div>
+                        <div class="metric-label">Proxy</div>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
             
@@ -389,6 +418,32 @@
                 </div>
                 <div class="collapsible-content">
                     <div class="code-block">{{ request_body_str }}</div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Duplicate Requests -->
+            {% if duplicates and duplicates|length > 0 %}
+            <div class="collapsible open">
+                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                    <span class="collapsible-title">Duplicate Requests ({{ duplicates|length }})</span>
+                    <span class="material-icons collapsible-icon">expand_more</span>
+                </div>
+                <div class="collapsible-content">
+                    <div style="padding: 0.5rem 0;">
+                        {% for d in duplicates %}
+                        <div class="detail-row" style="border-bottom: none;">
+                            <span class="detail-label">#{{ d.id }}</span>
+                            <span class="detail-value">
+                                {{ d.timestamp }}
+                                &nbsp;•&nbsp;
+                                Status: {{ d.status_code or 'pending' }}
+                                &nbsp;•&nbsp;
+                                <a href="/request/{{ d.id }}" style="text-decoration:none;color:#1976d2;">View</a>
+                            </span>
+                        </div>
+                        {% endfor %}
+                    </div>
                 </div>
             </div>
             {% endif %}

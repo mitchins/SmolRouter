@@ -18,6 +18,13 @@ lib/
 lib64/
 parts/
 sdist/
+
+# Data files - ignore runtime data in any location
+*.db
+blob_storage/
+data/
+deploy-data/
+
 var/
 wheels/
 share/python-wheels/
@@ -129,6 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
+*.env
 .venv
 env/
 venv/
@@ -174,3 +182,12 @@ cython_debug/
 .pypirc
 requests.db
 blob_storage/
+
+# Configuration - ignore actual configs with secrets
+config/routes.yaml
+config/google_api_keys.txt
+
+# Internal management scripts - not part of public repo
+scripts/
+scripts/*.py
+scripts/README.md

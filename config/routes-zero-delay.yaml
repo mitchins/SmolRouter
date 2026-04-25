@@ -1,0 +1,34 @@
+# Zero delay dummy provider for maximum throughput testing
+# Tests pure SmolRouter infrastructure without any artificial delays
+
+routes: []
+
+providers:
+  - name: "dummy-zero"
+    type: "dummy"
+    enabled: true
+    priority: 1
+    url: "dummy://localhost/zero"
+    response_delay_ms: 0  # Zero delay for maximum speed
+    failure_rate: 0.0  # No failures
+    response_tokens: 10  # Minimal tokens
+    timeout: 30.0
+
+strategy:
+  type: "smart"
+  config:
+    aliases:
+      "gpt-3.5-turbo": "dummy-zero-3.5"
+      "gpt-4": "dummy-zero-4.0"
+
+access_control:
+  type: "basic"
+  config:
+    default_access: true
+
+cache:
+  enabled: true
+  ttl: 300
+
+container:
+  enabled: true

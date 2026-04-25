@@ -1,0 +1,71 @@
+# Development files
+.git
+.github
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.coverage
+
+# Documentation and examples (exclude to prevent secrets leak)
+README.md
+*.md
+docs/
+images/
+templates/
+
+# Configuration files with secrets
+routes.yaml
+google_api_keys.txt*
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Database and storage
+*.db
+*.sqlite
+blob_storage/
+
+# Testing files
+test_*.py
+tests/
+conftest.py
+
+# Large images
+*.png
+*.jpg
+*.jpeg
+
+# Development configuration
+demo_logging.py
+Makefile
+.pre-commit-config.yaml
+sonar-project.properties
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Keep essential files (override exclusions above)
+!pyproject.toml
+!uv.lock
+!smolrouter/
+!routes.yaml.example
+!templates/

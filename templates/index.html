@@ -15,7 +15,7 @@
             max-width: 1200px;
             margin: 0 auto;
         }
-        
+
         .stat-card {
             background: white;
             padding: 1.5rem;
@@ -24,99 +24,154 @@
             text-align: center;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        
+
         .stat-card:hover {
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
-        
+
         .stat-card .number {
             font-size: 2rem;
             font-weight: bold;
             margin-bottom: 0.5rem;
         }
-        
+
         .stat-card .label {
             color: #666;
             font-size: 0.9rem;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
+
         .container {
             max-width: 1200px;
             margin: 0 auto;
             padding: 0 2rem 2rem 2rem;
         }
-        
+
         .table-container {
             background: white;
             border-radius: 8px;
-            overflow: hidden;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
         }
-        
+
         .table-header {
-            padding: 1.5rem 2rem;
+            background: #f8f9fa;
+            padding: 1.5rem;
             border-bottom: 1px solid #e0e0e0;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: #fafafa;
         }
-        
+
         .table-header h2 {
             margin: 0;
             color: #333;
-            font-size: 1.2rem;
-            font-weight: 600;
+            font-size: 1.25rem;
         }
-        
+
+        .table-header-content {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .filter-status {
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .filter-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            background: #fff;
+            flex-wrap: wrap;
+        }
+
+        .filter-input-wrapper {
+            flex: 1;
+            min-width: 280px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            background: #fff;
+        }
+
+        .filter-input-wrapper:focus-within {
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.12);
+        }
+
+        .filter-input-wrapper .material-icons {
+            color: #6c757d;
+            font-size: 1.1rem;
+        }
+
+        .filter-input {
+            width: 100%;
+            border: none;
+            outline: none;
+            padding: 0.75rem 0;
+            font-size: 0.95rem;
+            background: transparent;
+        }
+
+        .filter-help {
+            padding: 0 1.5rem 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            color: #666;
+            font-size: 0.8rem;
+        }
+
         .action-buttons {
             display: flex;
             gap: 0.5rem;
         }
-        
+
         .action-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
             display: flex;
             align-items: center;
             gap: 0.5rem;
-            padding: 0.5rem 1rem;
-            border: none;
-            border-radius: 6px;
-            background: #667eea;
-            color: white;
-            text-decoration: none;
-            font-size: 0.9rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.2s;
+            transition: background 0.2s;
         }
-        
+
         .action-btn:hover {
-            background: #5a6fd8;
-            transform: translateY(-1px);
+            background: #0056b3;
         }
-        
+
         .action-btn.secondary {
             background: #6c757d;
         }
-        
+
         .action-btn.secondary:hover {
             background: #5a6268;
         }
-        
+
         table {
             width: 100%;
             border-collapse: collapse;
         }
-        
+
         th, td {
             padding: 0.75rem 1rem;
             text-align: left;
             border-bottom: 1px solid #e0e0e0;
         }
-        
+
         th {
             background: #f8f9fa;
             font-weight: 600;
@@ -125,11 +180,11 @@
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
+
         tr:hover {
             background: #f8f9fa;
         }
-        
+
         .status {
             padding: 0.25rem 0.5rem;
             border-radius: 12px;
@@ -137,11 +192,11 @@
             font-weight: 600;
             text-transform: uppercase;
         }
-        
+
         .status-200 { background: #d4edda; color: #155724; }
         .status-400 { background: #fff3cd; color: #856404; }
         .status-500 { background: #f8d7da; color: #721c24; }
-        
+
         .service-badge {
             background: #e3f2fd;
             color: #0d47a1;
@@ -151,176 +206,766 @@
             font-weight: 600;
             text-transform: uppercase;
         }
-        
+
         .service-ollama { background: #e8f5e8; color: #2e7d32; }
         .service-openai { background: #fff3e0; color: #f57c00; }
-        
+
         .duration {
             font-family: 'Monaco', 'Menlo', monospace;
             font-size: 0.75rem;
             color: #666;
         }
-        
+
         .timestamp {
             font-size: 0.75rem;
             color: #666;
         }
-        
+
         .no-data {
             text-align: center;
             padding: 3rem;
             color: #666;
             font-style: italic;
         }
-        
+
         .model-info {
             font-size: 0.8rem;
         }
-        
+
         .model-original {
             color: #666;
         }
-        
+
         .model-mapped {
             color: #333;
             font-weight: 500;
         }
-        
+
+        .cell-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .cell-secondary {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            flex-wrap: wrap;
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .token-button {
+            padding: 0;
+            border: none;
+            background: none;
+            color: #007bff;
+            cursor: pointer;
+            font: inherit;
+            text-align: left;
+        }
+
+        .token-button:hover {
+            color: #0056b3;
+            text-decoration: underline;
+        }
+
+        .token-button.secondary {
+            color: #495057;
+            font-size: 0.8rem;
+        }
+
+        .icon-link {
+            display: inline-flex;
+            align-items: center;
+            color: #6c757d;
+            text-decoration: none;
+        }
+
+        .icon-link:hover {
+            color: #007bff;
+        }
+
+        .provider-primary {
+            font-weight: 500;
+        }
+
+        /* Loading states */
+        .loading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 4px;
+            margin: 1rem;
+            text-align: center;
+        }
+
+        .auto-refresh-status {
+            font-size: 0.8rem;
+            color: #666;
+            margin-left: 1rem;
+        }
+
+        /* JSON Formatting Styles */
+        .json-container {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            margin: 0.5rem 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .json-header {
+            background: #e9ecef;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #dee2e6;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .json-toggle {
+            background: none;
+            border: none;
+            color: #007bff;
+            cursor: pointer;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+
+        .json-toggle:hover {
+            background: rgba(0, 123, 255, 0.1);
+        }
+
+        .json-content {
+            padding: 0.75rem;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .json-content.collapsed {
+            display: none;
+        }
+
+        /* JSON Syntax Highlighting */
+        .json-key { color: #0451a5; font-weight: 600; }
+        .json-string { color: #0a3069; }
+        .json-number { color: #098658; }
+        .json-boolean { color: #0550ae; font-weight: 600; }
+        .json-null { color: #6f7681; font-style: italic; }
+
+        /* Expandable rows */
+        .expandable-row {
+            cursor: pointer;
+        }
+
+        .row-details {
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .row-details td {
+            padding: 1rem;
+            border-bottom: none;
+        }
+
+        .expand-icon {
+            transition: transform 0.2s;
+            font-size: 1rem;
+            margin-right: 0.5rem;
+            color: #666;
+        }
+
+        .expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+
         @media (max-width: 768px) {
             .stats {
                 grid-template-columns: repeat(2, 1fr);
                 padding: 1rem;
             }
-            
+
             .container {
                 padding: 0 1rem 1rem 1rem;
             }
-            
+
             .table-header {
                 flex-direction: column;
                 gap: 1rem;
                 align-items: stretch;
             }
-            
+
+            .filter-toolbar {
+                padding: 1rem;
+            }
+
+            .filter-input-wrapper {
+                min-width: 100%;
+            }
+
+            .filter-help {
+                padding: 0 1rem 1rem 1rem;
+            }
+
             .action-buttons {
                 justify-content: center;
             }
-            
+
             table {
                 font-size: 0.9rem;
             }
-            
+
             th, td {
                 padding: 0.5rem;
             }
         }
     </style>
+    {% include 'responsive_shell.html' %}
 </head>
 <body>
+    <!-- Keep existing navigation -->
     {% include 'navigation.html' %}
-    
-    <div class="stats">
+
+    <!-- Stats Section -->
+    <div class="stats dashboard-stats">
         <div class="stat-card">
-            <div class="number" style="color: #1976d2;">{{ stats.total_requests }}</div>
+            <div class="number" style="color: #1976d2;" id="total-requests">-</div>
             <div class="label">Total Requests</div>
         </div>
         <div class="stat-card">
-            <div class="number" style="color: #388e3c;">{{ stats.successful_requests }}</div>
-            <div class="label">Successful</div>
+            <div class="number" style="color: #388e3c;" id="successful-requests">-</div>
+            <div class="label">Processed</div>
         </div>
         <div class="stat-card">
-            <div class="number" style="color: #f57c00;">{{ stats.requests_24h }}</div>
-            <div class="label">Last 24 Hours</div>
+            <div class="number" style="color: #f57c00;" id="requests-24h">-</div>
+            <div class="label">Recent</div>
         </div>
         <div class="stat-card">
-            <div class="number" style="color: #ff9800;">{{ stats.inflight_requests }}</div>
+            <div class="number" style="color: #ff9800;" id="inflight-requests">-</div>
             <div class="label">🔄 Inflight</div>
         </div>
     </div>
-    
+
+    <!-- Recent Requests Table -->
     <div class="container">
         <div class="table-container">
-            <div class="table-header">
-                <h2>Recent Requests</h2>
-                <div class="action-buttons">
-                    <button class="action-btn secondary" onclick="window.location.reload()">
+            <div class="table-header dashboard-table-header">
+                <div class="table-header-content dashboard-table-header-content">
+                    <h2>Recent Requests</h2>
+                    <div class="filter-status" id="filter-status">Showing latest 100 requests</div>
+                </div>
+                <div class="action-buttons dashboard-header-actions">
+                    <button class="action-btn secondary" onclick="refreshData()" aria-label="Refresh data" title="Refresh data">
                         <span class="material-icons" style="font-size: 1rem;">refresh</span>
-                        Refresh
+                        <span class="action-label">Refresh</span>
                     </button>
+                    <span class="auto-refresh-status" id="connection-status">🔴 Connecting...</span>
                 </div>
             </div>
-            
-            {% if logs %}
-            <table>
+
+            <form class="filter-toolbar dashboard-filter-toolbar" id="filter-form">
+                <div class="filter-input-wrapper">
+                    <span class="material-icons">filter_alt</span>
+                    <input
+                        class="filter-input"
+                        id="dashboard-query"
+                        type="search"
+                        placeholder="host:192.168.1.14 provider:google-gen-ai model:gemma3-12b"
+                        autocomplete="off"
+                    >
+                </div>
+                <button class="action-btn" type="submit">Apply</button>
+                <button class="action-btn secondary" type="button" id="clear-filter-btn">Clear</button>
+            </form>
+
+            <div class="filter-help dashboard-filter-help">
+                Space-separated clauses are ANDed. Supported fields: <strong>host</strong>, <strong>provider</strong>, and <strong>model</strong>. Bare words also search across the visible request fields.
+            </div>
+
+            <div id="error-container"></div>
+
+            <div class="table-scroll">
+            <table id="requests-table">
                 <thead>
                     <tr>
+                        <th></th>
                         <th>Time</th>
                         <th>Source</th>
-                        <th>Service</th>
+                        <th>Provider</th>
                         <th>Path</th>
                         <th>Model</th>
                         <th>Size</th>
                         <th>Duration</th>
                         <th>Status</th>
+                        <th title="Duplicate request indicator">Dup</th>
                     </tr>
                 </thead>
-                <tbody>
-                    {% for log in logs %}
-                    <tr onclick="window.location.href='/request/{{ log.id }}'" style="cursor: pointer;">
-                        <td class="timestamp">{{ log.timestamp.strftime('%H:%M:%S') }}</td>
-                        <td>{{ log.source_ip }}</td>
-                        <td>
-                            <span class="service-badge service-{{ log.service_type }}">
-                                {{ log.service_type }}
-                            </span>
-                        </td>
-                        <td>{{ log.path }}</td>
-                        <td>
-                            <div class="model-info">
-                                {% if log.mapped_model and log.mapped_model != log.original_model %}
-                                    <div class="model-original">{{ log.original_model }}</div>
-                                    <div class="model-mapped">→ {{ log.mapped_model }}</div>
-                                {% else %}
-                                    <div class="model-mapped">{{ log.original_model or 'N/A' }}</div>
-                                {% endif %}
-                            </div>
-                        </td>
-                        <td>
-                            {% if log.request_size %}
-                                {{ "%.1f"|format(log.request_size / 1024) }} KB
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
-                        <td class="duration">
-                            {% if log.duration_ms %}
-                                {{ log.duration_ms }}ms
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
-                        <td>
-                            {% if log.status_code %}
-                                <span class="status status-{{ log.status_code // 100 * 100 }}">
-                                    {{ log.status_code }}
-                                </span>
-                            {% else %}
-                                <span class="status" style="background: #f0f0f0; color: #666;">
-                                    PENDING
-                                </span>
-                            {% endif %}
+                <tbody id="requests-tbody">
+                    <tr>
+                        <td colspan="10" class="no-data">
+                            <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">hourglass_empty</span>
+                            Loading requests...
                         </td>
                     </tr>
-                    {% endfor %}
                 </tbody>
             </table>
-            {% else %}
-            <div class="no-data">
-                <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
-                No requests logged yet
             </div>
-            {% endif %}
         </div>
     </div>
+
+    <script>
+        let websocket = null;
+        let reconnectAttempts = 0;
+        let currentQuery = '';
+        let scheduledRefreshHandle = null;
+
+        const DEFAULT_LIMIT = 100;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        const RECONNECT_INTERVAL = 3000;
+
+        function getUrlFilterQuery() {
+            return (new URLSearchParams(globalThis.location.search).get('q') || '').trim();
+        }
+
+        function syncUrlFilterQuery(query, historyMode = 'replace') {
+            if (historyMode === 'none') {
+                return;
+            }
+
+            const normalizedQuery = (query || '').trim();
+            const url = new URL(globalThis.location.href);
+            const currentUrlQuery = (url.searchParams.get('q') || '').trim();
+
+            if (normalizedQuery) {
+                url.searchParams.set('q', normalizedQuery);
+            } else {
+                url.searchParams.delete('q');
+            }
+
+            const method = historyMode === 'push' && currentUrlQuery !== normalizedQuery ? 'pushState' : 'replaceState';
+            globalThis.history[method]({}, '', `${url.pathname}${url.search}${url.hash}`);
+        }
+
+        function buildDashboardApiUrl(query = currentQuery) {
+            const params = new URLSearchParams({ limit: String(DEFAULT_LIMIT) });
+            if (query) {
+                params.set('q', query);
+            }
+            return `/api/dashboard?${params.toString()}`;
+        }
+
+        function buildWebSocketUrl() {
+            const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const params = new URLSearchParams();
+            if (currentQuery) {
+                params.set('q', currentQuery);
+            }
+            const suffix = params.toString() ? `?${params.toString()}` : '';
+            return `${protocol}//${globalThis.location.host}/ws/dashboard${suffix}`;
+        }
+
+        function formatTimestamp(isoString) {
+            if (!isoString) return '-';
+            return new Date(isoString).toLocaleTimeString();
+        }
+
+        function formatSize(bytes) {
+            if (!bytes) return '-';
+            return (bytes / 1024).toFixed(1) + ' KB';
+        }
+
+        function formatDuration(ms) {
+            if (ms === null || ms === undefined || ms === 0) return '-';
+            if (ms < 0) return '-';
+            return `${ms}ms`;
+        }
+
+        function formatStatus(statusCode) {
+            if (!statusCode) {
+                return '<span class="status" style="background: #f0f0f0; color: #666;">PENDING</span>';
+            }
+            const category = Math.floor(Number(statusCode) / 100) * 100;
+            return `<span class="status status-${category}">${escapeHtml(String(statusCode))}</span>`;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text ?? '';
+            return div.innerHTML;
+        }
+
+        function escapeClassName(text) {
+            return String(text || 'unknown').toLowerCase().replaceAll(/[^a-z0-9_-]+/g, '-');
+        }
+
+        function renderFilterButton(field, value, label, extraClass = '') {
+            if (!value) {
+                return escapeHtml(label || '-');
+            }
+
+            const classSuffix = extraClass ? ` ${extraClass}` : '';
+            return `
+                <button
+                    type="button"
+                    class="token-button${classSuffix}"
+                    data-filter-field="${escapeHtml(field)}"
+                    data-filter-value="${encodeURIComponent(value)}"
+                >
+                    ${escapeHtml(label || value)}
+                </button>
+            `;
+        }
+
+        function renderSourceCell(log) {
+            if (!log.source_ip) {
+                return '-';
+            }
+
+            const sourceIp = String(log.source_ip);
+            return `
+                <div class="cell-stack">
+                    ${renderFilterButton('host', sourceIp, sourceIp)}
+                    <div class="cell-secondary">
+                        <a class="icon-link client-dashboard-link" href="/clients/${encodeURIComponent(sourceIp)}" title="Open client dashboard">
+                            <span class="material-icons" style="font-size: 0.95rem;">open_in_new</span>
+                        </a>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderProviderCell(log) {
+            const providerLabel = log.provider_id || log.service_type || 'unknown';
+            const serviceType = log.service_type || 'unknown';
+            return `
+                <div class="cell-stack">
+                    <div class="provider-primary">${renderFilterButton('provider', providerLabel, providerLabel)}</div>
+                    <div class="cell-secondary">
+                        <span class="service-badge service-${escapeClassName(serviceType)}">${escapeHtml(serviceType)}</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderModelValue(value, className) {
+            if (!value) {
+                return '<span class="cell-secondary">N/A</span>';
+            }
+            return renderFilterButton('model', value, value, className);
+        }
+
+        function formatModel(originalModel, mappedModel) {
+            const resolvedOriginal = originalModel || mappedModel;
+            const resolvedMapped = mappedModel || originalModel;
+
+            if (resolvedMapped && resolvedOriginal && resolvedMapped !== resolvedOriginal) {
+                return `
+                    <div class="model-info">
+                        <div class="model-original">${renderModelValue(resolvedOriginal, 'secondary')}</div>
+                        <div class="model-mapped">→ ${renderModelValue(resolvedMapped)}</div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="model-info">
+                    <div class="model-mapped">${renderModelValue(resolvedOriginal || resolvedMapped)}</div>
+                </div>
+            `;
+        }
+
+        function formatDuplicate(item) {
+            const count = item && (item.duplicate_count || 0);
+            const isDuplicate = item && (item.is_duplicate || count > 0);
+            if (!isDuplicate) return '';
+            let title = 'Duplicate';
+            if (count > 0) {
+                const suffix = count === 1 ? '' : 's';
+                title = `${count} other instance${suffix}`;
+            }
+            return `<span class="material-icons" style="font-size: 1rem; color: #c62828;" title="${escapeHtml(title)}">content_copy</span>`;
+        }
+
+        function updateStats(stats) {
+            const processedRequests = stats.completed_requests ?? stats.successful_requests ?? ((stats.openai_requests || 0) + (stats.ollama_requests || 0));
+            const recentRequests = stats.recent_requests ?? stats.total_requests ?? 0;
+
+            document.getElementById('total-requests').textContent = stats.total_requests || 0;
+            document.getElementById('successful-requests').textContent = processedRequests || 0;
+            document.getElementById('requests-24h').textContent = recentRequests || 0;
+            document.getElementById('inflight-requests').textContent = stats.inflight_requests || 0;
+        }
+
+        function updateFilterStatus(filterMeta) {
+            const status = document.getElementById('filter-status');
+            if (filterMeta && filterMeta.active) {
+                status.textContent = `Showing ${filterMeta.matched_count || 0} matching requests for ${filterMeta.query}`;
+                return;
+            }
+
+            status.textContent = `Showing latest ${DEFAULT_LIMIT} requests`;
+        }
+
+        function updateRequestsTable(logs) {
+            const tbody = document.getElementById('requests-tbody');
+
+            if (!logs || logs.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="10" class="no-data">
+                            <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
+                            No matching requests found
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = logs.map(log => `
+                <tr class="expandable-row" onclick="window.location.href='/request/${encodeURIComponent(log.id || '')}'" style="cursor: pointer;">
+                    <td data-label="" aria-hidden="true">
+                        <span class="material-icons expand-icon">chevron_right</span>
+                    </td>
+                    <td data-label="Time" class="timestamp">${formatTimestamp(log.timestamp)}</td>
+                    <td data-label="Source">${renderSourceCell(log)}</td>
+                    <td data-label="Provider">${renderProviderCell(log)}</td>
+                    <td data-label="Path">${escapeHtml(log.path || '-')}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Size">${formatSize(log.request_size)}</td>
+                    <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
+                    <td data-label="Status">${formatStatus(log.status_code)}</td>
+                    <td data-label="Dup">${formatDuplicate(log)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            errorContainer.innerHTML = `
+                <div class="error-message">
+                    <strong>Error:</strong> ${escapeHtml(message)}
+                </div>
+            `;
+        }
+
+        function clearError() {
+            document.getElementById('error-container').innerHTML = '';
+        }
+
+        async function refreshData(query = currentQuery, historyMode = 'replace') {
+            const table = document.getElementById('requests-table');
+            const normalizedQuery = (query || '').trim();
+            table.classList.add('loading');
+            clearError();
+
+            try {
+                const response = await fetch(buildDashboardApiUrl(normalizedQuery));
+                let payload = null;
+
+                try {
+                    payload = await response.json();
+                } catch {
+                    payload = null;
+                }
+
+                if (!response.ok) {
+                    const message = payload?.message || payload?.detail || payload?.error || `HTTP ${response.status}: ${response.statusText}`;
+                    throw new Error(message);
+                }
+
+                currentQuery = normalizedQuery;
+                document.getElementById('dashboard-query').value = currentQuery;
+                syncUrlFilterQuery(currentQuery, historyMode);
+                updateStats(payload.stats || {});
+                updateRequestsTable(payload.logs || []);
+                updateFilterStatus(payload.filter);
+
+                console.log(`Dashboard refreshed at ${new Date().toLocaleTimeString()}`);
+                return true;
+            } catch (error) {
+                console.error('Failed to refresh dashboard:', error);
+                showError(`Failed to refresh data: ${error.message}`);
+                return false;
+            } finally {
+                table.classList.remove('loading');
+            }
+        }
+
+        function scheduleRefreshData() {
+            if (scheduledRefreshHandle !== null) {
+                return;
+            }
+
+            scheduledRefreshHandle = globalThis.setTimeout(async () => {
+                scheduledRefreshHandle = null;
+                await refreshData(currentQuery, 'none');
+            }, 200);
+        }
+
+        function updateConnectionStatus(indicator, tooltip) {
+            const status = document.getElementById('connection-status');
+            status.textContent = indicator;
+            status.title = tooltip;
+        }
+
+        function connectWebSocket() {
+            try {
+                websocket = new WebSocket(buildWebSocketUrl());
+
+                websocket.onopen = function() {
+                    reconnectAttempts = 0;
+                    updateConnectionStatus('🟢 Live', 'Connected - Real-time updates');
+                };
+
+                websocket.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleWebSocketMessage(data);
+                    } catch (error) {
+                        console.error('Failed to parse WebSocket message:', error);
+                    }
+                };
+
+                websocket.onclose = function() {
+                    updateConnectionStatus('🔴 Disconnected', 'Connection lost');
+
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        updateConnectionStatus('🟡 Reconnecting...', `Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+                        setTimeout(connectWebSocket, RECONNECT_INTERVAL);
+                    } else {
+                        updateConnectionStatus('🔴 Offline', 'Max reconnection attempts reached');
+                        showError('WebSocket connection failed. Please refresh the page.');
+                    }
+                };
+
+                websocket.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                    updateConnectionStatus('🔴 Error', 'Connection error');
+                };
+            } catch (error) {
+                console.error('Failed to create WebSocket connection:', error);
+                updateConnectionStatus('🔴 Failed', 'Cannot connect');
+            }
+        }
+
+        function handleWebSocketMessage(data) {
+            switch (data.type) {
+                case 'dashboard_update':
+                    if (data.stats) {
+                        updateStats(data.stats);
+                    }
+                    if (Array.isArray(data.logs)) {
+                        updateRequestsTable(data.logs);
+                    }
+                    if (data.filter) {
+                        updateFilterStatus(data.filter);
+                    }
+                    break;
+                case 'new_request':
+                case 'request_completed':
+                    scheduleRefreshData();
+                    break;
+                case 'stats_update':
+                    if (data.stats) {
+                        updateStats(data.stats);
+                    }
+                    break;
+                case 'filter_error':
+                    showError(data.message || 'Invalid filter query');
+                    break;
+                default:
+                    console.log('Unknown WebSocket message type:', data.type);
+            }
+        }
+
+        function quoteFilterValue(value) {
+            if (!/\s/.test(value)) {
+                return value;
+            }
+
+            return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+        }
+
+        function upsertFilterClause(query, field, value) {
+            const clausePattern = new RegExp(`(^|\\s)${field}:(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|\\S+)`, 'gi');
+            const cleanedQuery = (query || '').replace(clausePattern, ' ').replace(/\s+/g, ' ').trim();
+            const nextClause = `${field}:${quoteFilterValue(value)}`;
+            return [cleanedQuery, nextClause].filter(Boolean).join(' ').trim();
+        }
+
+        async function applyFieldFilter(field, value) {
+            const input = document.getElementById('dashboard-query');
+            const nextQuery = upsertFilterClause(currentQuery || input.value.trim(), field, value);
+            input.value = nextQuery;
+            await refreshData(nextQuery, 'push');
+        }
+
+        async function handleFilterSubmit(event) {
+            event.preventDefault();
+            const nextQuery = document.getElementById('dashboard-query').value.trim();
+            await refreshData(nextQuery, 'push');
+        }
+
+        async function clearFilter() {
+            document.getElementById('dashboard-query').value = '';
+            await refreshData('', 'push');
+        }
+
+        function handleTableClick(event) {
+            const filterButton = event.target.closest('[data-filter-field]');
+            if (filterButton) {
+                event.preventDefault();
+                event.stopPropagation();
+                const field = filterButton.dataset.filterField;
+                const value = decodeURIComponent(filterButton.dataset.filterValue || '');
+                applyFieldFilter(field, value);
+                return;
+            }
+
+            const clientLink = event.target.closest('.client-dashboard-link');
+            if (clientLink) {
+                event.stopPropagation();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            currentQuery = getUrlFilterQuery();
+            document.getElementById('dashboard-query').value = currentQuery;
+            document.getElementById('filter-form').addEventListener('submit', handleFilterSubmit);
+            document.getElementById('clear-filter-btn').addEventListener('click', clearFilter);
+            document.getElementById('requests-tbody').addEventListener('click', handleTableClick, true);
+
+            refreshData(currentQuery, 'replace');
+            connectWebSocket();
+        });
+
+        window.addEventListener('popstate', function() {
+            const queryFromUrl = getUrlFilterQuery();
+            document.getElementById('dashboard-query').value = queryFromUrl;
+            refreshData(queryFromUrl, 'none');
+        });
+
+        window.addEventListener('beforeunload', function() {
+            if (websocket) {
+                websocket.close();
+            }
+        });
+    </script>
 </body>
 </html>

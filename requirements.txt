@@ -5,8 +5,13 @@ pytest
 pytest-asyncio
 pytest-mock
 respx
-peewee
 jinja2
 pyyaml
 slowapi
 PyJWT
+redis
+aiohttp>=3.12.15
+fakeredis>=2.31.3
+google-genai
+google-api-core>=2.19.0
+pytz>=2025.2

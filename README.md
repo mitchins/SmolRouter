@@ -1,211 +1,219 @@
 # SmolRouter
 
-SmolRouter is a lightweight, observable proxy for routing AI model traffic. It keeps your existing OpenAI-compatible clients working while you experiment with different local or hosted model providers.
+SmolRouter is a lightweight AI gateway that keeps OpenAI-compatible clients running while you move traffic across any mix of providers.
 
-[![PyPI version](https://badge.fury.io/py/SmolRouter.svg)](https://badge.fury.io/py/SmolRouter)
-[![codecov](https://codecov.io/gh/mitchins/smolrouter/branch/main/graph/badge.svg)](https://codecov.io/gh/mitchins/smolrouter)
+## What
 
-## TL;DR
+- OpenAI-compatible proxy with drop-in model remapping (`gpt-4` can become `llama3-70b` without touching client code).
+- Smart routing engine that can balance traffic, apply per-team policies, and fail over automatically.
+- Built-in observability, quotas, and security controls for production-facing deployments.
 
-- Acts as a drop-in replacement for OpenAI and Ollama endpoints (`http://localhost:1234` by default).
-- Routes requests by model name, source host, or custom aliases with automatic failover.
-- Logs every request to SQLite with a built-in dashboard for live metrics and request inspection.
-- Ships with security controls (JWT auth, reverse-proxy detection) but is intended to run behind your own proxy.
+## Why
 
-## Quick Start
+Use SmolRouter when you need to:
 
-### Docker deployment (fastest path)
+- Consolidate multiple model vendors or on-prem hosts behind a single OpenAI-style endpoint.
+- Preserve legacy client integrations while experimenting with new models or providers.
+- Inspect, audit, and meter requests without giving every application direct access to provider API keys.
+- Enforce consistent policies (JWT auth, request throttling, content filters) at the edge of your AI estate.
 
-```bash
-docker build -t smolrouter .
-docker run -d \
-  --name smolrouter \
-  --restart unless-stopped \
-  -p 1234:1234 \
-  -e DEFAULT_UPSTREAM="http://localhost:8000" \
-  -e MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}' \
-  -v ./routes.yaml:/app/routes.yaml \
-  smolrouter
-```
+## How
 
-### Python deployment (pip install)
+### Quick Start
 
-```bash
-pip install smolrouter
+1. **Run SmolRouter.** Pick Docker or Python—both expose the same HTTP interface.
 
-export DEFAULT_UPSTREAM="http://localhost:8000"
-export MODEL_MAP='{"gpt-3.5-turbo":"llama3-8b"}'
-smolrouter
+   ```bash
+   # Docker
+   docker build -t smolrouter .
+   docker run -d -p 1234:1234 \
+     -e DEFAULT_UPSTREAM="http://host.docker.internal:8000" \
+     -e MODEL_MAP='{"gpt-4":"llama3-70b"}' \
+     smolrouter
+   ```
 
-# Alternate entrypoint if you need to change the listen port
-LISTEN_PORT=8080 python -m smolrouter.app
-```
+   ```bash
+   # Python
+   pip install smolrouter
+   export DEFAULT_UPSTREAM="http://localhost:8000"
+   export MODEL_MAP='{"gpt-4":"llama3-70b"}'
+   smolrouter
+   ```
 
-### Point clients at SmolRouter
+2. **Point clients at the router.** Swap the base URL and keep your existing model IDs.
 
-```python
-import openai
+   ```python
+   import openai
 
-client = openai.OpenAI(
-    base_url="http://localhost:1234/v1",
-    api_key="your-api-key"  # forwarded to the upstream server
-)
+   client = openai.OpenAI(
+       base_url="http://localhost:1234/v1",
+       api_key="local-proxy-key",  # forwarded to your upstreams
+   )
 
-response = client.chat.completions.create(
-    model="gpt-3.5-turbo",  # transparently remapped to "llama3-8b"
-    messages=[{"role": "user", "content": "Hello!"}]
-)
-```
+   response = client.chat.completions.create(
+       model="gpt-4",  # transparently remapped if MODEL_MAP defines it
+       messages=[{"role": "user", "content": "Hello"}],
+   )
+   ```
 
-<p align="center">
-  <img src="images/main-ui.png" alt="SmolRouter Main UI" width="80%">
-</p>
+3. **Configure deeper routing rules when ready.** Drop a `routes.yaml` next to the binary or set `ROUTES_CONFIG` to point at a shared config repo.
 
-## Core capabilities
+### Configuration
 
-### Intelligent routing
-- Match on model names, regex patterns, or source IP ranges.
-- Override model names or upstream targets on a per-rule basis.
-- Define reusable aliases that automatically fail over between providers.
-
-### Observability built in
-- Live dashboard summarising recent traffic and latency statistics.
-- Performance scatter plot to compare token counts against response time.
-- Full request and response payload capture (with optional blob storage for large bodies).
-
-### Protocol compatibility and content hygiene
-- OpenAI and Ollama API parity, including streaming support.
-- Optional model remapping via `MODEL_MAP` JSON.
-- Automatic stripping of `<think>` traces or markdown-wrapped JSON before returning responses.
-
-## Security essentials
-
-> **Important:** Run SmolRouter behind a reverse proxy such as nginx, Caddy, or Cloudflare. It binds to `127.0.0.1` by default and is not hardened for direct internet exposure.
-
-- Configure JWT authentication with `WEBUI_SECURITY=ALWAYS_AUTH` for the Web UI or API access when you expose it beyond localhost.
-- Keep API keys and upstream hosts in environment variables or secret managers; they are forwarded without modification.
-- For shared deployments, set `JWT_SECRET` to a 32+ character random value. Weak secrets are rejected at startup.
-
-## Configuration reference
-
-### High-impact environment variables
+**Core Environment Variables:**
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DEFAULT_UPSTREAM` | `http://localhost:8000` | Upstream endpoint used when no routing rule matches. |
-| `LISTEN_HOST` | `127.0.0.1` | Bind address for the FastAPI app. Change to `0.0.0.0` only behind a reverse proxy. |
-| `LISTEN_PORT` | `1234` | Port that accepts OpenAI-compatible traffic. |
-| `MODEL_MAP` | `{}` | JSON mapping of incoming model names to replacements. |
-| `ROUTES_CONFIG` | `routes.yaml` | Path to YAML or JSON smart-routing configuration. |
-| `ENABLE_LOGGING` | `true` | Enables request logging and the Web UI. Disable for fully stateless proxying. |
-| `REQUEST_TIMEOUT` | `3000.0` | Upstream timeout in seconds (float). |
+| `DEFAULT_UPSTREAM` | `http://localhost:8000` | Upstream endpoint used when no routing rule matches |
+| `LISTEN_HOST` | `127.0.0.1` | Bind address for the FastAPI app. Switch to `0.0.0.0` only behind a reverse proxy |
+| `LISTEN_PORT` | `1234` | Port that accepts OpenAI-compatible traffic |
+| `MODEL_MAP` | `{}` | JSON mapping of incoming model names to replacements (exact keys or regex) |
+| `ROUTES_CONFIG` | `config/routes.yaml` | Path to YAML or JSON smart-routing configuration. Relative paths are resolved from the current working directory when explicitly set; the default is the repo-local `config/routes.yaml` |
+| `REQUEST_TIMEOUT` | `3000.0` | Upstream timeout in seconds |
+| `ENABLE_LOGGING` | `true` | Toggle request logging, database writes, and the Web UI dashboard |
 
-### Additional controls
+**Feature Flags:**
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DB_PATH` | `requests.db` | SQLite database file for request metadata. |
-| `MAX_LOG_AGE_DAYS` | `7` | Automatic cleanup window for historical logs. |
-| `STRIP_THINKING` | `true` | Remove `<think>...</think>` blocks from responses. |
-| `STRIP_JSON_MARKDOWN` | `false` | Convert fenced JSON markdown to raw JSON payloads. |
-| `DISABLE_THINKING` | `false` | Append `/no_think` hint to prompts (for upstream models that respect it). |
-| `JWT_SECRET` | _unset_ | Required for JWT-protected deployments; must be ≥32 characters with good entropy. |
-| `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Web UI policy: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH`. |
-| `BLOB_STORAGE_TYPE` | `filesystem` | Storage backend for request/response bodies (`filesystem` or `memory`). |
-| `BLOB_STORAGE_PATH` | `blob_storage` | Directory used when `BLOB_STORAGE_TYPE=filesystem`. |
-| `MAX_BLOB_SIZE` | `10485760` | Per-request blob size cap in bytes (10 MiB). |
-| `MAX_TOTAL_STORAGE_SIZE` | `1073741824` | Aggregate blob storage cap in bytes (1 GiB). |
+| `STRIP_THINKING` | `false` | Remove `<think>...</think>` blocks before returning responses |
+| `STRIP_JSON_MARKDOWN` | `false` | Convert fenced JSON markdown into raw JSON payloads |
+| `DISABLE_THINKING` | `false` | Append `/no_think` hints to prompts for providers that respect it |
+| `DB_PATH` | `requests.db` | SQLite database path for request metadata |
+| `MAX_LOG_AGE_DAYS` | `7` | Retention window for automatic log cleanup |
+| `BLOB_STORAGE_TYPE` | `filesystem` | Storage backend for request/response bodies (`filesystem` or `memory`) |
+| `BLOB_STORAGE_PATH` | `~/.smolrouter/blob_storage` | Directory used when `BLOB_STORAGE_TYPE=filesystem`. Set this to `./blob_storage` for checkout-local dev storage if desired |
+| `MAX_BLOB_SIZE` | `10485760` | Per-request blob size cap in bytes (10 MiB) |
+| `MAX_TOTAL_STORAGE_SIZE` | `1073741824` | Aggregate blob storage cap in bytes (1 GiB) |
 
-### Routing and failover (`routes.yaml`)
+**Security & Auth:**
 
-SmolRouter loads routes at startup from `routes.yaml` (or the path set by `ROUTES_CONFIG`). The file supports server aliases, model aliases, and ordered rule evaluation.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `JWT_SECRET` | _(unset)_ | Enables JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints (some API endpoints like `/api/logs`, `/api/stats` are exempt). Must be ≥32 characters with good entropy. Leave unset for unauthenticated access |
+| `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls Web UI/dashboard access policy independently of API authentication: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
+| `WEBUI_ALLOWED_ORIGINS` | _(unset)_ | Comma-separated list of origins allowed to access the dashboard |
+| `RATE_LIMIT_REQUESTS` | _(unset)_ | Requests per minute per API key. Leave empty to disable rate limiting |
+| `RATE_LIMIT_TOKENS` | _(unset)_ | Token budget per minute per API key (estimated from request payloads) |
+
+**Routing Configuration (`routes.yaml`):**
 
 ```yaml
-# Define servers once and reuse them elsewhere
 servers:
   fast-box: "http://192.168.1.100:8000"
-  slow-box: "http://192.168.1.101:8000"
-  gpu-server: "http://192.168.1.102:8000"
+  backup-box: "http://192.168.1.101:8000"
 
-# Aliases expose friendly names to clients with automatic failover
 aliases:
-  git-commit-model:
-    instances:
-      - "fast-box/llama3-8b"
-      - "slow-box/llama3-3b"
-
   coding-assistant:
     instances:
-      - server: "gpu-server"
-        model: "codellama-34b"
       - server: "fast-box"
+        model: "llama3-70b"
+      - server: "backup-box"
         model: "llama3-8b"
 
-# Rules run top-to-bottom after alias resolution
 routes:
   - match:
-      model: "/.*-1.5b/"
+      model: "/gpt-4.*/"
     route:
-      upstream: "http://gpu-server:8000"
-
+      upstream: "http://fast-box:8000"
+      model: "coding-assistant"
   - match:
       source_host: "10.0.1.100"
     route:
-      upstream: "http://dev-server:8000"
-
-  - match:
-      model: "gpt-4"
-    route:
-      upstream: "http://claude-server:8000"
-      model: "claude-3-opus"
+      upstream: "http://backup-box:8000"
 ```
 
-Alias resolution tries each instance in order until one responds successfully; errors are raised only after all candidates fail.
+### Provider-Specific Setup
 
-Sample configurations are available in [`routes.yaml.example`](routes.yaml.example) and [`routes.yaml.enhanced`](routes.yaml.enhanced).
+**Google GenAI (Gemini Models):**
 
-### Authentication
-
-```bash
-# Generate a random 256-bit secret (recommended)
-export JWT_SECRET=$(openssl rand -base64 32)
-
-# Enforce JWT for Web UI and proxied access
-export WEBUI_SECURITY="ALWAYS_AUTH"
-smolrouter
+Configure in `routes.yaml`:
+```yaml
+providers:
+  - name: "google-prod"
+    type: "google-genai"
+    enabled: true
+    api_keys:
+      - "YOUR_GOOGLE_API_KEY_1"
+      - "YOUR_GOOGLE_API_KEY_2"  # Multiple keys for rotation
+    max_requests_per_day: 1500  # Tune this to your quota plan
 ```
 
-JWT validation rejects secrets that are shorter than 32 characters, blank, or obvious defaults. When `WEBUI_SECURITY=AUTH_WHEN_PROXIED` (the default), the Web UI is automatically disabled if SmolRouter detects proxy headers.
+Google GenAI models are discovered live from the provider. Use the provider and system dashboards to inspect configured backends, quotas, and proxy status.
 
-### Blob storage for large payloads
+OpenAI-compatible providers can also point at vendor-prefixed API bases such as `/openai/v1` or `/zen/go/v1`. When a vendor does not expose a usable `/v1/models` listing, set `static_models` explicitly in YAML:
 
-Request and response bodies can be offloaded to disk to keep the SQLite database lean:
-
-```bash
-export BLOB_STORAGE_TYPE="filesystem"  # or "memory"
-export BLOB_STORAGE_PATH="./blob_storage"
+```yaml
+providers:
+  - name: "groq-scout"
+    type: "openai"
+    url: "https://api.groq.com/openai/v1"
+    api_key: "YOUR_GROQ_KEY"
+    static_models:
+      - "meta-llama/llama-4-scout-17b-16e-instruct"
 ```
 
-Storage limits are enforced per blob (`MAX_BLOB_SIZE`) and across all blobs (`MAX_TOTAL_STORAGE_SIZE`).
+## Features
 
-## Web UI and monitoring
+**Intelligent routing:**
+- Match traffic on model IDs, regex patterns, or request metadata such as source IPs
+- Rewrite either the upstream target or the model name on a per-rule basis
+- Compose reusable aliases that handle provider failover or split traffic by weight
+- Layer rule sets from `routes.yaml` with environment-driven defaults
 
-- **Dashboard (`/`)** — recent traffic, latency summaries, and quick actions.
-- **Performance (`/performance`)** — scatter plot of response time versus token count.
-- **Request detail (`/request/{id}`)** — inspect full payloads, headers, and routing decisions.
+**Protocol compatibility:**
+- OpenAI, Ollama, and Google GenAI transports with shared request/response semantics
+- Streaming for chat, completions, and Ollama generate endpoints
+- Legacy model remapping via `MODEL_MAP` continues to work exactly as it did in 1.x
+- Optional content transformations: `<think>` scrubbing, fenced JSON stripping, and `/no_think` hints
 
-## Development
+**Observability:**
+- Persistent request log with token estimation, latency histograms, and recent traffic views
+- Scatter plots to visualize token counts versus latency for capacity planning
+- Blob storage abstraction for request/response payloads with size limits and retention policies
+- Quota tracking and rate limiting at the API key or token level
 
-### Running tests
+## Operations & Security
+
+**Deployment:**
+- Run behind a trusted reverse proxy (nginx, Caddy, Cloudflare) and publish only HTTPS endpoints
+- Bind to `127.0.0.1` by default; switch to `0.0.0.0` only when the proxy handles TLS and authentication
+- Keep provider API keys and upstream URLs in environment variables or a secret manager
+
+**Authentication:**
+1. Set `JWT_SECRET` to a 32+ character random value to enable JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints. Weak secrets are rejected during startup
+2. Choose a Web UI access policy with `WEBUI_SECURITY` (controls dashboard/UI access independently):
+   - `NONE` — no authentication required for Web UI (local development only)
+   - `AUTH_WHEN_PROXIED` — require auth when `X-Forwarded-For` headers are present (default)
+   - `ALWAYS_AUTH` — always require authentication for Web UI access
+3. Important: When `JWT_SECRET` is set, most API requests require a valid JWT token in the `Authorization` header. The following endpoints are exempt: `/api/logs`, `/api/stats`, `/api/inflight`, `/api/performance`. Leave `JWT_SECRET` unset for completely unauthenticated access
+4. Pair JWT auth with rate limiting by defining `RATE_LIMIT_REQUESTS` or `RATE_LIMIT_TOKENS` for each API key
+
+**Logging & Retention:**
+- `ENABLE_LOGGING=false` disables the request log and UI for ultra-lightweight proxies
+- Request metadata uses the Redis-backed logging path, with blob storage for large request/response payloads
+- Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost
+- Background cleanup jobs run automatically during the FastAPI lifespan events
+
+**Path guidance:**
+- Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
+- Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
+- For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
+
+## Testing
+
+SmolRouter ships with an automated pytest suite covering model remapping, routing, logging, and quota enforcement:
 
 ```bash
+pip install -e .[dev]
 pytest
 ```
 
-### Contributing
+## Next Steps
 
-Issues and pull requests are welcome. Please discuss major changes before submitting a PR.
+- [Development guide](DEVELOPMENT.md) — setup, architecture, infrastructure, and contribution guide
+- [Project status](STATUS.md) — roadmap, tasks, and current progress
 
-## License
+## Changelog
 
-SmolRouter is released under the MIT License. See [`LICENSE`](LICENSE) for the full text.
+**2.0.0** - Production-ready AI gateway with Google GenAI support, enhanced observability, and hardened security. See full details in [release notes](docs/RELEASE_NOTES_v2.0.0.md).
