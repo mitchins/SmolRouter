@@ -5,15 +5,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "SmolRouter"
-version = "1.0.0"
+version = "2.0.0"
 authors = [
   { name="Mitchell Currie", email="mitchell.currie@gmail.com" },
 ]
 description = "A smart, lightweight proxy for routing AI model requests with performance analytics."
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
@@ -21,11 +23,16 @@ dependencies = [
     "fastapi",
     "httpx",
     "uvicorn[standard]",
-    "peewee",
     "jinja2",
     "pyyaml",
     'pyjwt',
-    'slowapi'
+    'slowapi',
+    "google-genai", # New unified Google GenAI SDK with httpx transport
+    "google-api-core>=2.19.0",
+    "pytz>=2025.2",
+    "aiohttp>=3.12.15",
+    "redis>=5.0.0",
+    "fakeredis>=2.31.3",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +56,12 @@ smolrouter = "smolrouter.cli:main"
 
 [tool.setuptools]
 packages = ["smolrouter"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+smolrouter = [
+    "templates/*.html",
+]
 
 # Linting configuration migrated from setup.cfg
 [tool.flake8]
@@ -91,11 +104,20 @@ extend-ignore = ["E203", "E501", "B009"]
 # Pytest configuration migrated from setup.cfg
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 python_classes = "Test*"
 addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5.0",
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "respx>=0.22.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/mitchins/smolrouter"

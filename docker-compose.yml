@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  smolrouter:
+    image: ghcr.io/mitchins/smolrouter:latest
+    container_name: smolrouter
+    ports:
+      - "8088:8088"
+    volumes:
+      # Bind mount your configuration file
+      - "./routes.yaml:/app/config/routes.yaml:ro"
+      # Optional: Bind mount for persistent database
+      - "./data:/app/data"
+    environment:
+      # Configuration
+      - ROUTES_CONFIG=/app/config/routes.yaml
+      - DB_PATH=/app/data/requests.db
+
+      # Server settings
+      - LISTEN_HOST=0.0.0.0
+      - LISTEN_PORT=8088
+
+      # Optional: Google GenAI rate limiting (already configured with good defaults)
+      - GOOGLE_GENAI_MAX_CONCURRENT=3
+      - GOOGLE_GENAI_MAX_REQUESTS_PER_WINDOW=12
+      - GOOGLE_GENAI_WINDOW_MINUTES=4
+      - GOOGLE_GENAI_RATE_LIMITING_ENABLED=true
+
+      # Optional: Request timeout
+      - REQUEST_TIMEOUT=3000
+
+      # Optional: Logging
+      - ENABLE_LOGGING=true
+      - MAX_LOG_AGE_DAYS=7
+
+    restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8088/stats')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Optional: Create a data volume for persistence
+volumes:
+  data:
+    driver: local

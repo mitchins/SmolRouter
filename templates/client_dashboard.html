@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmolRouter - Client Dashboard ({{ client_ip }})</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            padding: 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+
+        .stat-card .number {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 2rem 2rem 2rem;
+        }
+
+        .table-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .table-header {
+            background: #f8f9fa;
+            padding: 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .table-header h2 {
+            margin: 0;
+            color: #333;
+            font-size: 1.25rem;
+        }
+
+        .client-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .client-header h1 {
+            margin: 0 0 0.5rem 0;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        .client-header .client-ip {
+            font-size: 1.25rem;
+            font-family: 'Monaco', 'Menlo', monospace;
+            opacity: 0.9;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .action-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: background 0.2s;
+        }
+
+        .action-btn:hover {
+            background: #0056b3;
+        }
+
+        .action-btn.secondary {
+            background: #6c757d;
+        }
+
+        .action-btn.secondary:hover {
+            background: #5a6268;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .status {
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-200 { background: #d4edda; color: #155724; }
+        .status-400 { background: #fff3cd; color: #856404; }
+        .status-500 { background: #f8d7da; color: #721c24; }
+
+        .service-badge {
+            background: #e3f2fd;
+            color: #0d47a1;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .service-ollama { background: #e8f5e8; color: #2e7d32; }
+        .service-openai { background: #fff3e0; color: #f57c00; }
+
+        .duration {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .timestamp {
+            font-size: 0.75rem;
+            color: #666;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 3rem;
+            color: #666;
+            font-style: italic;
+        }
+
+        .model-info {
+            font-size: 0.8rem;
+        }
+
+        .model-original {
+            color: #666;
+        }
+
+        .model-mapped {
+            color: #333;
+            font-weight: 500;
+        }
+
+        .loading {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 4px;
+            margin: 1rem;
+            text-align: center;
+        }
+
+        .auto-refresh-status {
+            font-size: 0.8rem;
+            color: #666;
+            margin-left: 1rem;
+        }
+
+        /* JSON Formatting Styles (reused from main dashboard) */
+        .json-container {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            margin: 0.5rem 0;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .json-header {
+            background: #e9ecef;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #dee2e6;
+            font-size: 0.8rem;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .json-toggle {
+            background: none;
+            border: none;
+            color: #007bff;
+            cursor: pointer;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+
+        .json-toggle:hover {
+            background: rgba(0, 123, 255, 0.1);
+        }
+
+        .json-content {
+            padding: 0.75rem;
+            font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .json-content.collapsed {
+            display: none;
+        }
+
+        /* JSON Syntax Highlighting */
+        .json-key { color: #0451a5; font-weight: 600; }
+        .json-string { color: #0a3069; }
+        .json-number { color: #098658; }
+        .json-boolean { color: #0550ae; font-weight: 600; }
+        .json-null { color: #6f7681; font-style: italic; }
+
+        /* Expandable rows */
+        .expandable-row {
+            cursor: pointer;
+        }
+
+        .row-details {
+            background: #f8f9fa;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .row-details td {
+            padding: 1rem;
+            border-bottom: none;
+        }
+
+        .expand-icon {
+            transition: transform 0.2s;
+            font-size: 1rem;
+            margin-right: 0.5rem;
+            color: #666;
+        }
+
+        .expand-icon.expanded {
+            transform: rotate(90deg);
+        }
+
+        .breadcrumb {
+            background: #e9ecef;
+            padding: 1rem 2rem;
+            font-size: 0.9rem;
+        }
+
+        .breadcrumb a {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .breadcrumb a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+                padding: 1rem;
+            }
+
+            .container {
+                padding: 0 1rem 1rem 1rem;
+            }
+
+            .table-header {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: stretch;
+            }
+
+            .action-buttons {
+                justify-content: center;
+            }
+
+            table {
+                font-size: 0.9rem;
+            }
+
+            th, td {
+                padding: 0.5rem;
+            }
+        }
+    </style>
+    {% include 'responsive_shell.html' %}
+</head>
+<body>
+    <!-- Keep existing navigation -->
+    {% include 'navigation.html' %}
+
+    <!-- Breadcrumb -->
+    <div class="breadcrumb">
+        <a href="/">Dashboard</a> > Client {{ client_ip }}
+    </div>
+
+    <!-- Client Header -->
+    <div class="client-header">
+        <h1>Client Dashboard</h1>
+        <div class="client-ip">{{ client_ip }}</div>
+    </div>
+
+    <!-- Stats Section -->
+    <div class="stats">
+        <div class="stat-card">
+            <div class="number" style="color: #1976d2;" id="total-requests">-</div>
+            <div class="label">Total Requests</div>
+        </div>
+        <div class="stat-card">
+            <div class="number" style="color: #388e3c;" id="successful-requests">-</div>
+            <div class="label">Successful</div>
+        </div>
+        <div class="stat-card">
+            <div class="number" style="color: #f57c00;" id="requests-24h">-</div>
+            <div class="label">Recent</div>
+        </div>
+        <div class="stat-card">
+            <div class="number" style="color: #ff9800;" id="inflight-requests">-</div>
+            <div class="label">🔄 Inflight</div>
+        </div>
+    </div>
+
+    <!-- Recent Requests Table -->
+    <div class="container">
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Recent Requests for {{ client_ip }}</h2>
+                <div class="action-buttons">
+                    <button class="action-btn secondary" onclick="refreshData()">
+                        <span class="material-icons" style="font-size: 1rem;">refresh</span>
+                        Refresh
+                    </button>
+                    <span class="auto-refresh-status" id="connection-status">🔴 Connecting...</span>
+                </div>
+            </div>
+
+            <div id="error-container"></div>
+
+            <div class="table-scroll">
+            <table id="requests-table">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th>Time</th>
+                        <th>Service</th>
+                        <th>Path</th>
+                        <th>Model</th>
+                        <th>Size</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="requests-tbody">
+                    <tr>
+                        <td colspan="8" class="no-data">
+                            <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">hourglass_empty</span>
+                            Loading requests...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CLIENT_IP = '{{ client_ip }}';
+        let websocket = null;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5;
+        const RECONNECT_INTERVAL = 3000;
+
+        // Reuse all the formatting functions from main dashboard
+        function formatTimestamp(isoString) {
+            const date = new Date(isoString);
+            return date.toLocaleTimeString();
+        }
+
+        function formatSize(bytes) {
+            if (!bytes) return '-';
+            return (bytes / 1024).toFixed(1) + ' KB';
+        }
+
+        function formatDuration(ms) {
+            if (ms === null || ms === undefined || ms === 0) return '-';
+            if (ms < 0) return '-';
+            return ms + 'ms';
+        }
+
+        function formatStatus(statusCode) {
+            if (!statusCode) {
+                return '<span class="status" style="background: #f0f0f0; color: #666;">PENDING</span>';
+            }
+            const category = Math.floor(statusCode / 100) * 100;
+            return `<span class="status status-${category}">${statusCode}</span>`;
+        }
+
+        function formatModel(originalModel, mappedModel) {
+            if (mappedModel && mappedModel !== originalModel) {
+                return `
+                    <div class="model-info">
+                        <div class="model-original">${originalModel || 'N/A'}</div>
+                        <div class="model-mapped">→ ${mappedModel}</div>
+                    </div>
+                `;
+            } else {
+                return `
+                    <div class="model-info">
+                        <div class="model-mapped">${originalModel || 'N/A'}</div>
+                    </div>
+                `;
+            }
+        }
+
+        // JSON formatting functions (same as main dashboard)
+        function formatJSON(jsonString, maxLines = 20) {
+            if (!jsonString) return '<span style="color: #666; font-style: italic;">No data</span>';
+
+            try {
+                const parsed = JSON.parse(jsonString);
+                const formatted = JSON.stringify(parsed, null, 2);
+                const lines = formatted.split('\n');
+
+                const truncated = lines.length > maxLines;
+                const displayLines = truncated ? lines.slice(0, maxLines) : lines;
+                const truncatedText = truncated ? `\n... (${lines.length - maxLines} more lines)` : '';
+
+                return highlightJSON(displayLines.join('\n') + truncatedText);
+            } catch (e) {
+                return `<span style="color: #666;">${escapeHtml(jsonString)}</span>`;
+            }
+        }
+
+        function highlightJSON(json) {
+            return json
+                .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")\s*:/g, '<span class="json-key">$1</span>:')
+                .replace(/: ("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*")/g, ': <span class="json-string">$1</span>')
+                .replace(/: (-?\d+\.?\d*)/g, ': <span class="json-number">$1</span>')
+                .replace(/: (true|false)/g, ': <span class="json-boolean">$1</span>')
+                .replace(/: (null)/g, ': <span class="json-null">$1</span>');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function createJSONDisplay(title, content, id) {
+            if (!content) return '';
+
+            const displayId = `json-${id}-${title.toLowerCase().replace(/\s+/g, '-')}`;
+            return `
+                <div class="json-container">
+                    <div class="json-header">
+                        <span>${title}</span>
+                        <button class="json-toggle" onclick="toggleJSON('${displayId}')">Hide</button>
+                    </div>
+                    <div class="json-content" id="${displayId}">
+                        ${formatJSON(content)}
+                    </div>
+                </div>
+            `;
+        }
+
+        function toggleJSON(elementId) {
+            const element = document.getElementById(elementId);
+            const button = element.parentElement.querySelector('.json-toggle');
+
+            if (element.classList.contains('collapsed')) {
+                element.classList.remove('collapsed');
+                button.textContent = 'Hide';
+            } else {
+                element.classList.add('collapsed');
+                button.textContent = 'Show';
+            }
+        }
+
+        function toggleRowExpansion(requestId) {
+            const detailsRow = document.getElementById(`details-${requestId}`);
+            const expandIcon = document.querySelector(`[onclick="toggleRowExpansion('${requestId}')"] .expand-icon`);
+
+            if (detailsRow.style.display === 'none') {
+                detailsRow.style.display = '';
+                expandIcon.classList.add('expanded');
+                loadRequestDetails(requestId);
+            } else {
+                detailsRow.style.display = 'none';
+                expandIcon.classList.remove('expanded');
+            }
+        }
+
+        async function loadRequestDetails(requestId) {
+            const detailsCell = document.getElementById(`details-content-${requestId}`);
+            if (detailsCell.dataset.loaded === 'true') return;
+
+            try {
+                detailsCell.innerHTML = '<div style="text-align: center; padding: 1rem; color: #666;">Loading details...</div>';
+
+                const response = await fetch(`/api/requests/${requestId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+
+                let detailsHTML = '';
+
+                if (data.request_body) {
+                    detailsHTML += createJSONDisplay('Request Body', data.request_body, requestId);
+                }
+
+                if (data.response_body) {
+                    detailsHTML += createJSONDisplay('Response Body', data.response_body, requestId);
+                }
+
+                const metadata = {
+                    upstream_url: data.upstream_url,
+                    error_message: data.error_message
+                };
+
+                if (Object.values(metadata).some(v => v)) {
+                    detailsHTML += createJSONDisplay('Metadata', JSON.stringify(metadata, null, 2), requestId);
+                }
+
+                if (!detailsHTML) {
+                    detailsHTML = '<div style="text-align: center; padding: 1rem; color: #666; font-style: italic;">No detailed data available</div>';
+                }
+
+                detailsCell.innerHTML = detailsHTML;
+                detailsCell.dataset.loaded = 'true';
+
+            } catch (error) {
+                console.error('Failed to load request details:', error);
+                detailsCell.innerHTML = `
+                    <div style="text-align: center; padding: 1rem; color: #721c24; background: #f8d7da; border-radius: 4px;">
+                        Failed to load details: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        function updateStats(stats) {
+            document.getElementById('total-requests').textContent = stats.total_requests || 0;
+            document.getElementById('successful-requests').textContent = stats.successful_requests || 0;
+            document.getElementById('requests-24h').textContent = stats.recent_requests || 0;
+            document.getElementById('inflight-requests').textContent = stats.inflight_requests || 0;
+        }
+
+        function updateRequestsTable(logs) {
+            const tbody = document.getElementById('requests-tbody');
+
+            if (!logs || logs.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="no-data">
+                            <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
+                            No requests logged yet for this client
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = logs.map(log => `
+                <tr class="expandable-row" onclick="window.location.href='/request/${log.id}'" style="cursor: pointer;">
+                    <td data-label="" aria-hidden="true">
+                        <span class="material-icons expand-icon">chevron_right</span>
+                    </td>
+                    <td data-label="Time" class="timestamp">${formatTimestamp(log.timestamp)}</td>
+                    <td data-label="Service">
+                        <span class="service-badge service-${log.service_type}">
+                            ${log.service_type || 'unknown'}
+                        </span>
+                    </td>
+                    <td data-label="Path">${log.path || '-'}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Size">${formatSize(log.request_size)}</td>
+                    <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
+                    <td data-label="Status">${formatStatus(log.status_code)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            errorContainer.innerHTML = `
+                <div class="error-message">
+                    <strong>Error:</strong> ${message}
+                </div>
+            `;
+        }
+
+        function clearError() {
+            document.getElementById('error-container').innerHTML = '';
+        }
+
+        async function refreshData() {
+            const table = document.getElementById('requests-table');
+            table.classList.add('loading');
+            clearError();
+
+            try {
+                const response = await fetch(`/api/clients/${CLIENT_IP}?limit=100`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                updateStats(data.stats);
+                updateRequestsTable(data.logs);
+
+                const now = new Date().toLocaleTimeString();
+                console.log(`Client dashboard refreshed at ${now}`);
+
+            } catch (error) {
+                console.error('Failed to refresh client dashboard:', error);
+                showError(`Failed to refresh data: ${error.message}`);
+            } finally {
+                table.classList.remove('loading');
+            }
+        }
+
+        // WebSocket connection management
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/clients/${CLIENT_IP}`;
+
+            try {
+                websocket = new WebSocket(wsUrl);
+
+                websocket.onopen = function(event) {
+                    console.log('Client WebSocket connected');
+                    reconnectAttempts = 0;
+                    updateConnectionStatus('🟢 Live', 'Connected - Real-time updates');
+                };
+
+                websocket.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleWebSocketMessage(data);
+                    } catch (error) {
+                        console.error('Failed to parse WebSocket message:', error);
+                    }
+                };
+
+                websocket.onclose = function(event) {
+                    console.log('Client WebSocket closed');
+                    updateConnectionStatus('🔴 Disconnected', 'Connection lost');
+
+                    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        updateConnectionStatus('🟡 Reconnecting...', `Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`);
+                        setTimeout(connectWebSocket, RECONNECT_INTERVAL);
+                    } else {
+                        updateConnectionStatus('🔴 Offline', 'Max reconnection attempts reached');
+                        showError('WebSocket connection failed. Please refresh the page.');
+                    }
+                };
+
+                websocket.onerror = function(error) {
+                    console.error('Client WebSocket error:', error);
+                    updateConnectionStatus('🔴 Error', 'Connection error');
+                };
+
+            } catch (error) {
+                console.error('Failed to create client WebSocket connection:', error);
+                updateConnectionStatus('🔴 Failed', 'Cannot connect');
+            }
+        }
+
+        function updateConnectionStatus(indicator, tooltip) {
+            const status = document.getElementById('connection-status');
+            status.textContent = indicator;
+            status.title = tooltip;
+        }
+
+        function handleWebSocketMessage(data) {
+            console.log('Client WebSocket message received:', data.type, data);
+            switch (data.type) {
+                case 'client_dashboard_update':
+                    updateStats(data.stats);
+                    updateRequestsTable(data.logs);
+                    break;
+                case 'new_request':
+                    if (data.data.source_ip === CLIENT_IP) {
+                        console.log('Adding new request to client table:', data.data);
+                        addNewRequestToTable(data.data);
+                    }
+                    break;
+                case 'request_completed':
+                    if (data.data.source_ip === CLIENT_IP) {
+                        console.log('Updating completed request in client table:', data.data);
+                        updateRequestInTable(data.data);
+                    }
+                    break;
+                default:
+                    console.log('Unknown client WebSocket message type:', data.type);
+            }
+        }
+
+        function addNewRequestToTable(request) {
+            const tbody = document.getElementById('requests-tbody');
+            const existingRows = tbody.querySelectorAll('tr');
+
+            if (existingRows.length === 1 && existingRows[0].querySelector('.no-data')) {
+                tbody.innerHTML = '';
+            }
+
+            const newRow = document.createElement('tr');
+            newRow.className = 'expandable-row';
+            newRow.onclick = () => window.location.href = `/request/${request.id}`;
+            newRow.innerHTML = `
+                <td data-label="" aria-hidden="true">
+                    <span class="material-icons expand-icon">chevron_right</span>
+                </td>
+                <td data-label="Time" class="timestamp">${formatTimestamp(request.timestamp)}</td>
+                <td data-label="Service">
+                    <span class="service-badge service-${request.service_type}">
+                        ${request.service_type || 'unknown'}
+                    </span>
+                </td>
+                <td data-label="Path">${request.path || '-'}</td>
+                <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                <td data-label="Size">${formatSize(request.request_size)}</td>
+                <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
+                <td data-label="Status">${formatStatus(request.status_code)}</td>
+            `;
+
+            tbody.insertBefore(newRow, tbody.firstChild);
+
+            while (tbody.children.length > 100) {
+                tbody.removeChild(tbody.lastChild);
+            }
+        }
+
+        function updateRequestInTable(request) {
+            const tbody = document.getElementById('requests-tbody');
+            const rows = tbody.querySelectorAll('tr.expandable-row');
+
+            for (const row of rows) {
+                if (row.onclick && row.onclick.toString().includes(request.id)) {
+                    row.innerHTML = `
+                        <td data-label="" aria-hidden="true">
+                            <span class="material-icons expand-icon">chevron_right</span>
+                        </td>
+                        <td data-label="Time" class="timestamp">${formatTimestamp(request.timestamp)}</td>
+                        <td data-label="Service">
+                            <span class="service-badge service-${request.service_type}">
+                                ${request.service_type || 'unknown'}
+                            </span>
+                        </td>
+                        <td data-label="Path">${request.path || '-'}</td>
+                        <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                        <td data-label="Size">${formatSize(request.request_size)}</td>
+                        <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
+                        <td data-label="Status">${formatStatus(request.status_code)}</td>
+                    `;
+
+                    row.onclick = () => window.location.href = `/request/${request.id}`;
+                    break;
+                }
+            }
+        }
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log(`Client dashboard loaded for ${CLIENT_IP}`);
+
+            refreshData();
+            connectWebSocket();
+        });
+
+        window.addEventListener('beforeunload', function() {
+            if (websocket) {
+                websocket.close();
+            }
+        });
+    </script>
+</body>
+</html>

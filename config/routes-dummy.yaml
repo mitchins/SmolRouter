@@ -1,0 +1,55 @@
+# Dummy provider configuration for load testing and development
+# Perfect for testing SmolRouter performance without hitting real APIs
+
+routes: []
+
+providers:
+  - name: "dummy-fast"
+    type: "dummy"
+    enabled: true
+    priority: 1
+    url: "dummy://localhost/fast"
+    response_delay_ms: 100  # Fast responses (100ms)
+    failure_rate: 0.0  # No failures
+    response_tokens: 50
+    timeout: 30.0
+
+  - name: "dummy-realistic"
+    type: "dummy"
+    enabled: true
+    priority: 2
+    url: "dummy://localhost/realistic"
+    response_delay_ms: 250  # Default 250ms delay
+    failure_rate: 0.05  # 5% failure rate
+    response_tokens: 150
+    timeout: 30.0
+
+  - name: "dummy-slow"
+    type: "dummy"
+    enabled: true
+    priority: 3
+    url: "dummy://localhost/slow"
+    response_delay_ms: 1000  # Slow responses (1s)
+    failure_rate: 0.1  # 10% failure rate
+    response_tokens: 300
+    timeout: 30.0
+
+strategy:
+  type: "smart"
+  config:
+    aliases:
+      "gpt-3.5-turbo": "dummy-fast-3.5"
+      "gpt-4": "dummy-standard-4.0"
+      "gpt-4-turbo": "dummy-slow-4.0"
+
+access_control:
+  type: "basic"
+  config:
+    default_access: true
+
+cache:
+  enabled: true
+  ttl: 300
+
+container:
+  enabled: true

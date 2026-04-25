@@ -3,12 +3,74 @@ Pytest configuration for OpenAI Model Rerouter tests
 """
 
 import pytest
-import tempfile
 import os
+import asyncio
+import threading
 from unittest.mock import patch
-from peewee import SqliteDatabase
 
-from smolrouter.database import RequestLog
+# Use Redis backend for tests - FakeRedis will handle the testing automatically
+
+
+def _run_async_fixture_step(coro):
+    """Run async fixture setup/teardown safely from sync fixtures."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result = {"value": None, "error": None}
+
+    def _runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result["value"] = loop.run_until_complete(coro)
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if result["error"]:
+        raise result["error"]
+
+    return result["value"]
+
+
+@pytest.fixture(autouse=True)
+def fresh_redis_for_tests():
+    """
+    Ensure fresh FakeRedis instance for each test.
+    Using the new redis_config system - just flush all data to start fresh.
+    """
+    # Force development environment for tests
+    os.environ["APP_ENV"] = "test"
+    os.environ.setdefault("REDIS_URL", "fake")
+
+    # Get the redis client from the new config system
+    from smolrouter.redis_config import redis_client, is_fake_redis
+
+    # Ensure we're using FakeRedis for tests
+    if not is_fake_redis():
+        import warnings
+
+        warnings.warn("Tests should use FakeRedis, but real Redis is configured")
+
+    try:
+        _run_async_fixture_step(redis_client.flushall())
+    except Exception:
+        pass
+
+    yield
+
+    try:
+        _run_async_fixture_step(redis_client.flushall())
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +80,7 @@ def suppress_jinja2_deprecation_warnings():
     This avoids noisy test output and prevents CI from treating warnings as failures.
     """
     import warnings
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -30,34 +93,25 @@ def suppress_jinja2_deprecation_warnings():
 @pytest.fixture(scope="function")
 def isolated_db():
     """
-    Create an isolated in-memory database for each test.
-    This ensures tests don't interfere with each other or the production database.
+    Create isolated FakeRedis for each test.
+    Since we're using Redis as the hot path, tests use FakeRedis automatically.
     """
-    # Create a temporary file for the test database
-    temp_file = tempfile.NamedTemporaryFile(suffix='.db', delete=False)
-    temp_file.close()
-    
-    test_db = SqliteDatabase(temp_file.name)
-    
-    # Store the original database reference
-    original_db = RequestLog._meta.database
-    
-    # Patch the database in the model
-    RequestLog._meta.database = test_db
-    
-    # Connect and create tables
-    test_db.connect()
-    test_db.create_tables([RequestLog], safe=True)
-    
-    yield test_db
-    
-    # Cleanup: restore original database and remove temp file
-    test_db.close()
-    RequestLog._meta.database = original_db
+    from smolrouter.redis_config import redis_client
+
+    # Initialize fresh Redis connection (will use FakeRedis)
+    async def init_redis():
+        await redis_client.flushall()  # Clear any existing data
+        return redis_client
+
+    client = _run_async_fixture_step(init_redis())
+
+    yield client
+
+    # Cleanup - flush all data
     try:
-        os.unlink(temp_file.name)
-    except OSError:
-        pass  # File might already be deleted
+        _run_async_fixture_step(client.flushall())
+    except Exception:
+        pass  # Cleanup failed, that's okay
 
 
 @pytest.fixture(scope="function")
@@ -65,8 +119,38 @@ def disable_logging():
     """
     Disable logging during regular API tests to avoid database side effects.
     """
-    with patch('smolrouter.app.ENABLE_LOGGING', False):
+    # Disable logging side-effects and enable think stripping for deterministic tests
+    # Force legacy proxy mode so unit tests hit mocked upstreams directly
+    with (
+        patch("smolrouter.app.ENABLE_LOGGING", False),
+        patch("smolrouter.app.STRIP_THINKING", True),
+        patch.dict(os.environ, {"USE_LEGACY_PROXY": "true"}, clear=False),
+    ):
         yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def init_runtime_components(tmp_path_factory):
+    """Initialize Redis (fakeredis), Lua scripts, and blob storage once per test session."""
+    os.environ["APP_ENV"] = "test"
+    os.environ.setdefault("REDIS_URL", "fake")
+    os.environ.setdefault("BLOB_STORAGE_PATH", str(tmp_path_factory.mktemp("smolrouter_blob_storage")))
+
+    async def _init():
+        from smolrouter.redis_backend import init_redis_db, RedisApiKeyQuota
+        from smolrouter.storage import init_blob_storage
+
+        await init_redis_db()
+        # Initialize Lua script used for quota tracking
+        try:
+            await RedisApiKeyQuota.initialize_lua_script()
+        except Exception:
+            # Some fakeredis builds may not support scripts; tests that depend on it will handle skips
+            pass
+        # Initialize blob storage (starts janitor but harmless in tests)
+        init_blob_storage()
+
+    _run_async_fixture_step(_init())
 
 
 # Automatically use isolated database for logging tests
