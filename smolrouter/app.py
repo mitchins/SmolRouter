@@ -1831,6 +1831,151 @@ def _serialize_request_log(log_entry) -> dict[str, Any]:
     }
 
 
+def _decode_log_body(body: Any) -> Optional[str]:
+    if not body:
+        return None
+
+    if isinstance(body, bytes):
+        return body.decode("utf-8")
+
+    return str(body)
+
+
+def _serialize_duplicate_request_log(log_entry: Any) -> dict[str, Any]:
+    timestamp = getattr(log_entry, "timestamp", None)
+    return {
+        "id": getattr(log_entry, "id", None),
+        "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
+        "status_code": getattr(log_entry, "status_code", None),
+        "source_ip": getattr(log_entry, "source_ip", None),
+    }
+
+
+async def _build_duplicate_request_info(log_entry: Any) -> dict[str, Any]:
+    duplicate_info = {
+        "is_duplicate": getattr(log_entry, "is_duplicate", False),
+        "duplicate_count": getattr(log_entry, "duplicate_count", 0),
+        "request_body_hash": getattr(log_entry, "request_body_hash", None),
+        "duplicates": [],
+    }
+
+    if not duplicate_info["request_body_hash"]:
+        return duplicate_info
+
+    try:
+        from smolrouter.redis_backend import RedisRequestLog
+
+        ids = await RedisRequestLog.get_recent_duplicate_request_ids(duplicate_info["request_body_hash"], limit=10)
+        current_id = getattr(log_entry, "id", None)
+        other_ids = [rid for rid in ids if rid != current_id]
+        for rid in other_ids[:10]:
+            dupe = await RequestLog.get_by_id(rid)
+            if dupe:
+                duplicate_info["duplicates"].append(_serialize_duplicate_request_log(dupe))
+    except Exception:
+        duplicate_info["duplicates"] = []
+
+    return duplicate_info
+
+
+def _serialize_request_detail_response(log_entry: Any, duplicate_info: dict[str, Any]) -> dict[str, Any]:
+    summary = _serialize_request_log(log_entry)
+    return {
+        "id": summary["id"],
+        "timestamp": summary["timestamp"],
+        "source_ip": summary["source_ip"],
+        "path": summary["path"],
+        "original_model": summary["original_model"],
+        "mapped_model": summary["mapped_model"],
+        "service_type": summary["service_type"],
+        "status_code": summary["status_code"],
+        "duration_ms": summary["duration_ms"],
+        "request_size": summary["request_size"],
+        "response_size": summary["response_size"],
+        "upstream_url": summary["upstream_url"],
+        "error_message": summary["error_message"],
+        "api_key_suffix": summary["api_key_suffix"],
+        "proxy_used": summary["proxy_used"],
+        "provider_id": summary["provider_id"],
+        "api_key_index": summary["api_key_index"],
+        "api_key_total": summary["api_key_total"],
+        "request_body": _decode_log_body(getattr(log_entry, "request_body", None)),
+        "response_body": _decode_log_body(getattr(log_entry, "response_body", None)),
+        "duplicate": duplicate_info,
+    }
+
+
+def _serialize_performance_point(log_entry: Any) -> dict[str, Any]:
+    timestamp = getattr(log_entry, "timestamp", None)
+    return {
+        "id": getattr(log_entry, "id", None),
+        "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
+        "prompt_tokens": getattr(log_entry, "prompt_tokens", None),
+        "completion_tokens": getattr(log_entry, "completion_tokens", None),
+        "total_tokens": getattr(log_entry, "total_tokens", None),
+        "duration_ms": getattr(log_entry, "duration_ms", None),
+        "model": getattr(log_entry, "mapped_model", None) or getattr(log_entry, "original_model", None),
+        "original_model": getattr(log_entry, "original_model", None),
+        "mapped_model": getattr(log_entry, "mapped_model", None),
+        "service_type": getattr(log_entry, "service_type", None),
+        "path": getattr(log_entry, "path", None),
+        "status_code": getattr(log_entry, "status_code", None),
+        "request_size": getattr(log_entry, "request_size", None),
+        "response_size": getattr(log_entry, "response_size", None),
+    }
+
+
+def _has_performance_metrics(log_entry: Any) -> bool:
+    return (
+        getattr(log_entry, "completed_at", None) is not None
+        and getattr(log_entry, "prompt_tokens", None) is not None
+        and getattr(log_entry, "duration_ms", None) is not None
+    )
+
+
+def _is_within_performance_window(log_entry: Any, hours: int) -> bool:
+    from datetime import timedelta
+
+    timestamp = getattr(log_entry, "timestamp", None)
+    if not isinstance(timestamp, datetime):
+        return False
+
+    return timestamp >= _timestamp_now_for_log(timestamp) - timedelta(hours=hours)
+
+
+def _matches_performance_filters(log_entry: Any, model: str | None, service_type: str | None) -> bool:
+    if model and getattr(log_entry, "mapped_model", None) != model:
+        return False
+    if service_type and getattr(log_entry, "service_type", None) != service_type:
+        return False
+    return True
+
+
+async def _get_performance_logs(
+    limit: int,
+    hours: int,
+    model: str | None,
+    service_type: str | None,
+) -> list[Any]:
+    scan_limit = max(limit, DASHBOARD_FILTER_SCAN_LIMIT)
+    recent_logs = await RequestLog.get_recent(scan_limit)
+    filtered_logs = []
+
+    for log in recent_logs:
+        if not _has_performance_metrics(log):
+            continue
+        if not _is_within_performance_window(log, hours):
+            continue
+        if not _matches_performance_filters(log, model, service_type):
+            continue
+
+        filtered_logs.append(log)
+        if len(filtered_logs) >= limit:
+            break
+
+    return filtered_logs
+
+
 async def _get_dashboard_logs(limit: int = 100, q: str | None = None, service_type: str | None = None):
     parsed_query = parse_dashboard_filter_query(q)
     requires_scan = parsed_query.active or bool(service_type)
@@ -1958,46 +2103,10 @@ async def api_performance(limit: int = 1000, hours: int = 24, model: str | None 
         service_type: Filter by service type: 'openai' or 'ollama' (optional)
     """
     try:
-        from datetime import timedelta
-
-        # Build query for completed requests with token data
-        query = RequestLog.select().where(
-            RequestLog.completed_at.is_null(False),  # Only completed requests
-            RequestLog.prompt_tokens.is_null(False),  # Must have token data
-            RequestLog.duration_ms.is_null(False),  # Must have duration data
-            RequestLog.timestamp >= datetime.now() - timedelta(hours=hours),
-        )
-
-        # Apply filters
-        if model:
-            query = query.where(RequestLog.mapped_model == model)
-        if service_type:
-            query = query.where(RequestLog.service_type == service_type)
-
-        # Order by timestamp desc and limit
-        query = query.order_by(RequestLog.timestamp.desc()).limit(limit)
-
-        # Format data for scatter plot
-        data_points = []
-        for log in query:
-            data_points.append(
-                {
-                    "id": log.id,
-                    "timestamp": log.timestamp.isoformat(),
-                    "prompt_tokens": log.prompt_tokens,
-                    "completion_tokens": log.completion_tokens,
-                    "total_tokens": log.total_tokens,
-                    "duration_ms": log.duration_ms,
-                    "model": log.mapped_model or log.original_model,
-                    "original_model": log.original_model,
-                    "mapped_model": log.mapped_model,
-                    "service_type": log.service_type,
-                    "path": log.path,
-                    "status_code": log.status_code,
-                    "request_size": log.request_size,
-                    "response_size": log.response_size,
-                }
-            )
+        data_points = [
+            _serialize_performance_point(log)
+            for log in await _get_performance_logs(limit, hours, model, service_type)
+        ]
 
         return {
             "data_points": data_points,
@@ -2722,64 +2831,14 @@ async def get_request_details(request_id: str, request: Request):
     get_webui_security().check_webui_access(request)
 
     try:
-        # Convert to string in case it's a UUID object
-        request_id_str = str(request_id)
-        log_entry = await RequestLog.get_by_id(request_id_str)
+        log_entry = await RequestLog.get_by_id(str(request_id))
+        if log_entry is None:
+            raise HTTPException(status_code=404, detail="Request not found")
 
-        # Prepare duplicate info
-        duplicate_info = {
-            "is_duplicate": getattr(log_entry, "is_duplicate", False),
-            "duplicate_count": getattr(log_entry, "duplicate_count", 0),
-            "request_body_hash": getattr(log_entry, "request_body_hash", None),
-            "duplicates": [],
-        }
-        try:
-            if duplicate_info["request_body_hash"]:
-                from smolrouter.redis_backend import RedisRequestLog
-
-                ids = await RedisRequestLog.get_recent_duplicate_request_ids(
-                    duplicate_info["request_body_hash"], limit=10
-                )
-                other_ids = [rid for rid in ids if rid != log_entry.id]
-                for rid in other_ids[:10]:
-                    dupe = await RequestLog.get_by_id(rid)
-                    if dupe:
-                        duplicate_info["duplicates"].append(
-                            {
-                                "id": dupe.id,
-                                "timestamp": dupe.timestamp.isoformat(),
-                                "status_code": dupe.status_code,
-                                "source_ip": dupe.source_ip,
-                            }
-                        )
-        except Exception:
-            pass
-
-        return {
-            "id": log_entry.id,
-            "timestamp": log_entry.timestamp.isoformat(),
-            "source_ip": log_entry.source_ip,
-            "path": log_entry.path,
-            "original_model": log_entry.original_model,
-            "mapped_model": log_entry.mapped_model,
-            "service_type": log_entry.service_type,
-            "status_code": log_entry.status_code,
-            "duration_ms": log_entry.duration_ms,
-            "request_size": log_entry.request_size,
-            "response_size": log_entry.response_size,
-            "upstream_url": log_entry.upstream_url,
-            "error_message": log_entry.error_message,
-            "api_key_suffix": getattr(log_entry, "api_key_suffix", None),
-            "proxy_used": getattr(log_entry, "proxy_used", None),
-            "provider_id": getattr(log_entry, "provider_id", None),
-            "api_key_index": getattr(log_entry, "api_key_index", None),
-            "api_key_total": getattr(log_entry, "api_key_total", None),
-            "request_body": log_entry.request_body.decode("utf-8") if log_entry.request_body else None,
-            "response_body": log_entry.response_body.decode("utf-8") if log_entry.response_body else None,
-            "duplicate": duplicate_info,
-        }
-    except RequestLog.DoesNotExist:
-        raise HTTPException(status_code=404, detail="Request not found")
+        duplicate_info = await _build_duplicate_request_info(log_entry)
+        return _serialize_request_detail_response(log_entry, duplicate_info)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error fetching request details: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -2875,93 +2934,60 @@ async def get_available_models_for_testing(request: Request):
     "/api/clients/{client_ip}",
     responses={500: {"description": "Internal server error"}},
 )
+async def _build_client_dashboard_payload(client_ip: str, limit: int = 100) -> dict[str, Any]:
+    from datetime import timedelta
+
+    client_logs = await RequestLog.get_by_source_ip(client_ip)
+    logs_data = [_serialize_request_log(log) for log in client_logs[:limit]]
+
+    successful_requests = sum(
+        1
+        for log in client_logs
+        if isinstance(getattr(log, "status_code", None), int) and 200 <= getattr(log, "status_code", 0) < 400
+    )
+    recent_requests = sum(
+        1
+        for log in client_logs
+        if isinstance(getattr(log, "timestamp", None), datetime)
+        and getattr(log, "timestamp") >= _timestamp_now_for_log(getattr(log, "timestamp")) - timedelta(hours=24)
+    )
+    inflight_requests = sum(
+        1
+        for log in client_logs
+        if getattr(log, "completed_at", None) is None or getattr(log, "status_code", None) == "pending"
+    )
+    models_used = sorted(
+        {
+            model_name
+            for model_name in (getattr(log, "original_model", None) for log in client_logs)
+            if model_name
+        }
+    )[:50]
+
+    return {
+        "client_ip": client_ip,
+        "stats": {
+            "total_requests": len(client_logs),
+            "successful_requests": successful_requests,
+            "recent_requests": recent_requests,
+            "inflight_requests": inflight_requests,
+            "models_used": models_used,
+        },
+        "logs": logs_data,
+    }
+
+
+@app.get(
+    "/api/clients/{client_ip}",
+    responses={500: {"description": "Internal server error"}},
+)
 async def get_client_data(client_ip: str, request: Request, limit: int = 100):
     """API endpoint for client-specific data"""
     # Check WebUI access security
     get_webui_security().check_webui_access(request)
 
     try:
-        # Get client-specific logs
-        logs = list(
-            RequestLog.select()
-            .where(RequestLog.source_ip == client_ip)
-            .order_by(RequestLog.timestamp.desc())
-            .limit(limit)
-        )
-
-        # Calculate client-specific stats
-        total_requests = RequestLog.select().where(RequestLog.source_ip == client_ip).count()
-
-        successful_requests = (
-            RequestLog.select()
-            .where(
-                (RequestLog.source_ip == client_ip) & (RequestLog.status_code >= 200) & (RequestLog.status_code < 400)
-            )
-            .count()
-        )
-
-        # Recent requests (last 24 hours)
-        from datetime import datetime, timedelta
-
-        since_24h = datetime.now() - timedelta(hours=24)
-        recent_requests = (
-            RequestLog.select().where((RequestLog.source_ip == client_ip) & (RequestLog.timestamp >= since_24h)).count()
-        )
-
-        # Inflight requests
-        inflight_requests = (
-            RequestLog.select().where((RequestLog.source_ip == client_ip) & (RequestLog.completed_at.is_null())).count()
-        )
-
-        # Get unique models used by this client
-        models_used = list(
-            RequestLog.select(RequestLog.original_model)
-            .where((RequestLog.source_ip == client_ip) & (RequestLog.original_model.is_null(False)))
-            .distinct()
-            .limit(50)
-        )
-
-        # Convert logs to dict format
-        logs_data = []
-        for log in logs:
-            # Calculate duration for pending requests
-            duration_ms = log.duration_ms
-            if duration_ms is None and log.status_code is None:
-                # Pending request - calculate elapsed time
-                elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
-                duration_ms = int(elapsed_seconds * 1000)
-
-            logs_data.append(
-                {
-                    "id": log.id,
-                    "timestamp": log.timestamp.isoformat(),
-                    "source_ip": log.source_ip,
-                    "path": log.path,
-                    "original_model": log.original_model,
-                    "mapped_model": log.mapped_model,
-                    "service_type": log.service_type,
-                    "status_code": log.status_code,
-                    "duration_ms": duration_ms,
-                    "request_size": log.request_size,
-                    "response_size": log.response_size,
-                    "upstream_url": log.upstream_url,
-                }
-            )
-
-        stats = {
-            "total_requests": total_requests,
-            "successful_requests": successful_requests,
-            "recent_requests": recent_requests,
-            "inflight_requests": inflight_requests,
-            "models_used": [model.original_model for model in models_used],
-        }
-
-        return {
-            "client_ip": client_ip,
-            "stats": stats,
-            "logs": logs_data,
-        }
-
+        return await _build_client_dashboard_payload(client_ip, limit)
     except Exception as e:
         logger.error(f"Error fetching client data for {client_ip}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -3107,83 +3133,7 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
     try:
         # Send initial client-specific data
         try:
-            # Get client-specific logs
-            logs = list(
-                RequestLog.select()
-                .where(RequestLog.source_ip == client_ip)
-                .order_by(RequestLog.timestamp.desc())
-                .limit(100)
-            )
-
-            # Calculate client-specific stats
-            total_requests = RequestLog.select().where(RequestLog.source_ip == client_ip).count()
-
-            successful_requests = (
-                RequestLog.select()
-                .where(
-                    (RequestLog.source_ip == client_ip)
-                    & (RequestLog.status_code >= 200)
-                    & (RequestLog.status_code < 400)
-                )
-                .count()
-            )
-
-            # Recent requests (last 24 hours)
-            from datetime import datetime, timedelta
-
-            since_24h = datetime.now() - timedelta(hours=24)
-            recent_requests = (
-                RequestLog.select()
-                .where((RequestLog.source_ip == client_ip) & (RequestLog.timestamp >= since_24h))
-                .count()
-            )
-
-            # Inflight requests
-            inflight_requests = (
-                RequestLog.select()
-                .where((RequestLog.source_ip == client_ip) & (RequestLog.completed_at.is_null()))
-                .count()
-            )
-
-            # Format logs with real-time duration calculation
-            formatted_logs = []
-            for log in logs:
-                duration_ms = log.duration_ms
-                if duration_ms is None and log.status_code is None:
-                    # Pending request - calculate elapsed time
-                    elapsed_seconds = (datetime.now() - log.timestamp).total_seconds()
-                    duration_ms = int(elapsed_seconds * 1000)
-
-                formatted_logs.append(
-                    {
-                        "id": log.id,
-                        "timestamp": log.timestamp.isoformat(),
-                        "source_ip": log.source_ip,
-                        "path": log.path,
-                        "original_model": log.original_model,
-                        "mapped_model": log.mapped_model,
-                        "service_type": log.service_type,
-                        "status_code": log.status_code,
-                        "duration_ms": duration_ms,
-                        "request_size": log.request_size,
-                        "response_size": log.response_size,
-                        "upstream_url": log.upstream_url,
-                    }
-                )
-
-            stats = {
-                "total_requests": total_requests,
-                "successful_requests": successful_requests,
-                "recent_requests": recent_requests,
-                "inflight_requests": inflight_requests,
-            }
-
-            initial_data = {
-                "type": "client_dashboard_update",
-                "logs": formatted_logs,
-                "stats": stats,
-                "client_ip": client_ip,
-            }
+            initial_data = {"type": "client_dashboard_update", **await _build_client_dashboard_payload(client_ip)}
             await manager.send_personal_message(initial_data, websocket)
 
         except Exception as e:
@@ -3199,9 +3149,10 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
                 if message.get("type") == "ping":
                     await manager.send_personal_message({"type": "pong"}, websocket)
                 elif message.get("type") == "refresh":
-                    # Client requested refresh - send current data
-                    # (Same logic as initial data - could be refactored)
-                    pass
+                    await manager.send_personal_message(
+                        {"type": "client_dashboard_update", **await _build_client_dashboard_payload(client_ip)},
+                        websocket,
+                    )
 
             except WebSocketDisconnect:
                 break

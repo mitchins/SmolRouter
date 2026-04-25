@@ -226,6 +226,11 @@ class RequestLog:
         return await RedisRequestLog.get_recent(limit)
 
     @staticmethod
+    async def get_by_source_ip(source_ip: str, limit: int | None = None):
+        """Get requests for a specific client IP ordered by recency."""
+        return await RedisRequestLog.get_by_source_ip(source_ip, limit)
+
+    @staticmethod
     def select():
         """Compatibility method - returns recent requests"""
         # This is a sync method for compatibility, but Redis is async

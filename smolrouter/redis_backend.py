@@ -515,6 +515,28 @@ class RedisRequestLog:
         return requests
 
     @staticmethod
+    async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
+        """Get requests for a specific source IP ordered by recency."""
+        client = await get_redis()
+        request_ids = [str(request_id) for request_id in await client.smembers(f"requests:by_ip:{source_ip}")]
+
+        requests = []
+        for request_id in request_ids:
+            data = await client.hgetall(f"request:{request_id}")
+            if data:
+                requests.append(LogRecord(dict(data)))
+
+        requests.sort(
+            key=lambda log: getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)(),
+            reverse=True,
+        )
+
+        if limit is None:
+            return requests
+
+        return requests[:limit]
+
+    @staticmethod
     async def get_duplicate_request_ids(body_hash: str) -> List[str]:
         """Return all request IDs that share the given request body hash."""
         client = await get_redis()
