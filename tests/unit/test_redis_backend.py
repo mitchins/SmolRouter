@@ -1,7 +1,10 @@
 from datetime import datetime, timezone
 
+import pytest
+
 import smolrouter.storage as storage_module
-from smolrouter.redis_backend import LogRecord, QuotaRecord
+from smolrouter.redis_backend import LogRecord, QuotaRecord, RedisRequestLog
+from smolrouter.redis_config import redis_client
 
 
 class FakeBlobStorage:
@@ -124,3 +127,29 @@ def test_quota_record_failure_tracks_last_error_and_quota_exhaustion():
     assert quota.last_error == "quota hit"
     assert isinstance(quota.quota_exhausted_at, datetime)
     assert quota.quota_exhausted_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_request_log_create_rejects_unexpected_fields():
+    await redis_client.flushall()
+
+    with pytest.raises(TypeError, match="Unexpected request log create fields: unexpected_field"):
+        await RedisRequestLog.create(
+            source_ip="127.0.0.1",
+            method="GET",
+            path="/health",
+            unexpected_field="boom",
+        )
+
+
+@pytest.mark.asyncio
+async def test_request_log_update_completion_rejects_unexpected_fields():
+    await redis_client.flushall()
+    request_id = await RedisRequestLog.create(source_ip="127.0.0.1", method="GET", path="/health")
+
+    with pytest.raises(TypeError, match="Unexpected request completion fields: unexpected_field"):
+        await RedisRequestLog.update_completion(
+            request_id=request_id,
+            status_code=200,
+            unexpected_field="boom",
+        )
