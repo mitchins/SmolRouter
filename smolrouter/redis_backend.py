@@ -479,6 +479,18 @@ class RedisRequestLog:
         logger.debug(f"Updated Redis request completion: {request_id}")
 
     @staticmethod
+    async def update_request_body_key(request_id: str, request_body_key: str) -> None:
+        """Attach a stored request body blob key without marking the request complete."""
+        client = await get_redis()
+        await client.hset(
+            f"request:{request_id}",
+            mapping={
+                "request_body_key": request_body_key,
+            },
+        )
+        logger.debug(f"Updated Redis request body key: {request_id}")
+
+    @staticmethod
     async def get_by_id(request_id: str) -> Optional[LogRecord]:
         """Get request by ID"""
         client = await get_redis()

@@ -374,7 +374,11 @@ class SmolRouterContainer:
         return self._cache
 
     def create_client_context(
-        self, ip: str, auth_payload: Dict[str, Any] = None, user_agent: str = None, headers: Dict[str, str] = None
+        self,
+        ip: str,
+        auth_payload: Optional[Dict[str, Any]] = None,
+        user_agent: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
     ) -> ClientContext:
         """Create client context for requests"""
         return ClientContext(ip=ip, auth_payload=auth_payload, user_agent=user_agent, headers=headers or {})

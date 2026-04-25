@@ -281,6 +281,25 @@ async def test_google_genai_stats_returns_frontend_compatible_shape(disable_logg
     assert payload["providers"]["google-main"]["api_keys"]["key-1"]["models"]["gemini-2.5-pro"]["requests_today"] == 3
 
 
+@pytest.mark.asyncio
+async def test_app_lifespan_allows_sync_proxy_monitor_shutdown(monkeypatch):
+    stop_calls = []
+    fake_provider = Mock()
+    fake_provider.stop_proxy_health_monitor = Mock(side_effect=lambda: stop_calls.append("stopped"))
+    fake_container = Mock()
+    fake_container.get_providers.return_value = [fake_provider]
+
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    monkeypatch.setattr(app_module, "init_new_architecture", AsyncMock(return_value=None))
+
+    with patch("smolrouter.database.RedisApiKeyQuota.initialize_lua_script", AsyncMock(return_value=None)):
+        async with app_module.app_lifespan(app):
+            pass
+
+    assert stop_calls == ["stopped"]
+
+
 def test_rewrite_model_exact_match():
     original_model_map = MODEL_MAP.copy()
     MODEL_MAP.update({"old-model": "new-model"})

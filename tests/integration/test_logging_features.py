@@ -516,6 +516,30 @@ async def test_inflight_tracking(isolated_db):
     assert stats["total_requests"] == 2
 
 
+@pytest.mark.asyncio
+async def test_request_body_key_update_does_not_complete_inflight_request(isolated_db):
+    """Attaching a request body blob key should not mark an inflight request complete."""
+    from smolrouter.redis_backend import RedisRequestLog
+
+    inflight_log = await RequestLog.create(
+        source_ip="127.0.0.1",  # NOSONAR S1313
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+    )
+
+    await RedisRequestLog.update_request_body_key(inflight_log.id, "blob/request-body-1")
+
+    updated_log = await RequestLog.get_by_id(inflight_log.id)
+
+    assert getattr(updated_log, "request_body_key", None) == "blob/request-body-1"
+    assert updated_log.completed_at is None
+    assert updated_log.status_code == "pending"
+
+
 def test_vacuum_database(isolated_db):
     """Test database vacuum functionality (no-op on Redis backend)"""
     from smolrouter.database import vacuum_database
