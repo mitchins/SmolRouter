@@ -144,6 +144,7 @@ class SmartRouter:
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
+        request_timeout: float,
     ) -> Tuple[bool, Any, int]:
         """Try a single upstream instance.
 
@@ -160,7 +161,7 @@ class SmartRouter:
         logger.debug(f"Trying upstream {instance.name}: {url}")
 
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout)) as client:
                 resp = await client.post(url, json=request_payload, headers=headers)
 
             if resp.status_code < 400:
@@ -216,7 +217,9 @@ class SmartRouter:
                 for i, instance in enumerate(instances_to_try):
                     logger.debug(f"Trying upstream {i + 1}/{len(instances_to_try)}: {instance}")
 
-                    success, result, status_code = await self.try_upstream(instance, request_payload, path, headers)
+                    success, result, status_code = await self.try_upstream(
+                        instance, request_payload, path, headers, request_timeout
+                    )
 
                     # Always track the last status code we received
                     last_status_code = status_code
