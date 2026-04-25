@@ -7,6 +7,7 @@ performance under various conditions without hitting real LLM APIs.
 
 import asyncio
 import logging
+import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -96,9 +97,8 @@ class DummyProvider(IModelProvider):
         await asyncio.sleep(delay_seconds)
 
         # Simulate failures if configured
-        import random
-
-        if random.random() < self.config.failure_rate:
+        failure_threshold = int(self.config.failure_rate * 1_000_000)
+        if secrets.randbelow(1_000_000) < failure_threshold:
             stats.error_count += 1
             raise RuntimeError(f"Dummy provider simulated failure (rate: {self.config.failure_rate * 100:.1f}%)")
 
@@ -124,7 +124,7 @@ class DummyProvider(IModelProvider):
 
         # Build OpenAI-compatible response
         response = {
-            "id": f"dummy-{int(time.time())}-{random.randint(1000, 9999)}",
+            "id": f"dummy-{int(time.time())}-{secrets.randbelow(9000) + 1000}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,

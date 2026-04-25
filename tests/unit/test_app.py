@@ -295,7 +295,7 @@ async def test_app_lifespan_allows_sync_proxy_monitor_shutdown(monkeypatch):
 
     with patch("smolrouter.database.RedisApiKeyQuota.initialize_lua_script", AsyncMock(return_value=None)):
         async with app_module.app_lifespan(app):
-            pass
+            await asyncio.sleep(0)
 
     assert stop_calls == ["stopped"]
 
@@ -327,6 +327,9 @@ def test_rewrite_model_no_match():
 def test_strip_think_chain_from_text():
     text_with_think = "Hello <think>internal thought</think> world."
     assert strip_think_chain_from_text(text_with_think) == "Hello  world."
+
+    text_with_punctuation = "Hello <think>internal thought</think> , world !"
+    assert strip_think_chain_from_text(text_with_punctuation) == "Hello, world!"
 
     text_with_multiple_think = "First <think>1</think> second <think>2</think>."
     assert strip_think_chain_from_text(text_with_multiple_think) == "First  second."

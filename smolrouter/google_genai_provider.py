@@ -9,6 +9,7 @@ import logging
 import json
 import asyncio
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -216,6 +217,26 @@ class GoogleGenAIConfig(ProviderConfig):
 
         if not self.api_keys:
             raise ValueError("No valid API keys found")
+
+
+@dataclass
+class GoogleGenAICompletionContext:
+    original_model: str
+    observation_id: str
+    model_name: str = ""
+    genai_request: Dict[str, Any] = field(default_factory=dict)
+    api_key: str = ""
+    api_key_suffix: Optional[str] = None
+    api_key_index: Optional[int] = None
+    api_key_total: Optional[int] = None
+    proxy_config: Optional[ProxyConfig] = None
+    proxy_info: Optional[ProxyConfig] = None
+    proxy_url: Optional[str] = None
+    proxy_pool_index: Optional[int] = None
+    pool_info: str = ""
+    sync_transport: Any = None
+    async_transport: Any = None
+    client: Any = None
 
 
 class GoogleGenAIProvider(IModelProvider):
@@ -808,56 +829,19 @@ class GoogleGenAIProvider(IModelProvider):
 
         for key in self.config.api_keys:
             quota = await self._get_quota_record(key, model_name)
-
-            # Skip if key is permanently invalid/expired
-            if quota.invalid_key:
-                logger.debug(f"API key {key[:8]}... marked as invalid, skipping")
-                continue
-
-            # If the quota hasn't been reset today, consider it fresh
-            actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
-
-            # Check if key has hit daily limit for this model (either by count or 429 response)
             model_limit = self.get_model_daily_limit(model_name)
-            if actual_requests_today >= model_limit:
-                exhausted_keys.append(key)
-                logger.debug(
-                    f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
-                )
+            actual_requests_today = self._classify_api_key_for_model(
+                quota,
+                key,
+                model_name,
+                pacific_date,
+                model_limit,
+                exhausted_keys,
+                error_prone_keys,
+            )
+
+            if actual_requests_today is None:
                 continue
-
-            # Skip keys with too many recent errors for this model
-            if quota.error_count > 20:  # Increased threshold
-                error_prone_keys.append(key)
-                logger.debug(f"API key {key[:8]}... too many errors for {model_name} ({quota.error_count})")
-                continue
-
-            # Check for recent quota errors for this model (even if not at limit)
-            # Only skip if the quota error happened TODAY (same Pacific date as now)
-            if quota.quota_exhausted_at:
-                # quota_exhausted_at could be datetime object or string from database
-                try:
-                    quota_exhausted_dt = quota.quota_exhausted_at
-
-                    quota_exhausted_pacific = _to_pacific_datetime(quota_exhausted_dt, assume_utc=True)
-
-                    # CRITICAL FIX: Only skip if exhaustion was TODAY (same Pacific date)
-                    # Keys exhausted yesterday should be available again after midnight Pacific reset
-                    exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
-                    if exhausted_date == pacific_date:
-                        # Exhausted today - skip this key for now
-                        logger.debug(
-                            f"API key {key[:8]}... exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
-                        )
-                        continue
-                    else:
-                        # Exhausted on a previous day - key should be available again
-                        logger.debug(
-                            f"API key {key[:8]}... exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
-                        )
-                except (ValueError, TypeError, AttributeError) as e:
-                    # Skip malformed timestamp - allow key through
-                    logger.warning(f"API key {key[:8]}... has malformed quota_exhausted_at, allowing: {e}")
 
             available_keys.append((key, actual_requests_today))
 
@@ -900,9 +884,7 @@ class GoogleGenAIProvider(IModelProvider):
         lowest_usage_keys = [key for key, count in available_keys if count == lowest_count]
 
         # Random selection amongst equals (mitigation for when quota tracking is broken)
-        import random
-
-        best_key = random.choice(lowest_usage_keys)
+        best_key = secrets.choice(lowest_usage_keys)
 
         logger.debug(
             f"Selected API key {best_key[:8]}... for {model_name} with {lowest_count} requests today "
@@ -910,6 +892,64 @@ class GoogleGenAIProvider(IModelProvider):
         )
 
         return best_key
+
+    def _classify_api_key_for_model(
+        self,
+        quota: QuotaRecord,
+        key: str,
+        model_name: str,
+        pacific_date: str,
+        model_limit: int,
+        exhausted_keys: List[str],
+        error_prone_keys: List[str],
+    ) -> Optional[int]:
+        """Return the effective daily request count for a quota record, or None if it should be skipped."""
+        # Skip permanently invalid keys first.
+        if quota.invalid_key:
+            logger.debug(f"API key {key[:8]}... marked as invalid, skipping")
+            return None
+
+        actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
+
+        if actual_requests_today >= model_limit:
+            exhausted_keys.append(key)
+            logger.debug(
+                f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
+            )
+            return None
+
+        if quota.error_count > 20:  # Increased threshold
+            error_prone_keys.append(key)
+            logger.debug(f"API key {key[:8]}... too many errors for {model_name} ({quota.error_count})")
+            return None
+
+        if self._is_recent_quota_exhaustion(quota, key, model_name, pacific_date):
+            return None
+
+        return actual_requests_today
+
+    def _is_recent_quota_exhaustion(self, quota: QuotaRecord, key: str, model_name: str, pacific_date: str) -> bool:
+        """Check whether a quota exhaustion timestamp is still current for the Pacific day."""
+        if not quota.quota_exhausted_at:
+            return False
+
+        try:
+            quota_exhausted_pacific = _to_pacific_datetime(quota.quota_exhausted_at, assume_utc=True)
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.warning(f"API key {key[:8]}... has malformed quota_exhausted_at, allowing: {e}")
+            return False
+
+        exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
+        if exhausted_date == pacific_date:
+            logger.debug(
+                f"API key {key[:8]}... exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
+            )
+            return True
+
+        logger.debug(
+            f"API key {key[:8]}... exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
+        )
+        return False
 
     async def _update_api_key_stats(
         self,
@@ -937,103 +977,129 @@ class GoogleGenAIProvider(IModelProvider):
         # Database handles timezone automatically
 
         if success:
-            # Actually increment usage in Redis
-            try:
-                await RedisApiKeyQuota.increment_usage(
-                    api_key=api_key,
-                    provider_id=self.config.name,
-                    model_name=model_name,
-                    request_count=1,
-                    token_count=tokens,
-                )
-                quota.mark_request_success(tokens=tokens)
-                logger.info(
-                    "API key %s... successful request for %s: %s/%s RPD, %s tokens",
-                    api_key[:8],
-                    model_name,
-                    quota.requests_today,
-                    self.get_model_daily_limit(model_name),
-                    tokens,
-                )
-            except Exception as e:
-                logger.error(f"❌ CRITICAL: Failed to update quota for {api_key[:8]}... / {model_name}: {e}")
-                logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
-                # Still update local object for logging purposes
-                quota.mark_request_success(tokens=tokens)
+            await self._record_api_key_success(RedisApiKeyQuota, quota, api_key, model_name, tokens)
         else:
             error_message = error or ""
             # Check error type and handle appropriately
             # IMPORTANT: Check both error message AND status code (403 errors may have empty error string)
             if self._is_invalid_key_error(error_message, status_code):
-                # Mark invalid across all models for this key
-                key_hash = ApiKeyQuota.hash_api_key(api_key)
-                try:
-                    await ApiKeyQuota.mark_invalid_by_hash(key_hash, self.config.name)
-                    logger.error(
-                        f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error_message})"
-                    )
-
-                    # DYNAMIC REMOVAL: Immediately remove from in-memory pool
-                    try:
-                        self.config.api_keys.remove(api_key)
-                        logger.warning(
-                            f"🗑️  Removed API key {api_key[:8]}... from selection pool ({len(self.config.api_keys)} keys remaining)"
-                        )
-                    except ValueError:
-                        pass  # Key already removed
-                except Exception as e:
-                    logger.error(f"❌ Failed to mark API key as invalid: {e}")
-                    import traceback
-
-                    logger.error(traceback.format_exc())
+                await self._record_invalid_api_key(ApiKeyQuota, api_key, error_message, status_code)
 
             # Check if this is a quota exhaustion error
             elif self._is_quota_exhausted_error(error_message):
-                # Mark this key as exhausted for this model regardless of our internal counter
-                quota.mark_request_failure(error=error_message, quota_exhausted=True)
-
-                # Persist quota exhaustion to Redis so it's remembered across requests
-                try:
-                    await ApiKeyQuota.mark_quota_exhausted(api_key, self.config.name, model_name, error_message)
-                except Exception as e:
-                    logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
-
-                logger.error(
-                    f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted"
-                )
-
-                # Extract retry delay if available
-                retry_delay = self._extract_retry_delay(error_message)
-                if retry_delay:
-                    logger.warning(f"🕒 Google suggests retry in {retry_delay}s for {api_key[:8]}... / {model_name}")
-                else:
-                    logger.warning(f"🕒 Key {api_key[:8]}... / {model_name} exhausted, will reset at midnight Pacific")
+                await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
             else:
-                # Regular error - still count the request
-                quota.mark_request_failure(error=error_message)
+                await self._record_regular_error(ApiKeyQuota, quota, api_key, model_name, error_message, status_code)
 
-                # CRITICAL FIX: Persist error to Redis (was only updating in-memory)
-                try:
-                    await ApiKeyQuota.mark_error(api_key, self.config.name, model_name, error_message)
-                except Exception as e:
-                    logger.error(f"❌ Failed to persist error to Redis: {e}")
+        self._log_quota_status(api_key, model_name, quota)
 
-                # Log if this looks like it should have been caught
-                if status_code == 403:
-                    logger.warning(
-                        f"⚠️  403 error but not marked invalid - status={status_code}, error={error_message!r}"
-                    )
+    async def _record_api_key_success(
+        self,
+        quota_backend: Any,
+        quota: QuotaRecord,
+        api_key: str,
+        model_name: str,
+        tokens: int,
+    ) -> None:
+        try:
+            await quota_backend.increment_usage(
+                api_key=api_key,
+                provider_id=self.config.name,
+                model_name=model_name,
+                request_count=1,
+                token_count=tokens,
+            )
+            quota.mark_request_success(tokens=tokens)
+            logger.info(
+                "API key %s... successful request for %s: %s/%s RPD, %s tokens",
+                api_key[:8],
+                model_name,
+                quota.requests_today,
+                self.get_model_daily_limit(model_name),
+                tokens,
+            )
+        except Exception as e:
+            logger.error(f"❌ CRITICAL: Failed to update quota for {api_key[:8]}... / {model_name}: {e}")
+            logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
+            quota.mark_request_success(tokens=tokens)
 
-            logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error_message}")
+    async def _record_invalid_api_key(
+        self, quota_backend: Any, api_key: str, error_message: str, status_code: Optional[int]
+    ) -> None:
+        key_hash = quota_backend.hash_api_key(api_key)
+        try:
+            await quota_backend.mark_invalid_by_hash(key_hash, self.config.name)
+            logger.error(f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error_message})")
 
-        # Log quota status if approaching limits for this model
+            try:
+                self.config.api_keys.remove(api_key)
+                logger.warning(
+                    f"🗑️  Removed API key {api_key[:8]}... from selection pool ({len(self.config.api_keys)} keys remaining)"
+                )
+            except ValueError:
+                pass
+        except Exception as e:
+            logger.error(f"❌ Failed to mark API key as invalid: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+
+    async def _record_quota_exhaustion(
+        self,
+        quota_backend: Any,
+        quota: QuotaRecord,
+        api_key: str,
+        model_name: str,
+        error_message: str,
+    ) -> None:
+        quota.mark_request_failure(error=error_message, quota_exhausted=True)
+
+        try:
+            await quota_backend.mark_quota_exhausted(api_key, self.config.name, model_name, error_message)
+        except Exception as e:
+            logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
+
+        logger.error(f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted")
+
+        retry_delay = self._extract_retry_delay(error_message)
+        if retry_delay:
+            logger.warning(f"🕒 Google suggests retry in {retry_delay}s for {api_key[:8]}... / {model_name}")
+        else:
+            logger.warning(f"🕒 Key {api_key[:8]}... / {model_name} exhausted, will reset at midnight Pacific")
+
+    async def _record_regular_error(
+        self,
+        quota_backend: Any,
+        quota: QuotaRecord,
+        api_key: str,
+        model_name: str,
+        error_message: str,
+        status_code: Optional[int],
+    ) -> None:
+        quota.mark_request_failure(error=error_message)
+
+        try:
+            await quota_backend.mark_error(api_key, self.config.name, model_name, error_message)
+        except Exception as e:
+            logger.error(f"❌ Failed to persist error to Redis: {e}")
+
+        if status_code == 403:
+            logger.warning(f"⚠️  403 error but not marked invalid - status={status_code}, error={error_message!r}")
+
+        logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error_message}")
+
+    def _log_quota_status(self, api_key: str, model_name: str, quota: QuotaRecord) -> None:
         model_limit = self.get_model_daily_limit(model_name)
+        if model_limit <= 0:
+            logger.warning("API key %s... / %s has non-positive daily limit: %s", api_key[:8], model_name, model_limit)
+            return
+
         quota_percentage = (quota.requests_today / model_limit) * 100
-        if quota_percentage >= 100:
+        if quota.requests_today >= model_limit:
             logger.error(
                 f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
             )
-        elif quota_percentage >= 80:
+        elif quota.requests_today >= (model_limit * 0.8):
             logger.warning(
                 "API key %s... / %s approaching daily limit: %.1f%% used (%s/%s)",
                 api_key[:8],
@@ -1292,49 +1358,11 @@ class GoogleGenAIProvider(IModelProvider):
         if not messages:
             raise ValueError("No messages provided in request")
 
-        # Convert messages to Google GenAI format
         contents = []
         for message in messages:
-            role = message.get("role", "user")
-            content = message.get("content", "")
-
-            parts = []
-            if isinstance(content, str):
-                parts.append({"text": content})
-            elif isinstance(content, list):
-                for item in content:
-                    if item.get("type") == "text":
-                        parts.append({"text": item.get("text", "")})
-                    elif item.get("type") == "image_url":
-                        image_url = item.get("image_url", {}).get("url", "")
-                        if image_url.startswith("data:"):
-                            try:
-                                header, base64_data = image_url.split(",", 1)
-                                mime_type = header.split(":")[1].split(";")[0]
-                                parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
-                            except Exception as e:
-                                logger.warning(f"Failed to parse data URI: {e}")
-                        else:
-                            logger.warning(
-                                f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."
-                            )
-
-            if not parts:
-                continue
-
-            # Map OpenAI roles to Google GenAI roles
-            if role == "system":
-                # Prepend "System: " to the first text part if it exists
-                if parts and "text" in parts[0]:
-                    parts[0]["text"] = f"System: {parts[0]['text']}"
-                else:
-                    parts.insert(0, {"text": "System: "})
-
-                contents.append({"role": "user", "parts": parts})
-            elif role == "assistant":
-                contents.append({"role": "model", "parts": parts})
-            else:  # user
-                contents.append({"role": "user", "parts": parts})
+            genai_content = self._convert_openai_message_to_genai_content(message)
+            if genai_content is not None:
+                contents.append(genai_content)
 
         # Build generation config
         generation_config = {}
@@ -1352,31 +1380,60 @@ class GoogleGenAIProvider(IModelProvider):
 
         return model_name, genai_request
 
+    def _convert_openai_message_to_genai_content(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        role = message.get("role", "user")
+        parts = self._convert_openai_content_to_parts(message.get("content", ""))
+
+        if not parts:
+            return None
+
+        if role == "system":
+            parts[0]["text"] = f"System: {parts[0]['text']}"
+            return {"role": "user", "parts": parts}
+
+        if role == "assistant":
+            return {"role": "model", "parts": parts}
+
+        return {"role": "user", "parts": parts}
+
+    def _convert_openai_content_to_parts(self, content: Any) -> List[Dict[str, Any]]:
+        parts: List[Dict[str, Any]] = []
+
+        if isinstance(content, str):
+            parts.append({"text": content})
+            return parts
+
+        if not isinstance(content, list):
+            return parts
+
+        for item in content:
+            if item.get("type") == "text":
+                parts.append({"text": item.get("text", "")})
+                continue
+
+            if item.get("type") != "image_url":
+                continue
+
+            image_url = item.get("image_url", {}).get("url", "")
+            if image_url.startswith("data:"):
+                try:
+                    header, base64_data = image_url.split(",", 1)
+                    mime_type = header.split(":")[1].split(";")[0]
+                    parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
+                except Exception as e:
+                    logger.warning(f"Failed to parse data URI: {e}")
+            else:
+                logger.warning(
+                    f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."
+                )
+
+        return parts
+
     def _convert_genai_to_openai_response(self, genai_response: Any, original_model: str) -> Dict[str, Any]:
         """Convert Google GenAI response to OpenAI format"""
         try:
-            # Extract text content - new SDK provides direct .text attribute
-            text_content = ""
-            if hasattr(genai_response, "text") and genai_response.text:
-                text_content = genai_response.text
-            elif genai_response.candidates:
-                # Fallback to candidates structure for compatibility
-                candidate = genai_response.candidates[0]
-                if hasattr(candidate, "content") and candidate.content:
-                    parts = getattr(candidate.content, "parts", None)
-                    if parts:
-                        for part in parts:
-                            if hasattr(part, "text"):
-                                text_content += part.text
-
-            # Extract usage information
-            usage = {}
-            if hasattr(genai_response, "usage_metadata") and genai_response.usage_metadata:
-                usage = {
-                    "prompt_tokens": getattr(genai_response.usage_metadata, "prompt_token_count", 0),
-                    "completion_tokens": getattr(genai_response.usage_metadata, "candidates_token_count", 0),
-                    "total_tokens": getattr(genai_response.usage_metadata, "total_token_count", 0),
-                }
+            text_content = self._extract_genai_text(genai_response)
+            usage = self._extract_genai_usage(genai_response)
 
             # Build OpenAI-compatible response
             openai_response = {
@@ -1396,6 +1453,38 @@ class GoogleGenAIProvider(IModelProvider):
             logger.error(f"Error converting GenAI response to OpenAI format: {e}")
             raise
 
+    def _extract_genai_text(self, genai_response: Any) -> str:
+        text_content = ""
+        if hasattr(genai_response, "text") and genai_response.text:
+            return genai_response.text
+
+        if not getattr(genai_response, "candidates", None):
+            return text_content
+
+        candidate = genai_response.candidates[0]
+        if not hasattr(candidate, "content") or not candidate.content:
+            return text_content
+
+        parts = getattr(candidate.content, "parts", None)
+        if not parts:
+            return text_content
+
+        for part in parts:
+            if hasattr(part, "text"):
+                text_content += part.text
+
+        return text_content
+
+    def _extract_genai_usage(self, genai_response: Any) -> Dict[str, int]:
+        if not hasattr(genai_response, "usage_metadata") or not genai_response.usage_metadata:
+            return {}
+
+        return {
+            "prompt_tokens": getattr(genai_response.usage_metadata, "prompt_token_count", 0),
+            "completion_tokens": getattr(genai_response.usage_metadata, "candidates_token_count", 0),
+            "total_tokens": getattr(genai_response.usage_metadata, "total_token_count", 0),
+        }
+
     async def generate_completion(
         self, openai_request: Dict[str, Any]
     ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
@@ -1403,260 +1492,252 @@ class GoogleGenAIProvider(IModelProvider):
 
         Returns: (response_dict, metadata)
         """
-        from .request_metadata import RequestMetadata
-        from .transport_observer import get_observer
         import uuid
 
-        original_model = openai_request.get("model", "")
-
-        # Generate observation ID for ground truth tracking
-        observation_id = f"obs_{uuid.uuid4().hex[:12]}"
-        model_name: str = ""
-        api_key_suffix: Optional[str] = None
-        api_key_index: Optional[int] = None
-        api_key_total: Optional[int] = None
-        proxy_info: Optional[ProxyConfig] = None
-        proxy_url: Optional[str] = None
-        proxy_pool_index: Optional[int] = None
-
-        def _build_request_error(message: str) -> GoogleGenAIRequestError:
-            return GoogleGenAIRequestError(
-                message,
-                provider_id=self.config.name,
-                model_name=model_name or original_model or None,
-                api_key_suffix=api_key_suffix,
-                api_key_index=api_key_index,
-                api_key_total=api_key_total,
-                proxy_used=self._proxy_info_to_string(proxy_info),
-            )
+        context = GoogleGenAICompletionContext(
+            original_model=openai_request.get("model", ""),
+            observation_id=f"obs_{uuid.uuid4().hex[:12]}",
+        )
 
         try:
-            # Convert request format
-            model_name, genai_request = self._convert_openai_to_genai_request(openai_request)
+            context = await self._build_completion_context(openai_request, context)
+            response = await self._run_completion_request(context)
+            return await self._finalize_completion(context, response)
 
-            # Select best API key
-            api_key = await self._select_best_api_key(model_name)
-            api_key_suffix = api_key[-8:] if len(api_key) > 8 else api_key
+        except GoogleGenAIRequestError:
+            raise
+        except Exception as error:
+            raise await self._handle_completion_exception(context, error)
 
-            # Get key position for debugging/monitoring
-            try:
-                api_key_index = self.config.api_keys.index(api_key) + 1  # 1-based for display
-                api_key_total = len(self.config.api_keys)
-            except (ValueError, AttributeError):
-                api_key_index = None
-                api_key_total = None
+    async def _build_completion_context(
+        self, openai_request: Dict[str, Any], context: GoogleGenAICompletionContext
+    ) -> GoogleGenAICompletionContext:
+        context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request)
+        context.api_key = await self._select_best_api_key(context.model_name)
+        context.api_key_suffix = context.api_key[-8:] if len(context.api_key) > 8 else context.api_key
+        context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
+        context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
+            context.model_name
+        )
+        context.proxy_info = context.proxy_config if context.proxy_config else None
+        context.proxy_url = self._proxy_config_to_url(context.proxy_info)
 
-            # Create client with proxy transport
-            # Check if we should use proxy pool (round-robin) or per-model proxy
-            if self._should_use_proxy_pool(model_name):
-                proxy_config, proxy_pool_index = self._get_next_proxy_from_pool()
-                pool_info = (
-                    f" (pool #{(proxy_pool_index or 0) + 1}/{len(self.config.proxy_pool)})" if self.config.proxy_pool else ""
+        if context.proxy_url and not self._proxy_available_for_use(context.proxy_url):
+            health = self._proxy_health_snapshot(context.proxy_url)
+            raise self._build_request_error_from_context(
+                context,
+                f"Configured proxy {self._mask_proxy_url(context.proxy_url)} is currently unhealthy"
+                + (f": {health['last_error']}" if health.get("last_error") else ""),
+            )
+
+        self._schedule_proxy_probe(context.proxy_url)
+        context.sync_transport, context.async_transport = self._create_proxy_transport(
+            context.proxy_config, context.observation_id
+        )
+        context.client = self._create_completion_client(
+            context.api_key, context.sync_transport, context.async_transport
+        )
+
+        key_position_str = f" key #{context.api_key_index}/{context.api_key_total}" if context.api_key_index else ""
+        logger.info(
+            f"🚀 Outbound request: model={context.model_name}, api_key=...{context.api_key_suffix}{key_position_str}, proxy={context.proxy_info or 'direct'}{context.pool_info} [obs={context.observation_id}]"
+        )
+
+        return context
+
+    def _resolve_api_key_position(self, api_key: str) -> Tuple[Optional[int], Optional[int]]:
+        try:
+            return self.config.api_keys.index(api_key) + 1, len(self.config.api_keys)
+        except (ValueError, AttributeError):
+            return None, None
+
+    def _select_proxy_configuration(
+        self, model_name: str
+    ) -> Tuple[Optional[ProxyConfig], Optional[int], str]:
+        if self._should_use_proxy_pool(model_name):
+            proxy_config, proxy_pool_index = self._get_next_proxy_from_pool()
+            pool_info = (
+                f" (pool #{(proxy_pool_index or 0) + 1}/{len(self.config.proxy_pool)})" if self.config.proxy_pool else ""
+            )
+            return proxy_config, proxy_pool_index, pool_info
+
+        return self.config.get_proxy_for_model(model_name), None, ""
+
+    def _create_completion_client(
+        self,
+        api_key: str,
+        sync_transport: Any,
+        async_transport: Any,
+    ) -> Any:
+        from google.genai import types
+
+        if sync_transport and async_transport:
+            http_options = types.HttpOptions(
+                client_args={"transport": sync_transport, "trust_env": False},
+                async_client_args={"transport": async_transport, "trust_env": False},
+            )
+            logger.debug("httpx transports active: True (proxy attached)")
+            logger.debug("httpx trust_env disabled via HttpOptions: True")
+            return genai.Client(api_key=api_key, http_options=http_options)
+
+        logger.debug("httpx transports active: False (no proxy)")
+        logger.debug("httpx trust_env disabled via HttpOptions: True")
+        return genai.Client(api_key=api_key)
+
+    async def _run_completion_request(self, context: GoogleGenAICompletionContext) -> Any:
+        await self._rate_limiter.acquire_slot()
+        try:
+            return await asyncio.to_thread(
+                context.client.models.generate_content,
+                model=context.model_name,
+                contents=context.genai_request["contents"],
+                config=context.genai_request["generation_config"],
+            )
+        finally:
+            await self._rate_limiter.release_slot()
+
+    async def _finalize_completion(
+        self, context: GoogleGenAICompletionContext, response: Any
+    ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
+        from .request_metadata import RequestMetadata
+        from .transport_observer import get_observer
+
+        openai_response = self._convert_genai_to_openai_response(response, context.original_model)
+        tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
+        await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
+
+        if context.proxy_url:
+            self._mark_proxy_health(context.proxy_url, success=True)
+
+        observer = get_observer()
+        observation = observer.get_observation(context.observation_id)
+        actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
+            context, observation
+        )
+
+        metadata = RequestMetadata(
+            api_key_suffix=actual_key_suffix,
+            proxy_used=actual_proxy,
+            provider_id=self.config.name,
+            model_name=context.model_name,
+            api_key_index=context.api_key_index if context.api_key_index else None,
+            api_key_total=context.api_key_total if context.api_key_total else None,
+            api_key_verified=key_verified,
+            proxy_verified=proxy_verified,
+            observation_id=context.observation_id,
+        )
+
+        return openai_response, metadata
+
+    def _resolve_observation_state(
+        self, context: GoogleGenAICompletionContext, observation: Any
+    ) -> Tuple[Optional[str], Optional[str], bool, bool]:
+        actual_key_suffix = context.api_key_suffix
+        actual_proxy = self._proxy_info_to_string(context.proxy_info)
+        key_verified = False
+        proxy_verified = False
+
+        if observation:
+            if observation.api_key_used:
+                actual_key_suffix = (
+                    observation.api_key_used[-8:] if len(observation.api_key_used) > 8 else observation.api_key_used
                 )
-            else:
-                proxy_config = self.config.get_proxy_for_model(model_name)
-                pool_info = ""
-            proxy_info = proxy_config if proxy_config else None
-            proxy_url = self._proxy_config_to_url(proxy_info)
-            if proxy_url and not self._proxy_available_for_use(proxy_url):
-                health = self._proxy_health_snapshot(proxy_url)
-                raise _build_request_error(
-                    f"Configured proxy {self._mask_proxy_url(proxy_url)} is currently unhealthy"
-                    + (f": {health['last_error']}" if health.get("last_error") else "")
-                )
-            self._schedule_proxy_probe(proxy_url)
-            key_position_str = f" key #{api_key_index}/{api_key_total}" if api_key_index else ""
+                key_verified = True
+
+            if observation.proxy_url:
+                actual_proxy = observation.proxy_url
+                proxy_verified = True
+            elif not context.proxy_info:
+                proxy_verified = True
+
             logger.info(
-                f"🚀 Outbound request: model={model_name}, api_key=...{api_key_suffix}{key_position_str}, proxy={proxy_info or 'direct'}{pool_info} [obs={observation_id}]"
+                f"✅ GROUND TRUTH: key=...{actual_key_suffix} (verified={key_verified}), proxy={actual_proxy or 'NONE'} (verified={proxy_verified})"
             )
-            sync_transport, async_transport = self._create_proxy_transport(proxy_config, observation_id)
-
-            from google.genai import types
-
-            if sync_transport and async_transport:
-                http_options = types.HttpOptions(
-                    client_args={"transport": sync_transport, "trust_env": False},
-                    async_client_args={"transport": async_transport, "trust_env": False},
-                )
-                client = genai.Client(api_key=api_key, http_options=http_options)
-                logger.debug("httpx transports active: True (proxy attached)")
-                logger.debug("httpx trust_env disabled via HttpOptions: True")
-            else:
-                client = genai.Client(api_key=api_key)
-                logger.debug("httpx transports active: False (no proxy)")
-                logger.debug("httpx trust_env disabled via HttpOptions: True")
-
-            # Acquire rate limiting slot (blocks if needed)
-            await self._rate_limiter.acquire_slot()
-
-            try:
-                # Generate content using new API
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=model_name,
-                    contents=genai_request["contents"],
-                    config=genai_request["generation_config"],
-                )
-            finally:
-                # Always release slot, even on error
-                await self._rate_limiter.release_slot()
-
-            # Convert response back to OpenAI format
-            openai_response = self._convert_genai_to_openai_response(response, original_model)
-
-            # Update API key statistics
-            tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
-            await self._update_api_key_stats(api_key, model_name, success=True, tokens=tokens_used)
-            if proxy_url:
-                self._mark_proxy_health(proxy_url, success=True)
-
-            # Verify ground truth via observer (prefer observation over intent)
-            observer = get_observer()
-            observation = observer.get_observation(observation_id)
-
-            # Defaults (intent-based) - convert ProxyConfig to string for storage
-            actual_key_suffix = api_key_suffix
-            actual_proxy = self._proxy_info_to_string(proxy_info)
-            key_verified = False
-            proxy_verified = False
-
-            if observation:
-                # GROUND TRUTH available - use it as primary source
-                if observation.api_key_used:
-                    # Use observed API key (not intent)
-                    actual_key_suffix = (
-                        observation.api_key_used[-8:] if len(observation.api_key_used) > 8 else observation.api_key_used
-                    )
-                    key_verified = True
-
-                    # Verify it matches our intent
-                    if actual_key_suffix != api_key_suffix:
-                        logger.error(
-                            f"❌ API key MISMATCH: intended=...{api_key_suffix}, observed=...{actual_key_suffix}"
-                        )
-                    else:
-                        logger.debug(f"✅ API key verified: ...{actual_key_suffix}")
-
-                # Use observed proxy (not intent)
-                if observation.proxy_url:
-                    actual_proxy = observation.proxy_url
-                    proxy_verified = True
-
-                    # Verify it matches our intent by comparing the actual URL parts
-                    # proxy_info is ProxyConfig, observation.proxy_url can be httpx URL object or string
-                    if proxy_info:
-                        # Extract the intended proxy URL from ProxyConfig
-                        intended_proxy_url = proxy_info.https_proxy or proxy_info.http_proxy
-                        if intended_proxy_url:
-                            # Parse intended URL and compare host:port with observed
-                            from urllib.parse import urlparse
-
-                            intended_parsed = urlparse(intended_proxy_url)
-
-                            # Handle both httpx.URL objects and strings
-                            try:
-                                if isinstance(actual_proxy, str):
-                                    # If it's a string, parse it
-                                    observed_parsed = urlparse(actual_proxy)
-                                    obs_host = observed_parsed.hostname
-                                    obs_port = observed_parsed.port
-                                else:
-                                    # httpx.URL object with host/port attributes
-                                    obs_host = (
-                                        actual_proxy.host.decode()
-                                        if isinstance(actual_proxy.host, bytes)
-                                        else actual_proxy.host
-                                    )
-                                    obs_port = actual_proxy.port
-
-                                if intended_parsed.hostname == obs_host and intended_parsed.port == obs_port:
-                                    logger.debug(f"✅ Proxy verified: {obs_host}:{obs_port}")
-                                else:
-                                    logger.error(
-                                        f"❌ Proxy MISMATCH: intended={intended_parsed.hostname}:{intended_parsed.port}, observed={obs_host}:{obs_port}"
-                                    )
-                            except Exception as e:
-                                logger.debug(f"✅ Proxy verification skipped (parse error): {e}")
-                        else:
-                            logger.debug(f"✅ Proxy verified (no specific URL in config): {actual_proxy}")
-                    else:
-                        logger.debug(f"✅ Proxy observed (none intended): {actual_proxy}")
-                elif not proxy_info:
-                    # No proxy in observation, none intended - verified
-                    proxy_verified = True
-                    logger.debug("✅ No proxy verified (direct connection)")
-
-                logger.info(
-                    f"✅ GROUND TRUTH: key=...{actual_key_suffix} (verified={key_verified}), proxy={actual_proxy or 'NONE'} (verified={proxy_verified})"
-                )
-            else:
-                # Observation not available - fallback to intent
-                logger.warning(
-                    f"⚠️ No observation for {observation_id} - using INTENT: key=...{api_key_suffix}, proxy={proxy_info or 'NONE'}"
-                )
-
-            # Create metadata with ground truth (or intent as fallback)
-            metadata = RequestMetadata(
-                api_key_suffix=actual_key_suffix,
-                proxy_used=actual_proxy,
-                provider_id=self.config.name,
-                model_name=model_name,
-                api_key_index=api_key_index if api_key_index else None,
-                api_key_total=api_key_total if api_key_total else None,
-                api_key_verified=key_verified,
-                proxy_verified=proxy_verified,
-                observation_id=observation_id,
+        else:
+            logger.warning(
+                f"⚠️ No observation for {context.observation_id} - using INTENT: key=...{context.api_key_suffix}, proxy={context.proxy_info or 'NONE'}"
             )
 
-            return openai_response, metadata
+        return actual_key_suffix, actual_proxy, key_verified, proxy_verified
 
-        except ResourceExhausted as e:
-            error_msg = f"Google GenAI quota exhausted: {e}"
-            # Don't update stats if this is our own "all keys exhausted" exception
-            if "api_key" in locals() and "model_name" in locals():
-                await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg)
+    def _build_request_error_from_context(
+        self, context: GoogleGenAICompletionContext, message: str
+    ) -> GoogleGenAIRequestError:
+        return GoogleGenAIRequestError(
+            message,
+            provider_id=self.config.name,
+            model_name=context.model_name or context.original_model or None,
+            api_key_suffix=context.api_key_suffix,
+            api_key_index=context.api_key_index,
+            api_key_total=context.api_key_total,
+            proxy_used=self._proxy_info_to_string(context.proxy_info),
+        )
 
-            # Check if this ResourceExhausted has retry timing info
-            retry_after_seconds = None
-            if hasattr(e, "errors") and e.errors:
-                for error_detail in e.errors:
-                    if isinstance(error_detail, dict) and "retry_after_seconds" in error_detail:
-                        retry_after_seconds = error_detail["retry_after_seconds"]
-                        break
+    async def _record_completion_failure(
+        self,
+        context: GoogleGenAICompletionContext,
+        error_message: str,
+        status_code: Optional[int],
+    ) -> None:
+        if context.api_key and context.model_name:
+            await self._update_api_key_stats(
+                context.api_key,
+                context.model_name,
+                success=False,
+                error=error_message,
+                status_code=status_code,
+            )
 
-            # Create a custom exception that the container can handle with proper HTTP response
-            quota_error = _build_request_error(error_msg)
-            quota_error.retry_after_seconds = retry_after_seconds
-            raise quota_error
-        except PermissionDenied as e:
-            error_msg = f"Google GenAI permission denied: {e}"
-            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=403)
-            raise _build_request_error(error_msg)
-        except InvalidArgument as e:
-            error_msg = f"Google GenAI invalid argument: {e}"
-            # InvalidArgument can indicate API key issues
-            await self._update_api_key_stats(api_key, model_name, success=False, error=error_msg, status_code=400)
-            raise _build_request_error(error_msg)
-        except Exception as e:
-            error_msg = f"Google GenAI error: {e}"
-            if proxy_url and self._is_proxy_connectivity_error(e):
-                self._mark_proxy_health(proxy_url, success=False, error=str(e))
-            if "api_key" in locals() and "model_name" in locals():
-                # Extract status code from error message if present
-                # Handles cases where exception isn't caught by specific handlers
-                extracted_status = None
-                error_str = str(e).lower()
-                if "403" in error_str or "permission" in error_str:
-                    extracted_status = 403
-                elif "429" in error_str or "quota" in error_str or "resource_exhausted" in error_str:
-                    extracted_status = 429
-                elif "401" in error_str or "unauthorized" in error_str:
-                    extracted_status = 401
+    def _extract_retry_after_seconds(self, error: Exception) -> Optional[float]:
+        retry_after_seconds = None
+        error_details = getattr(error, "errors", None)
+        if error_details:
+            for error_detail in error_details:
+                if isinstance(error_detail, dict) and "retry_after_seconds" in error_detail:
+                    retry_after_seconds = error_detail["retry_after_seconds"]
+                    break
+        return retry_after_seconds
 
-                await self._update_api_key_stats(
-                    api_key, model_name, success=False, error=error_msg, status_code=extracted_status
-                )
-            raise _build_request_error(error_msg)
+    def _extract_status_code_from_exception(self, error: Exception) -> Optional[int]:
+        error_str = str(error).lower()
+        if "403" in error_str or "permission" in error_str:
+            return 403
+        if "429" in error_str or "quota" in error_str or "resource_exhausted" in error_str:
+            return 429
+        if "401" in error_str or "unauthorized" in error_str:
+            return 401
+        return None
+
+    async def _handle_completion_exception(
+        self, context: GoogleGenAICompletionContext, error: Exception
+    ) -> GoogleGenAIRequestError:
+        if isinstance(error, ResourceExhausted):
+            error_msg = f"Google GenAI quota exhausted: {error}"
+            await self._record_completion_failure(context, error_msg, None)
+            quota_error = self._build_request_error_from_context(context, error_msg)
+            quota_error.retry_after_seconds = self._extract_retry_after_seconds(error)
+            return quota_error
+
+        if isinstance(error, PermissionDenied):
+            error_msg = f"Google GenAI permission denied: {error}"
+            await self._record_completion_failure(context, error_msg, 403)
+            return self._build_request_error_from_context(context, error_msg)
+
+        if isinstance(error, InvalidArgument):
+            error_msg = f"Google GenAI invalid argument: {error}"
+            await self._record_completion_failure(context, error_msg, 400)
+            return self._build_request_error_from_context(context, error_msg)
+
+        error_msg = f"Google GenAI error: {error}"
+        if context.proxy_url and self._is_proxy_connectivity_error(error):
+            self._mark_proxy_health(context.proxy_url, success=False, error=str(error))
+
+        await self._record_completion_failure(
+            context,
+            error_msg,
+            self._extract_status_code_from_exception(error),
+        )
+        return self._build_request_error_from_context(context, error_msg)
 
     async def get_api_key_stats(self, include_unused_models: bool = False) -> Dict[str, Dict[str, Any]]:
         """Get current API key usage statistics (grouped by API key)

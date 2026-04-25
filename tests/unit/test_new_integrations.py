@@ -4,11 +4,17 @@ import asyncio
 import httpx
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 
 from smolrouter.access_control import NoAccessControl
 from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
 from smolrouter.mediator import ModelMediator
-from smolrouter.google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
+from smolrouter.google_genai_provider import (
+    GoogleGenAICompletionContext,
+    GoogleGenAIConfig,
+    GoogleGenAIProvider,
+    GoogleGenAIRequestError,
+)
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
 from smolrouter.container import SmolRouterContainer
 from smolrouter.providers import OpenAIProvider, ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
@@ -72,6 +78,80 @@ def test_google_genai_proxy_pool_skips_unhealthy_entries():
     assert selected_index == 1
     assert selected_proxy is not None
     assert selected_proxy.to_httpx_proxy() == "http://127.0.0.1:8889"
+
+
+def test_google_genai_message_conversion_prefixes_system_content():
+    config = GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
+    provider = GoogleGenAIProvider(config)
+
+    converted = provider._convert_openai_message_to_genai_content({"role": "system", "content": "Keep this."})
+
+    assert converted == {"role": "user", "parts": [{"text": "System: Keep this."}]}
+
+
+def test_google_genai_retry_after_and_status_code_helpers():
+    config = GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
+    provider = GoogleGenAIProvider(config)
+
+    class RetryMetadataError(RuntimeError):
+        def __init__(self):
+            self.errors = [{"retry_after_seconds": 12.5}]
+
+    class StatusCodeError(RuntimeError):
+        pass
+
+    assert provider._extract_retry_after_seconds(RetryMetadataError()) == pytest.approx(12.5)
+    assert provider._extract_retry_after_seconds(StatusCodeError("no retry metadata")) is None
+    assert provider._extract_status_code_from_exception(StatusCodeError("permission denied 403")) == 403
+    assert provider._extract_status_code_from_exception(StatusCodeError("quota exhausted 429")) == 429
+    assert provider._extract_status_code_from_exception(StatusCodeError("unauthorized 401")) == 401
+    assert provider._extract_status_code_from_exception(StatusCodeError("some other error")) is None
+
+
+def test_google_genai_completion_context_helpers_use_observed_ground_truth():
+    config = GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
+    provider = GoogleGenAIProvider(config)
+    context = GoogleGenAICompletionContext(
+        original_model="original-model",
+        observation_id="obs-123",
+        model_name="gemini-2.0-flash",
+        api_key_suffix="intent-key",
+        proxy_info=ProxyConfig(https_proxy="http://127.0.0.1:8888"),
+    )
+    observation = SimpleNamespace(api_key_used="1234567890abcdef", proxy_url="http://127.0.0.1:8888")
+
+    actual_key_suffix, actual_proxy, key_verified, proxy_verified = provider._resolve_observation_state(
+        context, observation
+    )
+
+    assert actual_key_suffix == "90abcdef"
+    assert actual_proxy == "http://127.0.0.1:8888"
+    assert key_verified is True
+    assert proxy_verified is True
+
+
+def test_google_genai_request_error_carries_context_metadata():
+    config = GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
+    provider = GoogleGenAIProvider(config)
+    context = GoogleGenAICompletionContext(
+        original_model="original-model",
+        observation_id="obs-123",
+        model_name="gemini-2.0-flash",
+        api_key_suffix="abc12345",
+        api_key_index=1,
+        api_key_total=2,
+        proxy_info=ProxyConfig(https_proxy="http://127.0.0.1:8888"),
+    )
+
+    error = provider._build_request_error_from_context(context, "boom")
+
+    assert isinstance(error, GoogleGenAIRequestError)
+    assert error.provider_id == "test-google"
+    assert error.model_name == "gemini-2.0-flash"
+    assert error.api_key_suffix == "abc12345"
+    assert error.api_key_index == 1
+    assert error.api_key_total == 2
+    assert error.proxy_used == "http://127.0.0.1:8888"
 
 
 def test_anthropic_provider_creation():
