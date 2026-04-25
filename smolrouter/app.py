@@ -667,7 +667,7 @@ async def start_request_log(
 
             import asyncio
 
-            asyncio.create_task(_store_request_body_async())
+            _store_request_body_task = asyncio.create_task(_store_request_body_async())
 
         # Log request start with traceability info (reduced verbosity)
         logger.debug(
@@ -680,7 +680,7 @@ async def start_request_log(
 
         try:
             logger.debug(f"Broadcasting new_request event for request {request_id}")
-            asyncio.create_task(broadcast_request_event("new_request", log_entry))
+            _new_request_event_task = asyncio.create_task(broadcast_request_event("new_request", log_entry))
         except Exception as e:
             logger.error(f"Failed to broadcast new request event: {e}")
 
@@ -705,7 +705,7 @@ def _complete_lb_request(lb_instance, start_time: float, success: bool):
         # Schedule the async end_request call
         try:
             asyncio.get_running_loop()
-            asyncio.create_task(model_load_balancer.end_request(lb_instance, response_time, success))
+            _lb_completion_task = asyncio.create_task(model_load_balancer.end_request(lb_instance, response_time, success))
         except RuntimeError:
             # No running loop - create one for this call
             asyncio.run(model_load_balancer.end_request(lb_instance, response_time, success))
@@ -828,7 +828,7 @@ def _broadcast_request_completion(log_entry: Any) -> str:
 
     try:
         logger.debug(f"Broadcasting request_completed event for request {request_id}")
-        asyncio.create_task(broadcast_request_event("request_completed", log_entry))
+        _request_completed_task = asyncio.create_task(broadcast_request_event("request_completed", log_entry))
     except Exception as e:
         logger.error(f"Failed to broadcast request completion event: {e}")
 
@@ -3137,7 +3137,7 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
             await manager.send_personal_message(initial_data, websocket)
 
         except Exception as e:
-            logger.error(f"Failed to send initial client dashboard data for {client_ip}: {e}")
+            logger.error("Failed to send initial client dashboard data: %s", e)
 
         # Keep connection alive and handle pings
         while True:
@@ -3157,7 +3157,7 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                logger.error(f"WebSocket error for client {client_ip}: {e}")
+                logger.error("WebSocket error for client dashboard: %s", e)
                 break
 
     finally:

@@ -46,7 +46,9 @@ class DummyProvider(IModelProvider):
         self.model_stats: Dict[str, DummyStats] = {}
 
         logger.info(
-            f"Initialized Dummy provider with {config.response_delay_ms}ms delay, {config.failure_rate * 100:.1f}% failure rate"
+            "Initialized Dummy provider with %sms delay, %.1f%% failure rate",
+            config.response_delay_ms,
+            config.failure_rate * 100,
         )
 
     async def discover_models(self) -> List[ModelInfo]:
@@ -80,6 +82,8 @@ class DummyProvider(IModelProvider):
         """Make dummy request with configurable delay and responses"""
 
         model = request_data.get("model", "dummy-standard-4.0")
+        if client_headers:
+            logger.debug("Dummy request received with %d client headers", len(client_headers))
 
         # Get or create model stats
         if model not in self.model_stats:
@@ -96,7 +100,7 @@ class DummyProvider(IModelProvider):
 
         if random.random() < self.config.failure_rate:
             stats.error_count += 1
-            raise Exception(f"Dummy provider simulated failure (rate: {self.config.failure_rate * 100:.1f}%)")
+            raise RuntimeError(f"Dummy provider simulated failure (rate: {self.config.failure_rate * 100:.1f}%)")
 
         # Extract prompt for realistic response
         messages = request_data.get("messages", [])
@@ -140,6 +144,7 @@ class DummyProvider(IModelProvider):
         """Generate simple dummy response content"""
 
         # Simple response: "You said: <prompt>"
+        logger.debug("Generating dummy response for model %s", model)
         return f"You said: {prompt}"
 
     def get_provider_id(self) -> str:

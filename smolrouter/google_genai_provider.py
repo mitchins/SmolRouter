@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
-import pytz
+from zoneinfo import ZoneInfo
 import httpx
 
 from google import genai
@@ -21,10 +21,42 @@ from google.api_core.exceptions import ResourceExhausted, PermissionDenied, Inva
 
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
 from .database import ApiKeyQuota
+from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
 from .request_metadata import RequestMetadata
 
 logger = logging.getLogger(__name__)
+
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _current_pacific_date() -> str:
+    return datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
+
+
+def _to_pacific_datetime(value: datetime, assume_utc: bool = False) -> datetime:
+    if value.tzinfo is None:
+        if assume_utc:
+            return value.replace(tzinfo=timezone.utc).astimezone(PACIFIC_TZ)
+        return value.replace(tzinfo=PACIFIC_TZ)
+
+    return value.astimezone(PACIFIC_TZ)
+
+
+def _format_optional_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _quota_status(is_invalid: bool, is_exhausted: bool) -> str:
+    if is_invalid:
+        return "invalid"
+    if is_exhausted:
+        return "exhausted"
+    return "available"
 
 
 @dataclass
@@ -48,28 +80,19 @@ class ApiKeyModelStats:
 
     def is_day_reset_needed(self) -> bool:
         """Check if we need to reset daily counters (Pacific timezone reset)"""
-        pacific_tz = pytz.timezone("US/Pacific")
-        now_pacific = datetime.now(pacific_tz)
+        now_pacific = datetime.now(PACIFIC_TZ)
         now_date = now_pacific.date()
 
         # Check against last request time
         if self.last_request:
-            last_request_pacific = (
-                self.last_request.replace(tzinfo=pacific_tz)
-                if self.last_request.tzinfo is None
-                else self.last_request.astimezone(pacific_tz)
-            )
+            last_request_pacific = _to_pacific_datetime(self.last_request)
             last_request_date = last_request_pacific.date()
             if now_date > last_request_date:
                 return True
 
         # Also check against quota exhaustion time (important for 429 recovery)
         if self.quota_exhausted_at:
-            exhausted_pacific = (
-                self.quota_exhausted_at.replace(tzinfo=pacific_tz)
-                if self.quota_exhausted_at.tzinfo is None
-                else self.quota_exhausted_at.astimezone(pacific_tz)
-            )
+            exhausted_pacific = _to_pacific_datetime(self.quota_exhausted_at)
             exhausted_date = exhausted_pacific.date()
             if now_date > exhausted_date:
                 return True
@@ -121,6 +144,7 @@ class GoogleGenAIRequestError(RuntimeError):
         self.api_key_index = api_key_index
         self.api_key_total = api_key_total
         self.proxy_used = proxy_used
+        self.retry_after_seconds: Optional[float] = None
 
 
 @dataclass
@@ -269,7 +293,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         add_url(self.config.proxy_config)
 
-        for proxy_config in self.config.per_model_proxy.values():
+        for proxy_config in (self.config.per_model_proxy or {}).values():
             add_url(proxy_config)
 
         for proxy_config in self.config.proxy_pool or []:
@@ -517,7 +541,7 @@ class GoogleGenAIProvider(IModelProvider):
             default_proxy = self._build_proxy_entry("Default", self.config.proxy_config, kind="default")
 
         model_overrides = []
-        for model_name, proxy_config in sorted(self.config.per_model_proxy.items()):
+        for model_name, proxy_config in sorted((self.config.per_model_proxy or {}).items()):
             if proxy_config is None:
                 continue
             model_overrides.append(
@@ -655,8 +679,9 @@ class GoogleGenAIProvider(IModelProvider):
             return False
 
         # Check if model has an explicit proxy override
-        if model_name in self.config.per_model_proxy:
-            model_proxy = self.config.per_model_proxy[model_name]
+        per_model_proxy = self.config.per_model_proxy or {}
+        if model_name in per_model_proxy:
+            model_proxy = per_model_proxy[model_name]
             # Special "auto" marker means use pool (proxy is None with a special flag)
             if model_proxy is None:
                 return True  # Explicit "use pool"
@@ -674,42 +699,25 @@ class GoogleGenAIProvider(IModelProvider):
         """
         model_lower = model_name.lower()
 
-        # Gemma-3 models have generous free tier limits
-        if "gemma" in model_lower and "3" in model_lower:
-            return 14400  # 14,400 RPD per project (free tier)
+        limit_rules = [
+            ("gemma" in model_lower and "3" in model_lower, 14400),
+            ("gemini" in model_lower and ("3.0" in model_lower or "gemini-3" in model_lower), 20),
+            ("2.5" in model_lower and "flash" in model_lower and "lite" in model_lower, 1000),
+            ("2.5" in model_lower and "flash" in model_lower, 20),
+            (
+                "2.0" in model_lower and "flash" in model_lower and ("exp" in model_lower or "experimental" in model_lower),
+                5,
+            ),
+            ("2.0" in model_lower and "flash" in model_lower, 20),
+            ("pro" in model_lower and ("2.5" in model_lower or "2.0" in model_lower), 20),
+            ("1.5" in model_lower and "pro" in model_lower, 50),
+            ("1.5" in model_lower and "flash" in model_lower, 1000),
+            (any(keyword in model_lower for keyword in ["preview", "experimental"]), 5),
+        ]
 
-        # Gemini 3 Flash Preview (recommended, launched Dec 17, 2025)
-        if "gemini" in model_lower and ("3.0" in model_lower or "gemini-3" in model_lower):
-            return 20  # 20 RPD per project (free tier)
-
-        # Gemini 2.5 Flash models (severely reduced limits after Dec 6, 2025)
-        if "2.5" in model_lower and "flash" in model_lower:
-            if "lite" in model_lower:
-                return 1000  # Flash-lite still has generous limits (250-1500 RPD range, using conservative 1000)
-            else:
-                return 20  # 20 RPD per project (free tier, down from 250-500)
-
-        # Gemini 2.0 Flash models
-        if "2.0" in model_lower and "flash" in model_lower:
-            if "exp" in model_lower or "experimental" in model_lower:
-                return 5  # Experimental models have minimal free access
-            else:
-                return 20  # Similar to 2.5 Flash
-
-        # Gemini 2.x Pro models (very limited free tier)
-        if "pro" in model_lower and ("2.5" in model_lower or "2.0" in model_lower):
-            return 20  # Conservative estimate for Pro models
-
-        # Gemini 1.5 models (older generation)
-        if "1.5" in model_lower:
-            if "pro" in model_lower:
-                return 50  # Gemini 1.5 Pro
-            elif "flash" in model_lower:
-                return 1000  # Gemini 1.5 Flash has better limits
-
-        # Preview/experimental models (catch-all)
-        if any(keyword in model_lower for keyword in ["preview", "experimental"]):
-            return 5
+        for matches, limit in limit_rules:
+            if matches:
+                return limit
 
         # Default to conservative limit for unknown models
         return self.config.max_requests_per_day
@@ -776,12 +784,11 @@ class GoogleGenAIProvider(IModelProvider):
 
     def _get_pacific_date(self) -> str:
         """Get current date in Pacific timezone as YYYY-MM-DD string"""
-        pacific_tz = pytz.timezone("US/Pacific")
-        return datetime.now(pacific_tz).date().strftime("%Y-%m-%d")
+        return _current_pacific_date()
 
-    async def _get_quota_record(self, api_key: str, model_name: str) -> dict:
+    async def _get_quota_record(self, api_key: str, model_name: str) -> QuotaRecord:
         """Get or create quota record for an API key + model combination"""
-        quota, created = await ApiKeyQuota.get_or_create_quota(
+        quota, _ = await ApiKeyQuota.get_or_create_quota(
             api_key=api_key, provider_id=self.config.name, model_name=model_name
         )
         return quota
@@ -797,6 +804,7 @@ class GoogleGenAIProvider(IModelProvider):
         available_keys = []
         exhausted_keys = []
         error_prone_keys = []
+        pacific_date = _current_pacific_date()
 
         for key in self.config.api_keys:
             quota = await self._get_quota_record(key, model_name)
@@ -805,10 +813,6 @@ class GoogleGenAIProvider(IModelProvider):
             if quota.invalid_key:
                 logger.debug(f"API key {key[:8]}... marked as invalid, skipping")
                 continue
-
-            # Check if quota should be reset due to date change (defensive check)
-            pacific_tz = pytz.timezone("US/Pacific")
-            pacific_date = datetime.now(pacific_tz).strftime("%Y-%m-%d")
 
             # If the quota hasn't been reset today, consider it fresh
             actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
@@ -832,22 +836,10 @@ class GoogleGenAIProvider(IModelProvider):
             # Only skip if the quota error happened TODAY (same Pacific date as now)
             if quota.quota_exhausted_at:
                 # quota_exhausted_at could be datetime object or string from database
-                pacific_tz = pytz.timezone("US/Pacific")
-
                 try:
-                    if isinstance(quota.quota_exhausted_at, str):
-                        # Parse datetime string from database
-                        quota_exhausted_dt = datetime.fromisoformat(quota.quota_exhausted_at.replace("Z", "+00:00"))
-                        if quota_exhausted_dt.tzinfo is None:
-                            quota_exhausted_pacific = pytz.utc.localize(quota_exhausted_dt).astimezone(pacific_tz)
-                        else:
-                            quota_exhausted_pacific = quota_exhausted_dt.astimezone(pacific_tz)
-                    else:
-                        # Handle datetime object
-                        if quota.quota_exhausted_at.tzinfo is None:
-                            quota_exhausted_pacific = pytz.utc.localize(quota.quota_exhausted_at).astimezone(pacific_tz)
-                        else:
-                            quota_exhausted_pacific = quota.quota_exhausted_at.astimezone(pacific_tz)
+                    quota_exhausted_dt = quota.quota_exhausted_at
+
+                    quota_exhausted_pacific = _to_pacific_datetime(quota_exhausted_dt, assume_utc=True)
 
                     # CRITICAL FIX: Only skip if exhaustion was TODAY (same Pacific date)
                     # Keys exhausted yesterday should be available again after midnight Pacific reset
@@ -866,7 +858,6 @@ class GoogleGenAIProvider(IModelProvider):
                 except (ValueError, TypeError, AttributeError) as e:
                     # Skip malformed timestamp - allow key through
                     logger.warning(f"API key {key[:8]}... has malformed quota_exhausted_at, allowing: {e}")
-                    pass
 
             available_keys.append((key, actual_requests_today))
 
@@ -878,8 +869,7 @@ class GoogleGenAIProvider(IModelProvider):
             logger.error(f"   - Error-prone: {len(error_prone_keys)} keys")
 
             # Calculate seconds until quota reset (midnight Pacific time)
-            pacific_tz = pytz.timezone("US/Pacific")
-            now_pacific = datetime.now(pacific_tz)
+            now_pacific = datetime.now(PACIFIC_TZ)
             tomorrow_pacific = (now_pacific + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             seconds_until_reset = int((tomorrow_pacific - now_pacific).total_seconds())
 
@@ -922,7 +912,13 @@ class GoogleGenAIProvider(IModelProvider):
         return best_key
 
     async def _update_api_key_stats(
-        self, api_key: str, model_name: str, success: bool, tokens: int = 0, error: str = None, status_code: int = None
+        self,
+        api_key: str,
+        model_name: str,
+        success: bool,
+        tokens: int = 0,
+        error: Optional[str] = None,
+        status_code: Optional[int] = None,
     ):
         """Update statistics for an API key + model combination after a request
 
@@ -952,7 +948,12 @@ class GoogleGenAIProvider(IModelProvider):
                 )
                 quota.mark_request_success(tokens=tokens)
                 logger.info(
-                    f"API key {api_key[:8]}... successful request for {model_name}: {quota.requests_today}/{self.get_model_daily_limit(model_name)} RPD, {tokens} tokens"
+                    "API key %s... successful request for %s: %s/%s RPD, %s tokens",
+                    api_key[:8],
+                    model_name,
+                    quota.requests_today,
+                    self.get_model_daily_limit(model_name),
+                    tokens,
                 )
             except Exception as e:
                 logger.error(f"❌ CRITICAL: Failed to update quota for {api_key[:8]}... / {model_name}: {e}")
@@ -960,14 +961,17 @@ class GoogleGenAIProvider(IModelProvider):
                 # Still update local object for logging purposes
                 quota.mark_request_success(tokens=tokens)
         else:
+            error_message = error or ""
             # Check error type and handle appropriately
             # IMPORTANT: Check both error message AND status code (403 errors may have empty error string)
-            if self._is_invalid_key_error(error, status_code):
+            if self._is_invalid_key_error(error_message, status_code):
                 # Mark invalid across all models for this key
                 key_hash = ApiKeyQuota.hash_api_key(api_key)
                 try:
                     await ApiKeyQuota.mark_invalid_by_hash(key_hash, self.config.name)
-                    logger.error(f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error})")
+                    logger.error(
+                        f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error_message})"
+                    )
 
                     # DYNAMIC REMOVAL: Immediately remove from in-memory pool
                     try:
@@ -984,13 +988,13 @@ class GoogleGenAIProvider(IModelProvider):
                     logger.error(traceback.format_exc())
 
             # Check if this is a quota exhaustion error
-            elif self._is_quota_exhausted_error(error):
+            elif self._is_quota_exhausted_error(error_message):
                 # Mark this key as exhausted for this model regardless of our internal counter
-                quota.mark_request_failure(error=error, quota_exhausted=True)
+                quota.mark_request_failure(error=error_message, quota_exhausted=True)
 
                 # Persist quota exhaustion to Redis so it's remembered across requests
                 try:
-                    await ApiKeyQuota.mark_quota_exhausted(api_key, self.config.name, model_name, error)
+                    await ApiKeyQuota.mark_quota_exhausted(api_key, self.config.name, model_name, error_message)
                 except Exception as e:
                     logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
 
@@ -999,40 +1003,49 @@ class GoogleGenAIProvider(IModelProvider):
                 )
 
                 # Extract retry delay if available
-                retry_delay = self._extract_retry_delay(error)
+                retry_delay = self._extract_retry_delay(error_message)
                 if retry_delay:
                     logger.warning(f"🕒 Google suggests retry in {retry_delay}s for {api_key[:8]}... / {model_name}")
                 else:
                     logger.warning(f"🕒 Key {api_key[:8]}... / {model_name} exhausted, will reset at midnight Pacific")
             else:
                 # Regular error - still count the request
-                quota.mark_request_failure(error=error)
+                quota.mark_request_failure(error=error_message)
 
                 # CRITICAL FIX: Persist error to Redis (was only updating in-memory)
                 try:
-                    await ApiKeyQuota.mark_error(api_key, self.config.name, model_name, error)
+                    await ApiKeyQuota.mark_error(api_key, self.config.name, model_name, error_message)
                 except Exception as e:
                     logger.error(f"❌ Failed to persist error to Redis: {e}")
 
                 # Log if this looks like it should have been caught
                 if status_code == 403:
-                    logger.warning(f"⚠️  403 error but not marked invalid - status={status_code}, error={error!r}")
+                    logger.warning(
+                        f"⚠️  403 error but not marked invalid - status={status_code}, error={error_message!r}"
+                    )
 
-            logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error}")
+            logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error_message}")
 
         # Log quota status if approaching limits for this model
         model_limit = self.get_model_daily_limit(model_name)
         quota_percentage = (quota.requests_today / model_limit) * 100
-        if quota_percentage >= 80:
-            logger.warning(
-                f"API key {api_key[:8]}... / {model_name} approaching daily limit: {quota_percentage:.1f}% used ({quota.requests_today}/{model_limit})"
-            )
-        elif quota_percentage >= 100:
+        if quota_percentage >= 100:
             logger.error(
                 f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
             )
+        elif quota_percentage >= 80:
+            logger.warning(
+                "API key %s... / %s approaching daily limit: %.1f%% used (%s/%s)",
+                api_key[:8],
+                model_name,
+                quota_percentage,
+                quota.requests_today,
+                model_limit,
+            )
 
-    def _is_invalid_key_error(self, error_msg: str = None, status_code: int = None) -> bool:
+    def _is_invalid_key_error(
+        self, error_msg: Optional[str] = None, status_code: Optional[int] = None
+    ) -> bool:
         """Check if error indicates invalid/expired API key
 
         Args:
@@ -1070,7 +1083,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         return False
 
-    def _is_quota_exhausted_error(self, error_msg: str) -> bool:
+    def _is_quota_exhausted_error(self, error_msg: Optional[str] = None) -> bool:
         """Check if error indicates quota exhaustion"""
         if not error_msg:
             return False
@@ -1088,7 +1101,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         return any(indicator in error_lower for indicator in quota_indicators)
 
-    def _extract_retry_delay(self, error_msg: str) -> Optional[float]:
+    def _extract_retry_delay(self, error_msg: Optional[str] = None) -> Optional[float]:
         """Extract retry delay from Google error message"""
         if not error_msg:
             return None
@@ -1174,7 +1187,7 @@ class GoogleGenAIProvider(IModelProvider):
                     # New API uses 'supported_actions' instead of 'supported_generation_methods'
                     supported_actions = getattr(model, "supported_actions", [])
                     if "generateContent" in supported_actions:
-                        model_name = model.name.split("/")[-1]  # Extract model name from full path
+                        model_name = (getattr(model, "name", "") or "").split("/")[-1]  # Extract model name from full path
 
                         # Create model info
                         model_info = ModelInfo(
@@ -1185,10 +1198,10 @@ class GoogleGenAIProvider(IModelProvider):
                             endpoint=self.get_endpoint(),
                             aliases=[model_name],
                             metadata={
-                                "full_name": model.name,
+                                "full_name": getattr(model, "name", ""),
                                 "display_name": getattr(model, "display_name", model_name),
                                 "description": getattr(model, "description", ""),
-                                "supported_methods": supported_actions,  # Use new supported_actions
+                                "supported_methods": supported_actions,
                                 "input_token_limit": getattr(model, "input_token_limit", None),
                                 "output_token_limit": getattr(model, "output_token_limit", None),
                             },
@@ -1200,7 +1213,6 @@ class GoogleGenAIProvider(IModelProvider):
                 self._cached_models = models
                 self._cache_time = datetime.now()
 
-                logger.info(f"Discovered {len(models)} models from Google GenAI provider {self.get_provider_id()}")
                 return models
 
             except Exception as e:
@@ -1399,7 +1411,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         # Generate observation ID for ground truth tracking
         observation_id = f"obs_{uuid.uuid4().hex[:12]}"
-        model_name: Optional[str] = None
+        model_name: str = ""
         api_key_suffix: Optional[str] = None
         api_key_index: Optional[int] = None
         api_key_total: Optional[int] = None
@@ -1678,25 +1690,19 @@ class GoogleGenAIProvider(IModelProvider):
             model_limit = self.get_model_daily_limit(model)
             quota_percentage = (quota.requests_today / model_limit) * 100
             is_exhausted = quota.requests_today >= model_limit or quota.quota_exhausted_at is not None
+            last_request = _format_optional_datetime(quota.updated_at)
+            quota_exhausted_at = _format_optional_datetime(quota.quota_exhausted_at)
 
             stats[key_display]["models"][model] = {
                 "requests_today": quota.requests_today,
                 "tokens_today": quota.tokens_today,
                 "error_count": quota.error_count,
-                "last_request": quota.updated_at.isoformat()
-                if quota.updated_at and hasattr(quota.updated_at, "isoformat")
-                else str(quota.updated_at)
-                if quota.updated_at
-                else None,
+                "last_request": last_request,
                 "last_error": quota.last_error,
                 "quota_percentage": quota_percentage,
                 "quota_exhausted": is_exhausted,
-                "quota_exhausted_at": quota.quota_exhausted_at.isoformat()
-                if quota.quota_exhausted_at and hasattr(quota.quota_exhausted_at, "isoformat")
-                else str(quota.quota_exhausted_at)
-                if quota.quota_exhausted_at
-                else None,
-                "status": "invalid" if quota.invalid_key else ("exhausted" if is_exhausted else "available"),
+                "quota_exhausted_at": quota_exhausted_at,
+                "status": _quota_status(quota.invalid_key, is_exhausted),
             }
 
             # Aggregate totals for this API key

@@ -234,7 +234,7 @@ class FilesystemBlobStorage(BlobStorage):
             buckets = self._list_hour_buckets()
             prune_candidates = self._get_prune_candidates(buckets)
 
-            for bucket in list(prune_candidates):
+            for bucket in prune_candidates:
                 if current_size <= target:
                     break
                 bucket_size = self._dir_size_bytes(bucket)

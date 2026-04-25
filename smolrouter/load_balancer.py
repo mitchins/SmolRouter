@@ -62,6 +62,8 @@ class ModelInstance:
     last_used: float = 0.0
     is_healthy: bool = True
     total_requests: int = 0
+    success_count: int = 0
+    failure_count: int = 0
     avg_response_time: float = 0.0
     avg_ttft: float = 0.0  # Time to first token
 
@@ -133,9 +135,10 @@ class ModelLoadBalancer:
             if num > 99:
                 return model_id, 0
 
-            # Only treat as instance if it's not part of the model name
-            # (e.g., gpt-4 should not become gpt with instance 4)
-            if not base.endswith(("gpt", "llama", "mistral", "qwen")):
+            # Only treat dash-suffix names as instance IDs when the base is already
+            # compound. This avoids collapsing standalone versioned names like phi-3
+            # and phi-4 into a shared "phi" group.
+            if "-" in base:
                 return base, num
 
         # No instance number found - treat as base model (instance 0)
@@ -351,7 +354,7 @@ class ModelLoadBalancer:
 
             # Factor 2: Slight preference for less recently used
             # But this is ONLY a tie-breaker, not a primary factor
-            if instance.last_used == 0.0:
+            if instance.last_used <= 0.0:
                 recency = 0
             else:
                 time_since_use = time.time() - instance.last_used
@@ -407,7 +410,7 @@ class ModelLoadBalancer:
 
         # Round-robin through hosts
         result = []
-        host_indices = {h: 0 for h in sorted_hosts}
+        host_indices = dict.fromkeys(sorted_hosts, 0)
 
         while any(host_indices[h] < len(by_host[h]) for h in sorted_hosts):
             for host_id in sorted_hosts:
@@ -493,6 +496,65 @@ class ModelLoadBalancer:
         # see the same load and get routed to the same instance.
         pass
 
+    def _update_instance_metrics(self, instance: ModelInstance, response_time: float, ttft: float) -> None:
+        if instance.total_requests <= 0:
+            return
+
+        instance.avg_response_time = (
+            instance.avg_response_time * (instance.total_requests - 1) + response_time
+        ) / instance.total_requests
+        if ttft > 0:
+            instance.avg_ttft = (instance.avg_ttft * (instance.total_requests - 1) + ttft) / instance.total_requests
+
+    def _update_host_metrics(
+        self, instance: ModelInstance, response_time: float, success: bool, ttft: float
+    ) -> None:
+        host = self.hosts.get(instance.host_id)
+        if not host:
+            return
+
+        host.active_requests = max(0, host.active_requests - 1)
+        host.total_requests += 1
+        host.last_seen = time.time()
+
+        if success:
+            host.success_count += 1
+        else:
+            host.failure_count += 1
+
+        if host.total_requests > 0:
+            host.avg_response_time = (
+                host.avg_response_time * (host.total_requests - 1) + response_time
+            ) / host.total_requests
+            if ttft > 0:
+                host.avg_ttft = (host.avg_ttft * (host.total_requests - 1) + ttft) / host.total_requests
+
+        if host.total_requests > 10:
+            failure_rate = host.failure_count / host.total_requests
+            if failure_rate > 0.5 and host.is_healthy:
+                host.is_healthy = False
+                logger.warning(f"Marking host {host.host_id} as unhealthy (failure rate: {failure_rate:.2%})")
+            elif failure_rate < 0.1 and not host.is_healthy:
+                host.is_healthy = True
+                logger.info(f"Marking host {host.host_id} as healthy (failure rate: {failure_rate:.2%})")
+
+    def _update_global_stats(self, instance: ModelInstance, success: bool) -> None:
+        self.stats.total_requests += 1
+        if success:
+            self.stats.successful_requests += 1
+            instance.success_count += 1
+            return
+
+        self.stats.failed_requests += 1
+        instance.failure_count += 1
+
+        if instance.total_requests > 10 and (instance.failure_count / instance.total_requests) > 0.5:
+            instance.is_healthy = False
+            logger.warning(
+                f"Marking instance {instance.model_id} as unhealthy due to high failure rate "
+                f"({instance.failure_count}/{instance.total_requests})"
+            )
+
     async def end_request(
         self, instance: ModelInstance, response_time: float, success: bool = True, ttft: float = 0.0
     ) -> None:
@@ -508,56 +570,9 @@ class ModelLoadBalancer:
             instance.active_requests = max(0, instance.active_requests - 1)
             self.active_requests[instance.model_id] = instance.active_requests
 
-            # Update instance metrics
-            if instance.total_requests > 0:
-                instance.avg_response_time = (
-                    instance.avg_response_time * (instance.total_requests - 1) + response_time
-                ) / instance.total_requests
-                if ttft > 0:
-                    instance.avg_ttft = (
-                        instance.avg_ttft * (instance.total_requests - 1) + ttft
-                    ) / instance.total_requests
-
-            # Update host metrics
-            host = self.hosts.get(instance.host_id)
-            if host:
-                host.active_requests = max(0, host.active_requests - 1)
-                host.total_requests += 1
-                host.last_seen = time.time()
-
-                if success:
-                    host.success_count += 1
-                else:
-                    host.failure_count += 1
-
-                # Update host averages
-                if host.total_requests > 0:
-                    host.avg_response_time = (
-                        host.avg_response_time * (host.total_requests - 1) + response_time
-                    ) / host.total_requests
-                    if ttft > 0:
-                        host.avg_ttft = (host.avg_ttft * (host.total_requests - 1) + ttft) / host.total_requests
-
-                # Health check for host
-                if host.total_requests > 10:
-                    failure_rate = host.failure_count / host.total_requests
-                    if failure_rate > 0.5 and host.is_healthy:
-                        host.is_healthy = False
-                        logger.warning(f"Marking host {host.host_id} as unhealthy (failure rate: {failure_rate:.2%})")
-                    elif failure_rate < 0.1 and not host.is_healthy:
-                        host.is_healthy = True
-                        logger.info(f"Marking host {host.host_id} as healthy (failure rate: {failure_rate:.2%})")
-
-            # Update global stats
-            self.stats.total_requests += 1
-            if success:
-                self.stats.successful_requests += 1
-            else:
-                self.stats.failed_requests += 1
-                # Mark instance as unhealthy if too many failures
-                if instance.total_requests > 10 and (self.stats.failed_requests / self.stats.total_requests) > 0.5:
-                    instance.is_healthy = False
-                    logger.warning(f"Marking instance {instance.model_id} as unhealthy due to high failure rate")
+            self._update_instance_metrics(instance, response_time, ttft)
+            self._update_host_metrics(instance, response_time, success, ttft)
+            self._update_global_stats(instance, success)
 
     def mark_instance_unhealthy(self, instance: ModelInstance) -> None:
         """Mark an instance as unhealthy.
@@ -654,6 +669,8 @@ class ModelLoadBalancer:
                         "host_id": instance.host_id,
                         "active_requests": instance.active_requests,
                         "total_requests": instance.total_requests,
+                        "success_count": instance.success_count,
+                        "failure_count": instance.failure_count,
                         "avg_response_time": instance.avg_response_time,
                         "avg_ttft": instance.avg_ttft,
                         "is_healthy": instance.is_healthy,
