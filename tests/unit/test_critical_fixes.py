@@ -6,24 +6,17 @@ Relocated into tests/ and annotated for Sonar suppression where literal IPs appe
 
 import os
 import sys
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 # Add project to path
 sys.path.insert(0, ".")
 
 
-def test_header_case_sensitivity_fix():
+def test_header_case_sensitivity_fix(webui_env, mock_request_factory):
     from smolrouter.security import WebUISecurityManager
 
-    os.environ["WEBUI_SECURITY"] = "AUTH_WHEN_PROXIED"
+    webui_env.setenv("WEBUI_SECURITY", "AUTH_WHEN_PROXIED")
     security = WebUISecurityManager()
-
-    def create_mock_request(headers):
-        request = Mock()
-        request.client = Mock()
-        request.client.host = "127.0.0.1"  # NOSONAR S1313
-        request.headers = headers
-        return request
 
     attack_cases = [
         {"X-Forwarded-For": "1.2.3.4"},
@@ -34,8 +27,8 @@ def test_header_case_sensitivity_fix():
     ]
 
     for headers in attack_cases:
-        request = create_mock_request(headers)
-        accessible, reason = security.is_webui_accessible(request)
+        request = mock_request_factory(headers)
+        accessible, _ = security.is_webui_accessible(request)
         assert not accessible
 
 

@@ -5,13 +5,10 @@ Relocated into `tests/` and updated subprocess call to reference moved scripts.
 """
 
 import pytest
-from fastapi.testclient import TestClient
 from unittest.mock import patch
 from importlib import import_module
 from unittest.mock import AsyncMock, Mock
 
-# Import the app
-from smolrouter.app import app
 from smolrouter.interfaces import ModelInfo
 
 
@@ -22,20 +19,16 @@ from smolrouter.container import SmolRouterContainer, SmolRouterConfig
 class TestWebUIIntegration:
     """Test the new web UI integration"""
 
-    def setup_method(self):
-        """Setup test client"""
-        self.client = TestClient(app)
-
-    def test_upstreams_page_loads(self):
+    def test_upstreams_page_loads(self, client):
         """Test that the providers page loads successfully"""
         # Providers UI is now at /providers
-        response = self.client.get("/providers")
+        response = client.get("/providers")
         assert response.status_code == 200
         assert "Provider Management" in response.text
 
-    def test_api_upstreams_endpoint(self):
+    def test_api_upstreams_endpoint(self, client):
         """Test the API endpoint for upstream data"""
-        response = self.client.get("/api/upstreams")
+        response = client.get("/api/upstreams")
         assert response.status_code == 200
 
         data = response.json()
@@ -50,10 +43,10 @@ class TestWebUIIntegration:
         for key in required_keys:
             assert key in summary
 
-    def test_html_and_json_responses_disable_cache(self):
+    def test_html_and_json_responses_disable_cache(self, client):
         """Dashboard HTML and dashboard JSON should opt out of Safari caching."""
-        html_response = self.client.get("/")
-        json_response = self.client.get("/api/dashboard?limit=1")
+        html_response = client.get("/")
+        json_response = client.get("/api/dashboard?limit=1")
 
         assert html_response.status_code == 200
         assert json_response.status_code == 200
@@ -66,7 +59,7 @@ class TestWebUIIntegration:
         assert json_response.headers.get("pragma") == "no-cache"
         assert json_response.headers.get("expires") == "0"
 
-    def test_testing_models_api_returns_exact_request_model(self):
+    def test_testing_models_api_returns_exact_request_model(self, client):
         """Test testing models API exposes a provider-qualified request model."""
         fake_model = ModelInfo(
             id="gemma-3-4b-it@test-google",
@@ -82,7 +75,7 @@ class TestWebUIIntegration:
         fake_container.get_mediator = AsyncMock(return_value=fake_mediator)
 
         with patch("smolrouter.app.container", fake_container):
-            response = self.client.get("/api/testing/models")
+            response = client.get("/api/testing/models")
 
         assert response.status_code == 200
         payload = response.json()
@@ -93,13 +86,9 @@ class TestWebUIIntegration:
 class TestModelAggregationEndpoints:
     """Test model aggregation in the API endpoints"""
 
-    def setup_method(self):
-        """Setup test client"""
-        self.client = TestClient(app)
-
-    def test_v1_models_endpoint(self):
+    def test_v1_models_endpoint(self, client):
         """Test /v1/models endpoint with aggregation"""
-        response = self.client.get("/v1/models")
+        response = client.get("/v1/models")
         assert response.status_code in [200, 502]  # 502 if upstream unavailable
 
         if response.status_code == 200:
@@ -109,9 +98,9 @@ class TestModelAggregationEndpoints:
             assert "data" in data
             assert isinstance(data["data"], list)
 
-    def test_api_tags_endpoint(self):
+    def test_api_tags_endpoint(self, client):
         """Test /api/tags endpoint with aggregation"""
-        response = self.client.get("/api/tags")
+        response = client.get("/api/tags")
         assert response.status_code in [200, 502]  # 502 if upstream unavailable
 
         if response.status_code == 200:
@@ -125,10 +114,6 @@ class TestModelAggregationEndpoints:
 class TestArchitectureIntegration:
     """Test integration between new architecture and existing app"""
 
-    def setup_method(self):
-        """Setup test client"""
-        self.client = TestClient(app)
-
     # These tests were removed because they only tested mock integration
     # rather than real functionality. The actual architecture is tested
     # comprehensively in tests/test_architecture.py with real components.
@@ -137,25 +122,21 @@ class TestArchitectureIntegration:
 class TestBackwardCompatibility:
     """Test that new architecture doesn't break existing functionality"""
 
-    def setup_method(self):
-        """Setup test client"""
-        self.client = TestClient(app)
-
-    def test_existing_endpoints_still_work(self):
+    def test_existing_endpoints_still_work(self, client):
         """Test that existing endpoints continue to function"""
         # Test dashboard
-        response = self.client.get("/")
+        response = client.get("/")
         assert response.status_code == 200
 
         # Test performance page
-        response = self.client.get("/performance")
+        response = client.get("/performance")
         assert response.status_code == 200
 
         # Test API endpoints
-        response = self.client.get("/api/logs")
+        response = client.get("/api/logs")
         assert response.status_code == 200
 
-        response = self.client.get("/api/stats")
+        response = client.get("/api/stats")
         assert response.status_code == 200
 
     def test_legacy_model_fallback(self):
@@ -177,10 +158,8 @@ async def test_run_architecture_demo(capsys):
     assert "Demo completed successfully!" in captured.out
 
 
-def test_web_ui_navigation():
+def test_web_ui_navigation(client):
     """Test navigation between different web UI pages"""
-    client = TestClient(app)
-
     # Test main pages load
     pages = ["/", "/performance", "/providers"]
 
@@ -194,10 +173,8 @@ def test_web_ui_navigation():
         assert 'href="/providers"' in response.text  # Providers link
 
 
-def test_dashboard_renders_mobile_scroll_wrapper():
+def test_dashboard_renders_mobile_scroll_wrapper(client):
     """Dashboard HTML should expose the responsive table scroll wrapper."""
-    client = TestClient(app)
-
     response = client.get("/")
 
     assert response.status_code == 200
@@ -208,10 +185,8 @@ def test_dashboard_renders_mobile_scroll_wrapper():
     assert 'data-label="Provider"' in response.text
 
 
-def test_client_dashboard_renders_mobile_scroll_wrapper():
+def test_client_dashboard_renders_mobile_scroll_wrapper(client):
     """Client dashboard HTML should expose the responsive table scroll wrapper."""
-    client = TestClient(app)
-
     response = client.get("/clients/192.168.1.26")
 
     assert response.status_code == 200

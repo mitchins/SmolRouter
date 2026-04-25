@@ -13,8 +13,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
+
 from smolrouter.interfaces import IModelProvider, ProviderConfig, ModelInfo
 from smolrouter.http_client import http_client_factory
+
+from .config_loading import load_config_entries
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +31,14 @@ class AnthropicConfig(ProviderConfig):
     max_requests_per_day: Optional[int] = None  # Not used for rotation, just monitoring
     timeout: float = 30.0
 
-    def _post_init_anthropic(self):
-        """Load API keys from file if specified"""
-        # Initialize api_keys if not provided
-        if self.api_keys is None:
-            self.api_keys = []
+    def __post_init__(self):
+        super().__post_init__()
+        self.api_keys = list(self.api_keys or [])
 
         if self.api_keys_file:
             try:
-                with open(self.api_keys_file, "r") as f:
-                    file_keys = [line.strip() for line in f if line.strip()]
-                    self.api_keys.extend(file_keys)
+                file_keys = load_config_entries(self.api_keys_file)
+                self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
                 logger.error(f"Failed to load API keys from {self.api_keys_file}: {e}")
@@ -61,7 +61,6 @@ class AnthropicProvider(IModelProvider):
 
     def __init__(self, config: AnthropicConfig):
         self.config = config
-        self.config._post_init_anthropic()
 
         # Simple per-model statistics (no per-key tracking needed)
         self.model_stats: Dict[str, ModelStats] = {}
