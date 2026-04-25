@@ -2,7 +2,6 @@ import pytest
 import httpx
 import asyncio
 from types import SimpleNamespace
-from httpx import AsyncClient
 import smolrouter.app as app_module
 from smolrouter.app import (
     app,
@@ -58,12 +57,11 @@ def mock_ollama_upstream():
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_completions_non_streaming(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
-        )
+async def test_openai_chat_completions_non_streaming(async_client, mock_openai_upstream, disable_logging):
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+    )
     assert response.status_code == 200
     data = response.json()
     assert "Hello, this is a test." in data["choices"][0]["message"]["content"]
@@ -71,11 +69,10 @@ async def test_openai_chat_completions_non_streaming(mock_openai_upstream, disab
 
 
 @pytest.mark.asyncio
-async def test_openai_completions_non_streaming(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/v1/completions", json={"model": "text-davinci-003", "prompt": "Hello", "stream": False}
-        )
+async def test_openai_completions_non_streaming(async_client, mock_openai_upstream, disable_logging):
+    response = await async_client.post(
+        "/v1/completions", json={"model": "text-davinci-003", "prompt": "Hello", "stream": False}
+    )
     assert response.status_code == 200
     data = response.json()
     assert "This is a test." in data["choices"][0]["text"]
@@ -83,20 +80,19 @@ async def test_openai_completions_non_streaming(mock_openai_upstream, disable_lo
 
 
 @pytest.mark.asyncio
-async def test_openai_invalid_json_returns_400(disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            content="{invalid json",
-            headers={"content-type": "application/json"},
-        )
+async def test_openai_invalid_json_returns_400(async_client, disable_logging):
+    response = await async_client.post(
+        "/v1/chat/completions",
+        content="{invalid json",
+        headers={"content-type": "application/json"},
+    )
 
     assert response.status_code == 400
     assert response.json() == {"error": "Invalid JSON in request body"}
 
 
 @pytest.mark.asyncio
-async def test_openai_streaming_falls_back_to_non_streaming_provider_architecture(disable_logging, monkeypatch):
+async def test_openai_streaming_falls_back_to_non_streaming_provider_architecture(async_client, disable_logging, monkeypatch):
     fake_container = Mock()
     fake_container.route_streaming_request = AsyncMock(side_effect=RuntimeError("streaming unsupported"))
     fake_container.route_request = AsyncMock(
@@ -106,11 +102,10 @@ async def test_openai_streaming_falls_back_to_non_streaming_provider_architectur
     monkeypatch.setattr(app_module, "container", fake_container)
     monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
-        )
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+    )
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "fallback response"
@@ -119,11 +114,10 @@ async def test_openai_streaming_falls_back_to_non_streaming_provider_architectur
 
 
 @pytest.mark.asyncio
-async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/generate", json={"model": "llama2", "prompt": "Tell me a joke.", "stream": False}
-        )
+async def test_ollama_generate_non_streaming(async_client, mock_openai_upstream, disable_logging):
+    response = await async_client.post(
+        "/api/generate", json={"model": "llama2", "prompt": "Tell me a joke.", "stream": False}
+    )
     assert response.status_code == 200
     data = response.json()
     assert "Hello, this is a test." in data["response"]
@@ -133,11 +127,10 @@ async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_loggi
 
 
 @pytest.mark.asyncio
-async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/chat", json={"model": "mistral", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
-        )
+async def test_ollama_chat_non_streaming(async_client, mock_openai_upstream, disable_logging):
+    response = await async_client.post(
+        "/api/chat", json={"model": "mistral", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
+    )
     assert response.status_code == 200
     data = response.json()
     assert "Hello, this is a test." in data["response"]
@@ -147,21 +140,19 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
 
 
 @pytest.mark.asyncio
-async def test_ollama_invalid_json_returns_400(disable_logging):
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
-            "/api/chat",
-            content="{invalid json",
-            headers={"content-type": "application/json"},
-        )
+async def test_ollama_invalid_json_returns_400(async_client, disable_logging):
+    response = await async_client.post(
+        "/api/chat",
+        content="{invalid json",
+        headers={"content-type": "application/json"},
+    )
 
     assert response.status_code == 400
     assert response.json() == {"error": "Invalid JSON in request body"}
 
 
 @pytest.mark.asyncio
-@patch("httpx.AsyncClient")
-async def test_ollama_chat_streaming_transforms_openai_sse(mock_client, disable_logging):
+async def test_ollama_chat_streaming_transforms_openai_sse(async_client, disable_logging):
     class FakeStreamResponse:
         def __init__(self, chunks):
             self.status_code = 200
@@ -178,18 +169,18 @@ async def test_ollama_chat_streaming_transforms_openai_sse(mock_client, disable_
             for chunk in self._chunks:
                 yield chunk
 
-    async_client = mock_client.return_value.__aenter__.return_value
-    async_client.stream = Mock(
-        return_value=FakeStreamResponse(
-            [
-                b'data: {"choices": [{"delta": {"content": "Hello"}}], "created": "now"}\n\n',
-                b'data: [DONE]\n\n',
-            ]
+    with patch("httpx.AsyncClient") as mock_client:
+        mock_http_client = mock_client.return_value.__aenter__.return_value
+        mock_http_client.stream = Mock(
+            return_value=FakeStreamResponse(
+                [
+                    b'data: {"choices": [{"delta": {"content": "Hello"}}], "created": "now"}\n\n',
+                    b'data: [DONE]\n\n',
+                ]
+            )
         )
-    )
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(
+        response = await async_client.post(
             "/api/chat",
             json={"model": "mistral", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
         )
@@ -202,7 +193,7 @@ async def test_ollama_chat_streaming_transforms_openai_sse(mock_client, disable_
 
 
 @pytest.mark.asyncio
-async def test_system_dashboard_shows_google_proxy_pool(disable_logging):
+async def test_system_dashboard_shows_google_proxy_pool(async_client, disable_logging):
     provider = GoogleGenAIProvider(
         GoogleGenAIConfig(
             name="test-google",
@@ -223,8 +214,7 @@ async def test_system_dashboard_shows_google_proxy_pool(disable_logging):
         patch("smolrouter.app.container", fake_container),
         patch("smolrouter.app.get_webui_security", return_value=fake_security),
     ):
-        async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.get("/system")
+        response = await async_client.get("/system")
 
     assert response.status_code == 200
     content = response.text
@@ -237,7 +227,7 @@ async def test_system_dashboard_shows_google_proxy_pool(disable_logging):
 
 
 @pytest.mark.asyncio
-async def test_google_genai_stats_returns_frontend_compatible_shape(disable_logging, monkeypatch):
+async def test_google_genai_stats_returns_frontend_compatible_shape(async_client, disable_logging, monkeypatch):
     fake_provider = Mock()
     fake_provider.get_provider_type.return_value = "google-genai"
     fake_provider.get_provider_id.return_value = "google-main"
@@ -269,8 +259,7 @@ async def test_google_genai_stats_returns_frontend_compatible_shape(disable_logg
 
     monkeypatch.setattr(app_module, "container", fake_container)
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/google-genai/stats")
+    response = await async_client.get("/api/google-genai/stats")
 
     assert response.status_code == 200
     payload = response.json()
@@ -619,6 +608,69 @@ def test_complete_request_log_without_logging_still_completes_lb_request(monkeyp
     )
 
     assert completed_lb_calls == [("lb-disabled", False)]
+
+
+def test_serialize_request_log_reuses_summary_metadata():
+    timestamp = app_module.datetime.now()
+    log_entry = SimpleNamespace(
+        id="req-123",
+        timestamp=timestamp,
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        provider_id="google-main",
+        original_model="gpt-4o",
+        mapped_model="gemini-2.5-pro",
+        duration_ms=None,
+        request_size=12,
+        response_size=24,
+        status_code="pending",
+        completed_at=None,
+        upstream_url="provider:google-main",
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        api_key_index=2,
+        api_key_total=5,
+        is_duplicate=False,
+        duplicate_count=0,
+    )
+
+    payload = app_module._serialize_request_log(log_entry)
+
+    assert payload["status_code"] is None
+    assert isinstance(payload["duration_ms"], int)
+    assert payload["provider_id"] == "google-main"
+    assert payload["api_key_suffix"] == "abcd1234"
+    assert payload["api_key_index"] == 2
+    assert payload["api_key_total"] == 5
+
+
+def test_serialize_performance_point_uses_summary_fields():
+    log_entry = SimpleNamespace(
+        id="req-456",
+        timestamp=app_module.datetime.now(),
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        service_type="openai",
+        path="/v1/chat/completions",
+        status_code=200,
+        duration_ms=1800,
+        request_size=64,
+        response_size=128,
+        prompt_tokens=120,
+        completion_tokens=30,
+        total_tokens=150,
+    )
+
+    payload = app_module._serialize_performance_point(log_entry)
+
+    assert payload["model"] == "llama3-70b"
+    assert payload["mapped_model"] == "llama3-70b"
+    assert payload["status_code"] == 200
+    assert payload["duration_ms"] == 1800
+    assert payload["request_size"] == 64
+    assert payload["response_size"] == 128
 
 
 def test_json_markdown_environment_variable():

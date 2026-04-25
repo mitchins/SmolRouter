@@ -7,11 +7,11 @@ AI model serving platforms like Ollama and OpenAI-compatible APIs.
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 import httpx
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from .config_loading import load_first_config_entry
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from .anthropic_provider import AnthropicProvider, AnthropicConfig
@@ -61,8 +61,18 @@ class BaseModelProvider(IModelProvider):
         """Override in subclasses to provide specific health check endpoints"""
         return self.config.url
 
+    def _get_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
+
     def _create_model_info(
-        self, model_id: str, model_name: str = None, aliases: List[str] = None, metadata: Dict[str, Any] = None
+        self,
+        model_id: str,
+        model_name: Optional[str] = None,
+        aliases: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> ModelInfo:
         """Helper to create ModelInfo with provider context"""
         return ModelInfo(
@@ -135,14 +145,6 @@ class OllamaProvider(BaseModelProvider):
         except Exception as e:
             logger.error(f"Error discovering Ollama models from {self.get_provider_id()}: {e}")
             return []
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Get headers for Ollama requests"""
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        return headers
-
 
 class OpenAIProvider(BaseModelProvider):
     """Provider for OpenAI-compatible model servers"""
@@ -278,7 +280,7 @@ class OpenAIProvider(BaseModelProvider):
     def _get_configured_static_models(self) -> List[ModelInfo]:
         models = []
 
-        for model_name in self.config.static_models:
+        for model_name in self.config.static_models or []:
             model_info = self._create_model_info(
                 model_id=model_name,
                 model_name=model_name,
@@ -351,13 +353,6 @@ class OpenAIProvider(BaseModelProvider):
 
         logger.info(f"Providing {len(models)} fallback OpenAI models for {self.get_provider_id()}")
         return models
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Get headers for OpenAI requests"""
-        headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
-        return headers
 
     @staticmethod
     def _normalize_client_header_value(value: Any) -> Any:
@@ -441,7 +436,7 @@ class OpenAIProvider(BaseModelProvider):
     async def generate_completion(
         self,
         openai_request: Dict[str, Any],
-        client_headers: Dict[str, str] = None,
+        client_headers: Optional[Dict[str, str]] = None,
         endpoint: str = "/v1/chat/completions",
     ) -> Tuple[Dict[str, Any], int]:
         """Generate completion by passing through to OpenAI API"""
@@ -482,27 +477,12 @@ class ZaiCodingConfig(ProviderConfig):
 
     @staticmethod
     def _load_api_key_from_file(api_key_file: str) -> str:
-        path = Path(api_key_file).expanduser()
-        if not path.exists():
-            raise ValueError(f"API key file not found: {api_key_file}")
-
-        for raw_line in path.read_text().splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-
-            if "=" in line:
-                _, value = line.split("=", 1)
-                line = value.strip().split("#", 1)[0].strip()
-
-            line = line.strip().strip('"').strip("'")
-            if line:
-                return line
-
-        raise ValueError(f"No API key found in file: {api_key_file}")
+        return load_first_config_entry(
+            api_key_file,
+            allow_assignments=True,
+            strip_inline_comments=True,
+            value_label="API key",
+        )
 
 
 class ZaiCodingProvider(OpenAIProvider):
@@ -548,7 +528,7 @@ class ZaiCodingProvider(OpenAIProvider):
     async def generate_completion(
         self,
         openai_request: Dict[str, Any],
-        client_headers: Dict[str, str] = None,
+        client_headers: Optional[Dict[str, str]] = None,
         endpoint: str = "/v1/chat/completions",
     ) -> Tuple[Dict[str, Any], int]:
         """Generate a completion using the configured Z.AI coding key."""
@@ -594,6 +574,12 @@ class ProviderFactory:
         "google-genai": GoogleGenAIProvider,
         "anthropic": AnthropicProvider,
         "dummy": DummyProvider,
+    }
+    _config_classes = {
+        "google-genai": GoogleGenAIConfig,
+        "anthropic": AnthropicConfig,
+        "dummy": DummyConfig,
+        "zai-coding": ZaiCodingConfig,
     }
 
     @classmethod
@@ -656,17 +642,9 @@ class ProviderFactory:
                 # Convert proxy configurations from dicts to ProxyConfig objects
                 processed_config = cls._convert_proxy_configs(provider_config)
 
-                # Handle special provider configs
-                if processed_config.get("type") == "google-genai":
-                    config = GoogleGenAIConfig(**processed_config)
-                elif processed_config.get("type") == "anthropic":
-                    config = AnthropicConfig(**processed_config)
-                elif processed_config.get("type") == "dummy":
-                    config = DummyConfig(**processed_config)
-                elif processed_config.get("type") == "zai-coding":
-                    config = ZaiCodingConfig(**processed_config)
-                else:
-                    config = ProviderConfig(**processed_config)
+                config_type = str(processed_config.get("type", "")).lower()
+                config_class = cls._config_classes.get(config_type, ProviderConfig)
+                config = config_class(**processed_config)
 
                 if config.enabled:
                     provider = cls.create_provider(config)

@@ -1811,7 +1811,20 @@ def _timestamp_now_for_log(timestamp: Optional[datetime]) -> datetime:
     return datetime.now()
 
 
-def _serialize_request_log(log_entry) -> dict[str, Any]:
+REQUEST_LOG_PROVIDER_METADATA_FIELDS = (
+    "api_key_suffix",
+    "proxy_used",
+    "provider_id",
+    "api_key_index",
+    "api_key_total",
+)
+
+
+def _serialize_request_log_provider_metadata(log_entry: Any) -> dict[str, Any]:
+    return {field_name: getattr(log_entry, field_name, None) for field_name in REQUEST_LOG_PROVIDER_METADATA_FIELDS}
+
+
+def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
     timestamp = getattr(log_entry, "timestamp", None)
     status_code = getattr(log_entry, "status_code", None)
     duration_ms = getattr(log_entry, "duration_ms", None)
@@ -1820,36 +1833,37 @@ def _serialize_request_log(log_entry) -> dict[str, Any]:
         elapsed_seconds = (_timestamp_now_for_log(timestamp) - timestamp).total_seconds()
         duration_ms = max(int(elapsed_seconds * 1000), 0)
 
-    completed_at = getattr(log_entry, "completed_at", None)
-    provider_id = getattr(log_entry, "provider_id", None) or None
-    upstream_url = getattr(log_entry, "upstream_url", None)
-    normalized_status = None if status_code == "pending" else status_code
-
     return {
         "id": getattr(log_entry, "id", None),
         "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
         "source_ip": getattr(log_entry, "source_ip", None),
-        "method": getattr(log_entry, "method", None),
         "path": getattr(log_entry, "path", None),
         "service_type": getattr(log_entry, "service_type", None),
-        "provider_id": provider_id,
         "original_model": getattr(log_entry, "original_model", None),
         "mapped_model": getattr(log_entry, "mapped_model", None),
         "duration_ms": duration_ms,
         "request_size": getattr(log_entry, "request_size", 0) or 0,
         "response_size": getattr(log_entry, "response_size", 0) or 0,
-        "status_code": normalized_status,
+        "status_code": None if status_code == "pending" else status_code,
         "error_message": getattr(log_entry, "error_message", None),
+        **_serialize_request_log_provider_metadata(log_entry),
+    }
+
+
+def _serialize_request_log(log_entry) -> dict[str, Any]:
+    summary = _serialize_request_log_summary(log_entry)
+    completed_at = getattr(log_entry, "completed_at", None)
+    upstream_url = getattr(log_entry, "upstream_url", None)
+
+    return {
+        **summary,
+        "method": getattr(log_entry, "method", None),
         "completed_at": completed_at.isoformat() if isinstance(completed_at, datetime) else None,
         "is_inflight": completed_at is None,
         "upstream": upstream_url,
         "upstream_url": upstream_url,
         "is_duplicate": getattr(log_entry, "is_duplicate", False),
         "duplicate_count": getattr(log_entry, "duplicate_count", 0),
-        "api_key_suffix": getattr(log_entry, "api_key_suffix", None),
-        "proxy_used": getattr(log_entry, "proxy_used", None),
-        "api_key_index": getattr(log_entry, "api_key_index", None),
-        "api_key_total": getattr(log_entry, "api_key_total", None),
     }
 
 
@@ -1928,22 +1942,22 @@ def _serialize_request_detail_response(log_entry: Any, duplicate_info: dict[str,
 
 
 def _serialize_performance_point(log_entry: Any) -> dict[str, Any]:
-    timestamp = getattr(log_entry, "timestamp", None)
+    summary = _serialize_request_log_summary(log_entry)
     return {
-        "id": getattr(log_entry, "id", None),
-        "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
+        "id": summary["id"],
+        "timestamp": summary["timestamp"],
         "prompt_tokens": getattr(log_entry, "prompt_tokens", None),
         "completion_tokens": getattr(log_entry, "completion_tokens", None),
         "total_tokens": getattr(log_entry, "total_tokens", None),
-        "duration_ms": getattr(log_entry, "duration_ms", None),
-        "model": getattr(log_entry, "mapped_model", None) or getattr(log_entry, "original_model", None),
-        "original_model": getattr(log_entry, "original_model", None),
-        "mapped_model": getattr(log_entry, "mapped_model", None),
-        "service_type": getattr(log_entry, "service_type", None),
-        "path": getattr(log_entry, "path", None),
-        "status_code": getattr(log_entry, "status_code", None),
-        "request_size": getattr(log_entry, "request_size", None),
-        "response_size": getattr(log_entry, "response_size", None),
+        "duration_ms": summary["duration_ms"],
+        "model": summary["mapped_model"] or summary["original_model"],
+        "original_model": summary["original_model"],
+        "mapped_model": summary["mapped_model"],
+        "service_type": summary["service_type"],
+        "path": summary["path"],
+        "status_code": summary["status_code"],
+        "request_size": summary["request_size"],
+        "response_size": summary["response_size"],
     }
 
 

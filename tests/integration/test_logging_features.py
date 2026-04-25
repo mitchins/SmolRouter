@@ -2,11 +2,7 @@ import pytest
 import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-import httpx
-from httpx import AsyncClient
-from fastapi.testclient import TestClient
 
-from smolrouter.app import app
 from smolrouter.database import RequestLog, get_log_stats
 
 
@@ -157,99 +153,94 @@ async def test_cleanup_old_logs(isolated_db, sample_logs):
 
 
 @pytest.mark.asyncio
-async def test_web_ui_dashboard(isolated_db, sample_logs, disable_logging):
+async def test_web_ui_dashboard(async_client, isolated_db, sample_logs, disable_logging):
     """Test the web UI dashboard endpoint"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/")
+    response = await async_client.get("/")
 
-        assert response.status_code == 200
-        assert "text/html" in response.headers["content-type"]
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
 
-        # Check that the response contains expected UI elements
-        content = response.text
-        assert "SmolRouter" in content
-        assert "Recent Requests" in content
-        assert "Total Requests" in content
+    # Check that the response contains expected UI elements
+    content = response.text
+    assert "SmolRouter" in content
+    assert "Recent Requests" in content
+    assert "Total Requests" in content
 
 
 @pytest.mark.asyncio
-async def test_api_logs_endpoint(isolated_db, sample_logs, disable_logging):
+async def test_api_logs_endpoint(async_client, isolated_db, sample_logs, disable_logging):
     """Test the logs API endpoint"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        # Test basic logs endpoint
-        response = await client.get("/api/logs")
-        assert response.status_code == 200
+    # Test basic logs endpoint
+    response = await async_client.get("/api/logs")
+    assert response.status_code == 200
 
-        logs = response.json()
-        assert len(logs) <= 100  # Default limit
-        assert all("timestamp" in log for log in logs)
-        assert all("service_type" in log for log in logs)
+    logs = response.json()
+    assert len(logs) <= 100  # Default limit
+    assert all("timestamp" in log for log in logs)
+    assert all("service_type" in log for log in logs)
 
-        # Test with limit parameter
-        response = await client.get("/api/logs?limit=2")
-        assert response.status_code == 200
-        logs = response.json()
-        assert len(logs) <= 2
+    # Test with limit parameter
+    response = await async_client.get("/api/logs?limit=2")
+    assert response.status_code == 200
+    logs = response.json()
+    assert len(logs) <= 2
 
-        # Test with service type filter
-        response = await client.get("/api/logs?service_type=openai")
-        assert response.status_code == 200
-        logs = response.json()
-        assert all(log["service_type"] == "openai" for log in logs)
+    # Test with service type filter
+    response = await async_client.get("/api/logs?service_type=openai")
+    assert response.status_code == 200
+    logs = response.json()
+    assert all(log["service_type"] == "openai" for log in logs)
 
 
 @pytest.mark.asyncio
-async def test_api_dashboard_supports_combinable_field_filters(isolated_db, sample_logs, disable_logging):
+async def test_api_dashboard_supports_combinable_field_filters(async_client, isolated_db, sample_logs, disable_logging):
     """Test host, provider, and model filters together on the dashboard API."""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            "/api/dashboard",
-            params={"q": "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"},
-        )
+    response = await async_client.get(
+        "/api/dashboard",
+        params={"q": "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"},
+    )
 
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["filter"]["active"] is True
-        assert payload["filter"]["query"] == "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["filter"]["active"] is True
+    assert payload["filter"]["query"] == "host:192.168.1.100 provider:google-gen-ai model:gemma3-12b"
 
-        logs = payload["logs"]
-        assert len(logs) == 2
-        assert all(log["source_ip"] == "192.168.1.100" for log in logs)
-        assert all(log["provider_id"] == "google-gen-ai" for log in logs)
-        assert all("gemma3-12b" in {log.get("original_model"), log.get("mapped_model")} for log in logs)
+    logs = payload["logs"]
+    assert len(logs) == 2
+    assert all(log["source_ip"] == "192.168.1.100" for log in logs)
+    assert all(log["provider_id"] == "google-gen-ai" for log in logs)
+    assert all("gemma3-12b" in {log.get("original_model"), log.get("mapped_model")} for log in logs)
 
 
 @pytest.mark.asyncio
-async def test_api_dashboard_rejects_unknown_filter_fields(isolated_db, sample_logs, disable_logging):
+async def test_api_dashboard_rejects_unknown_filter_fields(async_client, isolated_db, sample_logs, disable_logging):
     """Test invalid primitiveQL clauses return an explicit API error."""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/dashboard", params={"q": "status:200"})
+    response = await async_client.get("/api/dashboard", params={"q": "status:200"})
 
-        assert response.status_code == 422
-        payload = response.json()
-        assert payload["error"] == "invalid_filter"
-        assert "status:200" in payload["invalid_terms"]
-        assert "Supported fields" in payload["message"]
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"] == "invalid_filter"
+    assert "status:200" in payload["invalid_terms"]
+    assert "Supported fields" in payload["message"]
 
 
 @pytest.mark.asyncio
-async def test_api_stats_endpoint(isolated_db, sample_logs, disable_logging):
+async def test_api_stats_endpoint(async_client, isolated_db, sample_logs, disable_logging):
     """Test the stats API endpoint"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/stats")
-        assert response.status_code == 200
+    response = await async_client.get("/api/stats")
+    assert response.status_code == 200
 
-        stats = response.json()
-        assert "total_requests" in stats
-        assert "service_types" in stats
+    stats = response.json()
+    assert "total_requests" in stats
+    assert "service_types" in stats
 
-        assert isinstance(stats["total_requests"], int)
-        assert isinstance(stats["completed_requests"], int)
-        assert isinstance(stats["pending_requests"], int)
+    assert isinstance(stats["total_requests"], int)
+    assert isinstance(stats["completed_requests"], int)
+    assert isinstance(stats["pending_requests"], int)
 
 
 @pytest.mark.asyncio
-async def test_api_client_endpoint_uses_redis_client_logs(isolated_db, sample_logs, disable_logging):
+async def test_api_client_endpoint_uses_redis_client_logs(async_client, isolated_db, sample_logs, disable_logging):
     """Test the client-specific API uses Redis-backed per-IP lookup and keeps stats independent of log limit."""
     inflight_log = await RequestLog.create(
         source_ip="192.168.1.100",  # NOSONAR S1313
@@ -262,8 +253,7 @@ async def test_api_client_endpoint_uses_redis_client_logs(isolated_db, sample_lo
         timestamp=datetime.now() - timedelta(minutes=2),
     )
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/clients/192.168.1.100", params={"limit": 2})
+    response = await async_client.get("/api/clients/192.168.1.100", params={"limit": 2})
 
     assert response.status_code == 200
     payload = response.json()
@@ -281,7 +271,7 @@ async def test_api_client_endpoint_uses_redis_client_logs(isolated_db, sample_lo
 
 
 @pytest.mark.asyncio
-async def test_api_performance_endpoint_uses_redis_recent_logs(isolated_db, disable_logging):
+async def test_api_performance_endpoint_uses_redis_recent_logs(async_client, isolated_db, disable_logging):
     """Performance API should return Redis-backed completed requests with token data and respect filters."""
     now = datetime.now(timezone.utc)
     recent_log = await RequestLog.create(
@@ -320,11 +310,10 @@ async def test_api_performance_endpoint_uses_redis_recent_logs(isolated_db, disa
     old_log.total_tokens = 250
     await old_log.save_async()
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            "/api/performance",
-            params={"hours": 24, "model": "llama3-70b", "service_type": "openai", "limit": 10},
-        )
+    response = await async_client.get(
+        "/api/performance",
+        params={"hours": 24, "model": "llama3-70b", "service_type": "openai", "limit": 10},
+    )
 
     assert response.status_code == 200
     payload = response.json()
@@ -339,29 +328,28 @@ async def test_api_performance_endpoint_uses_redis_recent_logs(isolated_db, disa
     assert point["service_type"] == "openai"
 
 
-def test_client_dashboard_websocket_sends_initial_data_and_refresh(isolated_db, sample_logs, disable_logging):
+def test_client_dashboard_websocket_sends_initial_data_and_refresh(client, isolated_db, sample_logs, disable_logging):
     """Client dashboard websocket should send Redis-backed initial data and respond to refresh/ping."""
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/clients/192.168.1.100") as websocket:
-            initial_payload = websocket.receive_json()
-            assert initial_payload["type"] == "client_dashboard_update"
-            assert initial_payload["client_ip"] == "192.168.1.100"
-            assert initial_payload["stats"]["total_requests"] == 2
-            assert initial_payload["stats"]["successful_requests"] == 2
-            assert len(initial_payload["logs"]) == 2
+    with client.websocket_connect("/ws/clients/192.168.1.100") as websocket:
+        initial_payload = websocket.receive_json()
+        assert initial_payload["type"] == "client_dashboard_update"
+        assert initial_payload["client_ip"] == "192.168.1.100"
+        assert initial_payload["stats"]["total_requests"] == 2
+        assert initial_payload["stats"]["successful_requests"] == 2
+        assert len(initial_payload["logs"]) == 2
 
-            websocket.send_json({"type": "ping"})
-            assert websocket.receive_json() == {"type": "pong"}
+        websocket.send_json({"type": "ping"})
+        assert websocket.receive_json() == {"type": "pong"}
 
-            websocket.send_json({"type": "refresh"})
-            refreshed_payload = websocket.receive_json()
-            assert refreshed_payload["type"] == "client_dashboard_update"
-            assert refreshed_payload["client_ip"] == "192.168.1.100"
-            assert refreshed_payload["stats"]["total_requests"] == 2
+        websocket.send_json({"type": "refresh"})
+        refreshed_payload = websocket.receive_json()
+        assert refreshed_payload["type"] == "client_dashboard_update"
+        assert refreshed_payload["client_ip"] == "192.168.1.100"
+        assert refreshed_payload["stats"]["total_requests"] == 2
 
 
 @pytest.mark.asyncio
-async def test_api_inflight_endpoint(isolated_db, sample_logs, disable_logging):
+async def test_api_inflight_endpoint(async_client, isolated_db, sample_logs, disable_logging):
     """Test the inflight requests API endpoint"""
     # Create an inflight request
     inflight_log = await RequestLog.create(
@@ -374,23 +362,22 @@ async def test_api_inflight_endpoint(isolated_db, sample_logs, disable_logging):
         mapped_model="llama3-70b",
     )
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/inflight")
-        assert response.status_code == 200
+    response = await async_client.get("/api/inflight")
+    assert response.status_code == 200
 
-        inflight = response.json()
-        assert len(inflight) == 1
-        assert inflight[0]["id"] == inflight_log.id
-        assert inflight[0]["source_ip"] == "192.168.1.100"
-        assert inflight[0]["service_type"] == "openai"
-        assert inflight[0]["original_model"] == "gpt-4"
-        assert inflight[0]["mapped_model"] == "llama3-70b"
-        assert "elapsed_ms" in inflight[0]
-        assert isinstance(inflight[0]["elapsed_ms"], int)
+    inflight = response.json()
+    assert len(inflight) == 1
+    assert inflight[0]["id"] == inflight_log.id
+    assert inflight[0]["source_ip"] == "192.168.1.100"
+    assert inflight[0]["service_type"] == "openai"
+    assert inflight[0]["original_model"] == "gpt-4"
+    assert inflight[0]["mapped_model"] == "llama3-70b"
+    assert "elapsed_ms" in inflight[0]
+    assert isinstance(inflight[0]["elapsed_ms"], int)
 
 
 @pytest.mark.asyncio
-async def test_request_detail_view(isolated_db, sample_logs, disable_logging):
+async def test_request_detail_view(async_client, isolated_db, sample_logs, disable_logging):
     """Test the request detail view endpoint"""
     # Create a completed request with full data
     log_entry = await RequestLog.create(
@@ -414,47 +401,44 @@ async def test_request_detail_view(isolated_db, sample_logs, disable_logging):
     log_entry.set_response_body(b'{"choices": [{"message": {"content": "Hello!"}}]}')
     log_entry.save()
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(f"/request/{log_entry.id}")
-        assert response.status_code == 200
-        assert "text/html" in response.headers["content-type"]
+    response = await async_client.get(f"/request/{log_entry.id}")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
 
-        content = response.text
-        assert f"Request #{log_entry.id}" in content
-        assert "Request Information" in content
-        assert "Response Information" in content
-        assert "192.168.1.100" in content
-        assert "Protocol:" in content
-        assert "OpenAI-compatible" in content
-        assert "Provider:" in content
-        assert "test-zai" in content
-        assert "gpt-4" in content
-        assert "llama3-70b" in content
-        assert "Request Body" in content
-        assert "Response Body" in content
+    content = response.text
+    assert f"Request #{log_entry.id}" in content
+    assert "Request Information" in content
+    assert "Response Information" in content
+    assert "192.168.1.100" in content
+    assert "Protocol:" in content
+    assert "OpenAI-compatible" in content
+    assert "Provider:" in content
+    assert "test-zai" in content
+    assert "gpt-4" in content
+    assert "llama3-70b" in content
+    assert "Request Body" in content
+    assert "Response Body" in content
 
 
 @pytest.mark.asyncio
-async def test_request_detail_view_404(isolated_db, disable_logging):
+async def test_request_detail_view_404(async_client, isolated_db, disable_logging):
     """Test the request detail view with non-existent request"""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/request/999999")
-        assert response.status_code == 404
-        assert "Request Not Found" in response.text
+    response = await async_client.get("/request/999999")
+    assert response.status_code == 404
+    assert "Request Not Found" in response.text
 
 
 @pytest.mark.asyncio
-async def test_request_detail_api_404(isolated_db, disable_logging):
+async def test_request_detail_api_404(async_client, isolated_db, disable_logging):
     """Test the JSON request detail endpoint with non-existent request."""
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/requests/999999")
+    response = await async_client.get("/api/requests/999999")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Request not found"}
 
 
 @pytest.mark.asyncio
-async def test_request_detail_view_inflight(isolated_db, disable_logging):
+async def test_request_detail_view_inflight(async_client, isolated_db, disable_logging):
     """Test the request detail view for inflight requests"""
     # Create an inflight request (no completed_at)
     log_entry = await RequestLog.create(
@@ -467,17 +451,16 @@ async def test_request_detail_view_inflight(isolated_db, disable_logging):
         mapped_model="llama3-8b",
     )
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(f"/request/{log_entry.id}")
-        assert response.status_code == 200
+    response = await async_client.get(f"/request/{log_entry.id}")
+    assert response.status_code == 200
 
-        content = response.text
-        assert "Inflight" in content
-        assert "Still processing" in content
+    content = response.text
+    assert "Inflight" in content
+    assert "Still processing" in content
 
 
 @pytest.mark.asyncio
-async def test_request_detail_api_serializes_bodies_and_duplicates(isolated_db, disable_logging):
+async def test_request_detail_api_serializes_bodies_and_duplicates(async_client, isolated_db, disable_logging):
     """Test JSON request details include decoded bodies and duplicate request metadata."""
     timestamp = datetime.now()
     primary_log = await RequestLog.create(
@@ -514,8 +497,7 @@ async def test_request_detail_api_serializes_bodies_and_duplicates(isolated_db, 
         timestamp=timestamp,
     )
 
-    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(f"/api/requests/{primary_log.id}")
+    response = await async_client.get(f"/api/requests/{primary_log.id}")
 
     assert response.status_code == 200
     payload = response.json()
@@ -527,7 +509,6 @@ async def test_request_detail_api_serializes_bodies_and_duplicates(isolated_db, 
     assert payload["duplicate"]["duplicates"][0]["source_ip"] == "192.168.1.101"
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_request_log_model_fields(isolated_db):
     """Test that the RequestLog model has all required fields"""
@@ -574,27 +555,26 @@ async def test_request_log_model_fields(isolated_db):
 
 
 @pytest.mark.asyncio
-async def test_logging_middleware_integration(isolated_db):
+async def test_logging_middleware_integration(async_client, isolated_db):
     """Test that requests are actually logged when ENABLE_LOGGING is True"""
 
     # Mock the upstream server to avoid real network calls
     with patch("smolrouter.app.ENABLE_LOGGING", True):
-        async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            # Before request, check log count
-            _ = await RequestLog.get_recent(10)
+        # Before request, check log count
+        _ = await RequestLog.get_recent(10)
 
-            # Make a request that will fail (no upstream server)
-            try:
-                await client.post(
-                    "/v1/chat/completions",
-                    json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "test"}]},
-                )
-            except Exception:
-                pass  # We expect this to fail due to no upstream
+        # Make a request that will fail (no upstream server)
+        try:
+            await async_client.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "test"}]},
+            )
+        except Exception:
+            pass  # We expect this to fail due to no upstream
 
-            # After request, there should be one more log entry
-            # Note: This test may not work as expected without proper mocking of the upstream
-            # In a real scenario, you'd mock the httpx client calls
+        # After request, there should be one more log entry
+        # Note: This test may not work as expected without proper mocking of the upstream
+        # In a real scenario, you'd mock the httpx client calls
 
 
 @pytest.mark.asyncio
