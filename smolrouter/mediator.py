@@ -7,6 +7,7 @@ interface for model operations.
 """
 
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -76,7 +77,7 @@ class ModelMediator:
 
         return filtered_models
 
-    async def _register_models_in_load_balancer(self, models: List[ModelInfo]) -> None:
+    def _register_models_in_load_balancer(self, models: List[ModelInfo]) -> None:
         """Register discovered models with the load balancer for instance distribution."""
         if self._models_registered_in_lb:
             return
@@ -121,7 +122,7 @@ class ModelMediator:
             return None
 
         # Register models in load balancer if not already done
-        await self._register_models_in_load_balancer(available_models)
+        self._register_models_in_load_balancer(available_models)
 
         # Step 2: Check if load balancing is needed (multiple instances of the same base model)
         instance = await model_load_balancer.select_instance(requested_model)
@@ -289,6 +290,185 @@ class ModelMediator:
 
         return result
 
+    def _attach_lb_instance(self, lb_instance: Any, metadata: Optional[RequestMetadata]) -> Optional[RequestMetadata]:
+        if not lb_instance:
+            return metadata
+
+        if metadata is None:
+            metadata = RequestMetadata()
+        metadata.lb_instance = lb_instance
+        return metadata
+
+    def _apply_resolved_model_to_payload(self, resolved_model: ModelInfo, request_payload: Dict[str, Any]) -> None:
+        if hasattr(resolved_model, "_lb_selected_instance") and "model" in request_payload:
+            original_model = request_payload["model"]
+            request_payload["model"] = resolved_model._lb_selected_instance
+            logger.info(
+                f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
+            )
+            return
+
+        if request_payload.get("model") != resolved_model.name:
+            request_payload["model"] = resolved_model.name
+
+    @staticmethod
+    def _google_error_status_code(error_message: str) -> int:
+        error_lower = error_message.lower()
+        if "quota exhausted" in error_lower or "429" in error_lower:
+            return 429
+        if "permission denied" in error_lower or "403" in error_lower:
+            return 403
+        if "invalid argument" in error_lower or "400" in error_lower:
+            return 400
+        return 500
+
+    async def _handle_google_provider_request(
+        self,
+        provider: GoogleGenAIProvider,
+        resolved_model: ModelInfo,
+        request_payload: Dict[str, Any],
+        lb_instance: Any,
+    ) -> Tuple[Dict[str, Any], int, str, Any]:
+        try:
+            response_data, metadata = await provider.generate_completion(request_payload)
+            return (
+                response_data,
+                200,
+                f"google-genai:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, metadata),
+            )
+        except Exception as e:
+            error_msg = str(e)
+            error_metadata = RequestMetadata(
+                api_key_suffix=getattr(e, "api_key_suffix", None),
+                proxy_used=getattr(e, "proxy_used", None),
+                provider_id=getattr(e, "provider_id", resolved_model.provider_id),
+                model_name=getattr(e, "model_name", resolved_model.name),
+                api_key_index=getattr(e, "api_key_index", None),
+                api_key_total=getattr(e, "api_key_total", None),
+            )
+
+            return (
+                {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
+                self._google_error_status_code(error_msg),
+                f"google-genai:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, error_metadata),
+            )
+
+    async def _handle_openai_compatible_provider_request(
+        self,
+        provider: Any,
+        resolved_model: ModelInfo,
+        request_payload: Dict[str, Any],
+        headers: Dict[str, str],
+        path: str,
+        lb_instance: Any,
+    ) -> Tuple[Dict[str, Any], int, str, Any]:
+        base_metadata = RequestMetadata(provider_id=resolved_model.provider_id, model_name=resolved_model.name)
+        try:
+            response_data, status_code = await provider.generate_completion(request_payload, headers, path)
+            return (
+                response_data,
+                status_code,
+                f"{resolved_model.provider_type}:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, base_metadata),
+            )
+        except Exception as e:
+            logger.error(f"{resolved_model.provider_type} provider error: {e}")
+            return (
+                {"error": {"type": "api_error", "message": str(e), "provider": resolved_model.provider_type}},
+                500,
+                f"{resolved_model.provider_type}:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, base_metadata),
+            )
+
+    async def _handle_dummy_provider_request(
+        self,
+        provider: DummyProvider,
+        resolved_model: ModelInfo,
+        request_payload: Dict[str, Any],
+        headers: Dict[str, str],
+        lb_instance: Any,
+    ) -> Tuple[Dict[str, Any], int, str, Any]:
+        try:
+            response_data = await provider.make_request(request_payload, headers)
+            return (
+                response_data,
+                200,
+                f"dummy:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, None),
+            )
+        except Exception as e:
+            logger.error(f"Dummy provider error: {e}")
+            return (
+                {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
+                500,
+                f"dummy:{resolved_model.provider_id}",
+                self._attach_lb_instance(lb_instance, None),
+            )
+
+    async def _route_request_internal(
+        self,
+        client: ClientContext,
+        model: str,
+        request_payload: Dict[str, Any],
+        path: str,
+        headers: Dict[str, str],
+    ) -> Tuple[Dict[str, Any], int, str, Any]:
+        resolved_model = await self.resolve_model_for_request(model, client)
+        if resolved_model is None:
+            return (
+                {
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": f"Model '{model}' not found or not accessible",
+                    }
+                },
+                404,
+                "none",
+                None,
+            )
+
+        lb_instance = getattr(resolved_model, "_lb_instance", None)
+        self._apply_resolved_model_to_payload(resolved_model, request_payload)
+
+        provider = self._get_provider_by_id(resolved_model.provider_id)
+        if not provider:
+            return (
+                {"error": {"type": "internal_server_error", "message": "Provider not available"}},
+                500,
+                resolved_model.endpoint,
+                self._attach_lb_instance(lb_instance, None),
+            )
+
+        if isinstance(provider, GoogleGenAIProvider):
+            return await self._handle_google_provider_request(provider, resolved_model, request_payload, lb_instance)
+
+        if hasattr(provider, "generate_completion") and resolved_model.provider_type in {"openai", "zai-coding"}:
+            return await self._handle_openai_compatible_provider_request(
+                provider,
+                resolved_model,
+                request_payload,
+                headers,
+                path,
+                lb_instance,
+            )
+
+        if isinstance(provider, DummyProvider):
+            return await self._handle_dummy_provider_request(provider, resolved_model, request_payload, headers, lb_instance)
+
+        return (
+            {
+                "error": {
+                    "type": "not_implemented",
+                    "message": f"HTTP routing for {resolved_model.provider_type} not implemented in new architecture",
+                }
+            },
+            501,
+            resolved_model.endpoint,
+            self._attach_lb_instance(lb_instance, None),
+        )
+
     async def route_request(
         self,
         source_ip: str,
@@ -296,7 +476,8 @@ class ModelMediator:
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
-        timeout: float,
+        *args: Any,
+        **kwargs: Any,
     ) -> Tuple[Dict[str, Any], int, str, Any]:
         """
         Route a request to the appropriate provider and execute it.
@@ -312,152 +493,29 @@ class ModelMediator:
             request_payload: OpenAI-format request payload
             path: Request path (e.g., "/v1/chat/completions")
             headers: Request headers
-            timeout: Request timeout
+            args/kwargs: Optional timeout argument for backward compatibility
 
         Returns:
             Tuple of (response_data, status_code, upstream_used, metadata)
         """
         client = ClientContext(ip=source_ip, headers=headers)
+        timeout = kwargs.get("timeout")
+        if timeout is None and args:
+            timeout = args[0]
+        if timeout is None:
+            timeout = 30.0
 
         try:
-            # Resolve the model to a specific provider
-            resolved_model = await self.resolve_model_for_request(model, client)
+            async with asyncio.timeout(timeout):
+                return await self._route_request_internal(client, model, request_payload, path, headers)
 
-            if resolved_model is None:
-                return (
-                    {
-                        "error": {
-                            "type": "invalid_request_error",
-                            "message": f"Model '{model}' not found or not accessible",
-                        }
-                    },
-                    404,
-                    "none",
-                    None,  # No metadata for error case
-                )
-
-            # Extract load balancer instance if present (for tracking request completion)
-            lb_instance = getattr(resolved_model, "_lb_instance", None)
-
-            # Check if load balancer selected a specific instance and mutate request
-            if hasattr(resolved_model, "_lb_selected_instance"):
-                # Update the request payload to use the selected instance name
-                if "model" in request_payload:
-                    original_model = request_payload["model"]
-                    request_payload["model"] = resolved_model._lb_selected_instance
-                    logger.info(
-                        f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
-                    )
-            elif request_payload.get("model") != resolved_model.name:
-                request_payload["model"] = resolved_model.name
-
-            # Helper to attach LB instance to metadata
-            def attach_lb_instance(metadata):
-                if lb_instance:
-                    if metadata is None:
-                        metadata = RequestMetadata()
-                    metadata.lb_instance = lb_instance
-                return metadata
-
-            # Get the provider for this model
-            provider = await self._get_provider_by_id(resolved_model.provider_id)
-            if not provider:
-                return (
-                    {"error": {"type": "internal_server_error", "message": "Provider not available"}},
-                    500,
-                    resolved_model.endpoint,
-                    attach_lb_instance(None),  # Include LB instance even for errors
-                )
-
-            # Handle Google GenAI provider requests
-            if isinstance(provider, GoogleGenAIProvider):
-                try:
-                    response_data, metadata = await provider.generate_completion(request_payload)
-                    return (
-                        response_data,
-                        200,
-                        f"google-genai:{resolved_model.provider_id}",
-                        attach_lb_instance(metadata),
-                    )
-                except Exception as e:
-                    error_msg = str(e)
-                    status_code = 500
-
-                    # Handle specific Google GenAI errors
-                    if "quota exhausted" in error_msg.lower() or "429" in error_msg:
-                        status_code = 429
-                    elif "permission denied" in error_msg.lower() or "403" in error_msg:
-                        status_code = 403
-                    elif "invalid argument" in error_msg.lower() or "400" in error_msg:
-                        status_code = 400
-
-                    error_metadata = RequestMetadata(
-                        api_key_suffix=getattr(e, "api_key_suffix", None),
-                        proxy_used=getattr(e, "proxy_used", None),
-                        provider_id=getattr(e, "provider_id", resolved_model.provider_id),
-                        model_name=getattr(e, "model_name", resolved_model.name),
-                        api_key_index=getattr(e, "api_key_index", None),
-                        api_key_total=getattr(e, "api_key_total", None),
-                    )
-
-                    return (
-                        {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
-                        status_code,
-                        f"google-genai:{resolved_model.provider_id}",
-                        attach_lb_instance(error_metadata),
-                    )
-
-            # Handle OpenAI-compatible provider requests
-            if hasattr(provider, "generate_completion") and resolved_model.provider_type in {"openai", "zai-coding"}:
-                base_metadata = RequestMetadata(provider_id=resolved_model.provider_id, model_name=resolved_model.name)
-                try:
-                    response_data, status_code = await provider.generate_completion(request_payload, headers, path)
-                    return (
-                        response_data,
-                        status_code,
-                        f"{resolved_model.provider_type}:{resolved_model.provider_id}",
-                        attach_lb_instance(base_metadata),
-                    )
-                except Exception as e:
-                    logger.error(f"{resolved_model.provider_type} provider error: {e}")
-                    # Return OpenAI-compatible error response
-                    return (
-                        {"error": {"type": "api_error", "message": str(e), "provider": resolved_model.provider_type}},
-                        500,
-                        f"{resolved_model.provider_type}:{resolved_model.provider_id}",
-                        attach_lb_instance(base_metadata),
-                    )
-
-            # Handle Dummy provider requests
-            if isinstance(provider, DummyProvider):
-                try:
-                    response_data = await provider.make_request(request_payload, headers)
-                    return (
-                        response_data,
-                        200,
-                        f"dummy:{resolved_model.provider_id}",
-                        attach_lb_instance(None),  # Dummy provider doesn't return metadata
-                    )
-                except Exception as e:
-                    logger.error(f"Dummy provider error: {e}")
-                    return (
-                        {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
-                        500,
-                        f"dummy:{resolved_model.provider_id}",
-                        attach_lb_instance(None),  # Include LB instance for errors
-                    )
-
-            # For other providers, fall back to legacy HTTP routing
+        except TimeoutError:
+            logger.error(f"Request timeout while routing model '{model}'")
             return (
-                {
-                    "error": {
-                        "type": "not_implemented",
-                        "message": f"HTTP routing for {resolved_model.provider_type} not implemented in new architecture",
-                    }
-                },
-                501,
-                resolved_model.endpoint,
-                attach_lb_instance(None),
+                {"error": {"type": "timeout_error", "message": "Request timed out"}},
+                504,
+                "timeout",
+                None,
             )
 
         except Exception as e:
@@ -469,7 +527,7 @@ class ModelMediator:
                 None,
             )
 
-    async def _get_provider_by_id(self, provider_id: str) -> Optional[IModelProvider]:
+    def _get_provider_by_id(self, provider_id: str) -> Optional[IModelProvider]:
         """Get a provider instance by ID"""
         for provider in self.aggregator.providers:
             if provider.get_provider_id() == provider_id:

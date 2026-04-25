@@ -1,5 +1,6 @@
 """Minimal regression tests for Google GenAI, Anthropic, and Z.AI integrations"""
 
+import asyncio
 import httpx
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
@@ -350,7 +351,7 @@ async def test_mediator_routes_zai_coding_provider():
     provider.generate_completion = AsyncMock(return_value=({"id": "chatcmpl-test"}, 200))
 
     mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
-    mediator._get_provider_by_id = AsyncMock(return_value=provider)
+    mediator._get_provider_by_id = Mock(return_value=provider)
 
     response_data, status_code, upstream_used, metadata = await mediator.route_request(
         "127.0.0.1",
@@ -402,7 +403,7 @@ async def test_mediator_preserves_provider_metadata_for_google_errors():
     provider.generate_completion = AsyncMock(side_effect=provider_error)
 
     mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
-    mediator._get_provider_by_id = AsyncMock(return_value=provider)
+    mediator._get_provider_by_id = Mock(return_value=provider)
 
     response_data, status_code, upstream_used, metadata = await mediator.route_request(
         "127.0.0.1",
@@ -514,6 +515,36 @@ async def test_google_genai_api_key_selection():
     # Test with a model name
     selected_key = await provider._select_best_api_key("gemini-1.5-pro")
     assert selected_key in config.api_keys
+
+
+@pytest.mark.asyncio
+async def test_mediator_returns_gateway_timeout_when_resolution_exceeds_timeout():
+    """Mediator should return a deterministic timeout response when routing exceeds timeout."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    strategy = SimpleModelStrategy({})
+    access_control = NoAccessControl()
+    mediator = ModelMediator(aggregator, strategy, access_control)
+
+    async def slow_resolve(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return None
+
+    mediator.resolve_model_for_request = AsyncMock(side_effect=slow_resolve)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemini-1.5-pro",
+        {"model": "gemini-1.5-pro", "messages": [{"role": "user", "content": "hello"}]},
+        "/v1/chat/completions",
+        {},
+        0.001,
+    )
+
+    assert status_code == 504
+    assert upstream_used == "timeout"
+    assert metadata is None
+    assert response_data["error"]["type"] == "timeout_error"
 
 
 def test_supported_provider_types():
