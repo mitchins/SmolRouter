@@ -14,6 +14,8 @@ from .config_paths import resolve_blob_storage_path
 logger = logging.getLogger("model-rerouter")
 
 # Configuration constants
+JSON_CONTENT_TYPE = "application/json"
+BLOB_FILE_GLOB = "*.blob"
 MAX_BLOB_SIZE = int(os.getenv("MAX_BLOB_SIZE", "10485760"))  # 10MB default
 MAX_TOTAL_STORAGE_SIZE = int(os.getenv("MAX_TOTAL_STORAGE_SIZE", "1073741824"))  # 1GB default
 JANITOR_INTERVAL_SEC = int(os.getenv("BLOB_JANITOR_INTERVAL_SEC", "300"))  # 5 minutes
@@ -27,7 +29,7 @@ class BlobStorage(ABC):
     """Abstract base class for blob storage backends"""
 
     @abstractmethod
-    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
+    def store(self, data: bytes, content_type: str = JSON_CONTENT_TYPE, record_id: Optional[int] = None) -> str:
         """Store data and return a reference key"""
         raise NotImplementedError()
 
@@ -83,7 +85,7 @@ class FilesystemBlobStorage(BlobStorage):
         hour = f"{t.tm_hour:02d}"
         return self.base_path / year / month / day / hour / f"{key}.blob"
 
-    def _generate_key(self, data: bytes) -> str:
+    def _generate_key(self) -> str:
         """Generate a timestamp-aligned unique key.
 
         Format: epoch_ms-rand8hex. Content is not used to dedupe.
@@ -92,7 +94,7 @@ class FilesystemBlobStorage(BlobStorage):
         rand8 = secrets.token_hex(4)
         return f"{epoch_ms}-{rand8}"
 
-    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
+    def store(self, data: bytes, content_type: str = JSON_CONTENT_TYPE, record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
         # content_type is accepted for API compatibility but not used here
         _ = content_type
@@ -107,7 +109,7 @@ class FilesystemBlobStorage(BlobStorage):
         # Generate a unique key and path
         attempts = 0
         while True:
-            key = self._generate_key(data)
+            key = self._generate_key()
             blob_path = self._get_blob_path(key, record_id)
             blob_path.parent.mkdir(parents=True, exist_ok=True)
             if not blob_path.exists():
@@ -175,7 +177,7 @@ class FilesystemBlobStorage(BlobStorage):
         deleted_count = 0
 
         try:
-            for blob_file in self.base_path.rglob("*.blob"):
+            for blob_file in self.base_path.rglob(BLOB_FILE_GLOB):
                 if blob_file.stat().st_mtime < cutoff_time:
                     try:
                         blob_file.unlink()
@@ -203,13 +205,13 @@ class FilesystemBlobStorage(BlobStorage):
         """Check if adding additional_bytes would exceed storage limit"""
         # No longer used in hot path; retained for potential external callers
         try:
-            current_size = sum(f.stat().st_size for f in self.base_path.rglob("*.blob"))
+            current_size = sum(f.stat().st_size for f in self.base_path.rglob(BLOB_FILE_GLOB))
             return (current_size + additional_bytes) <= MAX_TOTAL_STORAGE_SIZE
         except Exception as e:
             logger.error(f"Failed to check storage limit: {e}")
             return True  # Allow storage if we can't check
 
-    def _cleanup_for_space(self, needed_bytes: int):
+    def _cleanup_for_space(self):
         """Deprecated: cleanup now handled by background janitor."""
         logger.debug("_cleanup_for_space called but janitor is responsible for pruning; ignoring.")
 
@@ -245,7 +247,7 @@ class FilesystemBlobStorage(BlobStorage):
     def _dir_size_bytes(self, path: Path) -> int:
         total = 0
         try:
-            for f in path.rglob("*.blob"):
+            for f in path.rglob(BLOB_FILE_GLOB):
                 try:
                     total += f.stat().st_size
                 except Exception:
@@ -256,6 +258,56 @@ class FilesystemBlobStorage(BlobStorage):
 
     def _total_size_bytes(self) -> int:
         return self._dir_size_bytes(self.base_path)
+
+    def _get_prune_candidates(self, buckets: List[Path]) -> List[Path]:
+        if KEEP_RECENT_HOURS > 0 and len(buckets) > KEEP_RECENT_HOURS:
+            return buckets[:-KEEP_RECENT_HOURS]
+        return buckets
+
+    def _select_oldest_bucket(self, prune_candidates: List[Path], buckets: List[Path]) -> Optional[Path]:
+        if prune_candidates:
+            return prune_candidates[0]
+        if buckets:
+            return buckets[0]
+        return None
+
+    async def _prune_full_buckets(self, prune_candidates: List[Path], current_size: int, target: int) -> int:
+        for bucket in prune_candidates:
+            if current_size <= target:
+                break
+            try:
+                bucket_size = await asyncio.to_thread(self._dir_size_bytes, bucket)
+                await asyncio.to_thread(shutil.rmtree, bucket, True)
+                current_size -= bucket_size
+                logger.info(f"Deleted bucket {bucket} (freed {bucket_size} bytes)")
+            except Exception as e:
+                logger.error(f"Failed to delete bucket {bucket}: {e}")
+        return current_size
+
+    def _prune_bucket_files(self, bucket: Path, current_size: int, target: int) -> int:
+        try:
+            files = []
+            for blob_file in bucket.rglob(BLOB_FILE_GLOB):
+                try:
+                    stats = blob_file.stat()
+                    files.append((blob_file, stats.st_mtime, stats.st_size))
+                except Exception:
+                    continue
+
+            files.sort(key=lambda entry: entry[1])
+            for blob_file, _, file_size in files:
+                if current_size <= target:
+                    break
+                try:
+                    blob_file.unlink()
+                    current_size -= file_size
+                except Exception:
+                    continue
+
+            logger.info(f"Pruned files in {bucket} to reach target; now {current_size} bytes")
+        except Exception as e:
+            logger.error(f"Failed pruning files in {bucket}: {e}")
+        return current_size
 
     async def _run_janitor_once(self):
         """One pruning cycle: if over cap, delete oldest buckets/files to watermark."""
@@ -269,48 +321,14 @@ class FilesystemBlobStorage(BlobStorage):
             logger.warning(f"Blob storage over cap: current={current_size} > cap={cap}. Pruning to ≈{target} bytes.")
 
             buckets = await asyncio.to_thread(self._list_hour_buckets)
-            # Keep at least last KEEP_RECENT_HOURS buckets untouched
-            if KEEP_RECENT_HOURS > 0 and len(buckets) > KEEP_RECENT_HOURS:
-                prune_candidates = buckets[:-KEEP_RECENT_HOURS]
-            else:
-                prune_candidates = buckets
-
-            # Delete whole buckets oldest first
-            for bucket in prune_candidates:
-                if current_size <= target:
-                    break
-                try:
-                    bucket_size = await asyncio.to_thread(self._dir_size_bytes, bucket)
-                    await asyncio.to_thread(shutil.rmtree, bucket, True)
-                    current_size -= bucket_size
-                    logger.info(f"Deleted bucket {bucket} (freed {bucket_size} bytes)")
-                except Exception as e:
-                    logger.error(f"Failed to delete bucket {bucket}: {e}")
+            prune_candidates = self._get_prune_candidates(buckets)
+            current_size = await self._prune_full_buckets(prune_candidates, current_size, target)
 
             # If still over target, prune files in the oldest remaining bucket
-            if current_size > target and buckets:
-                oldest = prune_candidates[0] if prune_candidates else (buckets[0] if buckets else None)
+            if current_size > target:
+                oldest = self._select_oldest_bucket(prune_candidates, buckets)
                 if oldest and oldest.exists():
-                    try:
-                        files = []
-                        for f in oldest.rglob("*.blob"):
-                            try:
-                                st = f.stat()
-                                files.append((f, st.st_mtime, st.st_size))
-                            except Exception:
-                                pass
-                        files.sort(key=lambda x: x[1])
-                        for f, _, sz in files:
-                            if current_size <= target:
-                                break
-                            try:
-                                f.unlink()
-                                current_size -= sz
-                            except Exception:
-                                pass
-                        logger.info(f"Pruned files in {oldest} to reach target; now {current_size} bytes")
-                    except Exception as e:
-                        logger.error(f"Failed pruning files in {oldest}: {e}")
+                    current_size = self._prune_bucket_files(oldest, current_size, target)
         except Exception as e:
             logger.error(f"Janitor cycle failed: {e}")
 
@@ -324,6 +342,7 @@ class FilesystemBlobStorage(BlobStorage):
                 await self._run_janitor_once()
         except asyncio.CancelledError:
             logger.info("Blob janitor cancelled")
+            raise
         except Exception as e:
             logger.error(f"Blob janitor error: {e}")
 
@@ -355,7 +374,7 @@ class InMemoryBlobStorage(BlobStorage):
         """Generate a SHA256 hash key for the data"""
         return hashlib.sha256(data).hexdigest()
 
-    def store(self, data: bytes, content_type: str = "application/json", record_id: Optional[int] = None) -> str:
+    def store(self, data: bytes, content_type: str = JSON_CONTENT_TYPE, record_id: Optional[int] = None) -> str:
         """Store data and return SHA256 hash as key"""
         # content_type is accepted for API compatibility but not used here
         _ = content_type
@@ -373,7 +392,7 @@ class InMemoryBlobStorage(BlobStorage):
         current_size = sum(len(blob) for blob in self._storage.values())
         if current_size + len(data) > MAX_TOTAL_STORAGE_SIZE:
             logger.warning("Memory storage limit exceeded, cleaning up old blobs")
-            self._cleanup_for_space(len(data))
+            self._cleanup_for_space()
 
         self._storage[key] = data
         import time
@@ -425,7 +444,7 @@ class InMemoryBlobStorage(BlobStorage):
 
         return len(old_keys)
 
-    def _cleanup_for_space(self, needed_bytes: int):
+    def _cleanup_for_space(self, needed_bytes: int = 0):
         """Remove oldest blobs to make space for needed_bytes"""
 
         # Sort by timestamp (oldest first)
