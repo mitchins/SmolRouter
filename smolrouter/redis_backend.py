@@ -67,6 +67,17 @@ def _load_blob_body(blob_storage: Any, key: Any) -> Any:
     return blob_storage.retrieve(key)
 
 
+def _is_lua_fallback_enabled(lua_disabled: bool) -> bool:
+    return lua_disabled or is_fake_redis() or os.getenv("REDIS_DISABLE_LUA", "false").lower() in ("1", "true", "yes")
+
+
+def _should_use_increment_fallback(error: Exception, lua_disabled: bool) -> bool:
+    error_text = str(error).lower()
+    return ("unknown command" in error_text or "noscript" in error_text or lua_disabled) and (
+        is_fake_redis() or lua_disabled
+    )
+
+
 class LogRecord:
     """Object wrapper for Redis log data to provide attribute access"""
 
@@ -233,7 +244,7 @@ return {
 QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode(), usedforsecurity=False).hexdigest()
 
 
-async def get_redis():
+def get_redis():
     """Get the global Redis client"""
     return redis_client
 
@@ -265,7 +276,7 @@ class RedisRequestLog:
         timestamp: Optional[datetime] = None,
     ) -> str:
         """Create request log entry - returns request_id"""
-        client = await get_redis()
+        client = get_redis()
 
         # Generate request ID if not provided
         if request_id is None:
@@ -344,7 +355,7 @@ class RedisRequestLog:
         api_key_total: Optional[int] = None,
     ):
         """Update request with completion data"""
-        client = await get_redis()
+        client = get_redis()
 
         update_data = {
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -386,7 +397,7 @@ class RedisRequestLog:
     @staticmethod
     async def update_request_body_key(request_id: str, request_body_key: str) -> None:
         """Attach a stored request body blob key without marking the request complete."""
-        client = await get_redis()
+        client = get_redis()
         await client.hset(
             f"request:{request_id}",
             mapping={
@@ -398,14 +409,14 @@ class RedisRequestLog:
     @staticmethod
     async def get_by_id(request_id: str) -> Optional[LogRecord]:
         """Get request by ID"""
-        client = await get_redis()
+        client = get_redis()
         data = await client.hgetall(f"request:{request_id}")
         return LogRecord(dict(data)) if data else None
 
     @staticmethod
     async def get_recent(limit: int = 100) -> List[LogRecord]:
         """Get recent requests"""
-        client = await get_redis()
+        client = get_redis()
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
@@ -422,7 +433,7 @@ class RedisRequestLog:
     @staticmethod
     async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
         """Get requests for a specific source IP ordered by recency."""
-        client = await get_redis()
+        client = get_redis()
         request_ids = [str(request_id) for request_id in await client.smembers(f"requests:by_ip:{source_ip}")]
 
         requests = []
@@ -444,7 +455,7 @@ class RedisRequestLog:
     @staticmethod
     async def get_duplicate_request_ids(body_hash: str) -> List[str]:
         """Return all request IDs that share the given request body hash."""
-        client = await get_redis()
+        client = get_redis()
         set_key = f"requests:by_body:{body_hash}"
         try:
             ids = await client.smembers(set_key)
@@ -459,7 +470,7 @@ class RedisRequestLog:
 
         Intersects the duplicate set with the global recency index.
         """
-        client = await get_redis()
+        client = get_redis()
         set_key = f"requests:by_body:{body_hash}"
         try:
             dup_ids = {str(x) for x in await client.smembers(set_key)}
@@ -496,7 +507,7 @@ class RedisApiKeyQuota:
             logger.warning("Lua disabled (REDIS_DISABLE_LUA or FakeRedis detected) - using pipeline fallback")
             return
 
-        redis_client = await get_redis()
+        redis_client = get_redis()
 
         try:
             cls._script_sha = await redis_client.script_load(QUOTA_UPDATE_SCRIPT)
@@ -519,7 +530,7 @@ class RedisApiKeyQuota:
         model_name: str,
     ) -> tuple["QuotaRecord", bool]:
         """Get or create quota entry - returns (quota_record, was_created)"""
-        client = await get_redis()
+        client = get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
@@ -578,6 +589,37 @@ class RedisApiKeyQuota:
         """Atomically increment usage counters using Lua script with circuit breaker"""
         return await _safe_increment_usage(api_key, provider_id, model_name, request_count, token_count)
 
+    @staticmethod
+    async def _increment_usage_with_pipeline_fallback(
+        client: Any,
+        quota_key: str,
+        request_count: int,
+        token_count: int,
+        today: str,
+        timestamp: str,
+    ) -> tuple[int, int, str]:
+        logger.warning("⚠️  FakeRedis detected - using pipeline fallback for tests only")
+
+        last_reset = await client.hget(quota_key, "last_reset")
+        if last_reset != today:
+            await client.hset(
+                quota_key,
+                mapping={
+                    "requests_today": 0,
+                    "tokens_today": 0,
+                    "last_reset": today,
+                },
+            )
+            await client.hdel(quota_key, "quota_exhausted_at")
+
+        pipe = client.pipeline()
+        pipe.hincrby(quota_key, "requests_today", request_count)
+        pipe.hincrby(quota_key, "tokens_today", token_count)
+        pipe.hset(quota_key, "updated_at", timestamp)
+        results = await pipe.execute()
+
+        return results[0], results[1], today
+
     @classmethod
     async def _unsafe_increment_usage(
         cls,
@@ -593,11 +635,7 @@ class RedisApiKeyQuota:
         """
         if not cls._script_initialized or cls._script_sha is None:
             # In tests/FakeRedis or when explicitly disabled, use pipeline fallback
-            if (
-                cls._lua_disabled
-                or is_fake_redis()
-                or os.getenv("REDIS_DISABLE_LUA", "false").lower() in ("1", "true", "yes")
-            ):
+            if _is_lua_fallback_enabled(cls._lua_disabled):
                 # Defer to fallback path implemented below in the exception handler
                 pass
             else:
@@ -605,7 +643,7 @@ class RedisApiKeyQuota:
                 logger.critical(error_msg)
                 raise RuntimeError(error_msg)
 
-        client = await get_redis()
+        client = get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
@@ -628,38 +666,18 @@ class RedisApiKeyQuota:
                 timestamp,
             )
             # Parse result from Lua script
-            requests_today, tokens_today, last_reset = result
+            requests_today, tokens_today, _ = result
         except Exception as e:
             # FakeRedis/compat fallback ONLY (for tests or when Lua disabled)
-            if ("unknown command" in str(e).lower() or "noscript" in str(e).lower() or cls._lua_disabled) and (
-                is_fake_redis() or cls._lua_disabled
-            ):
-                logger.warning("⚠️  FakeRedis detected - using pipeline fallback for tests only")
-                # Check if we need daily reset
-                last_reset = await client.hget(quota_key, "last_reset")
-                if last_reset != today:
-                    # Reset daily counters
-                    await client.hset(
-                        quota_key,
-                        mapping={
-                            "requests_today": 0,
-                            "tokens_today": 0,
-                            "last_reset": today,
-                        },
-                    )
-                    # Clear quota exhaustion status on daily reset
-                    await client.hdel(quota_key, "quota_exhausted_at")
-
-                # Atomically increment counters using pipeline
-                pipe = client.pipeline()
-                pipe.hincrby(quota_key, "requests_today", request_count)
-                pipe.hincrby(quota_key, "tokens_today", token_count)
-                pipe.hset(quota_key, "updated_at", timestamp)
-                results = await pipe.execute()
-
-                requests_today = results[0]
-                tokens_today = results[1]
-                last_reset = today
+            if _should_use_increment_fallback(e, cls._lua_disabled):
+                requests_today, tokens_today, _ = await cls._increment_usage_with_pipeline_fallback(
+                    client,
+                    quota_key,
+                    request_count,
+                    token_count,
+                    today,
+                    timestamp,
+                )
             else:
                 # NO OTHER FALLBACKS - if script fails in production, CRASH LOUDLY
                 logger.critical(f"❌ FATAL: Lua script execution failed: {e}")
@@ -678,7 +696,7 @@ class RedisApiKeyQuota:
     @staticmethod
     async def get_provider_usage(provider_id: str) -> List["QuotaRecord"]:
         """Get all quota entries for a provider"""
-        client = await get_redis()
+        client = get_redis()
 
         quota_keys = await client.smembers(f"quotas:by_provider:{provider_id}")
 
@@ -707,7 +725,7 @@ class RedisApiKeyQuota:
         Returns:
             Number of quota entries marked as invalid
         """
-        client = await get_redis()
+        client = get_redis()
 
         # Get all quota keys for this key hash
         quota_keys = await client.smembers(f"quotas:by_key:{api_key_hash}")
@@ -736,7 +754,7 @@ class RedisApiKeyQuota:
             model_name: The model name
             error: Optional error message to store
         """
-        client = await get_redis()
+        client = get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
@@ -766,7 +784,7 @@ class RedisApiKeyQuota:
             model_name: The model name
             error: Error message to store
         """
-        client = await get_redis()
+        client = get_redis()
 
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
@@ -835,7 +853,7 @@ async def init_redis_db():
     """Initialize Redis database connection"""
     from .redis_config import redis_startup_check
 
-    client = await get_redis()
+    client = get_redis()
 
     # Use the centralized startup check
     await redis_startup_check(client, is_fake_redis())
