@@ -313,144 +313,131 @@
             const container = document.getElementById('providers-content');
 
             if (!data || !data.providers || Object.keys(data.providers).length === 0) {
-                container.innerHTML = renderNoGoogleProviders();
+                container.innerHTML = `
+                    <div class="no-providers">
+                        <span class="material-icons" style="font-size: 3rem; color: #ccc;">smart_toy</span>
+                        <h3>No Google GenAI providers configured</h3>
+                        <p>Configure Google GenAI providers in your routes.yaml to see status here.</p>
+                    </div>
+                `;
                 return;
             }
 
-            container.innerHTML = Object.entries(data.providers)
-                .map(([providerName, providerData]) => renderProviderBlock(providerName, providerData))
-                .join('');
-        }
+            let html = '';
 
-        function renderNoGoogleProviders() {
-            return `
-                <div class="no-providers">
-                    <span class="material-icons" style="font-size: 3rem; color: #ccc;">smart_toy</span>
-                    <h3>No Google GenAI providers configured</h3>
-                    <p>Configure Google GenAI providers in your routes.yaml to see status here.</p>
-                </div>
-            `;
-        }
+            for (const [providerName, providerData] of Object.entries(data.providers)) {
+                const totalKeys = Object.keys(providerData).filter(key => key !== 'summary' && typeof providerData[key] === 'object').length;
+                const availableKeys = Object.values(providerData)
+                    .filter(keyData => typeof keyData === 'object' && keyData.models !== undefined)
+                    .filter(keyData => {
+                        // Count keys as available if:
+                        // 1. They have no models yet (unused keys are assumed available)
+                        // 2. OR they have at least one model with status 'available'
+                        const models = keyData.models || {};
+                        const modelCount = Object.keys(models).length;
+                        if (modelCount === 0) {
+                            return true; // Unused keys are available
+                        }
+                        return Object.values(models).some(model => model.status === 'available');
+                    }).length;
 
-        function getGoogleProviderKeyEntries(providerData) {
-            return Object.values(providerData).filter(keyData => typeof keyData === 'object' && keyData.models !== undefined);
-        }
-
-        function countAvailableGoogleKeys(providerData) {
-            return getGoogleProviderKeyEntries(providerData)
-                .filter(keyData => {
-                    const models = keyData.models || {};
-                    const modelCount = Object.keys(models).length;
-                    if (modelCount === 0) {
-                        return true;
-                    }
-                    return Object.values(models).some(model => model.status === 'available');
-                }).length;
-        }
-
-        function collectGoogleProviderModels(providerData) {
-            const allModels = new Set();
-            getGoogleProviderKeyEntries(providerData).forEach(keyData => {
-                Object.keys(keyData.models || {}).forEach(model => allModels.add(model));
-            });
-            return Array.from(allModels).sort();
-        }
-
-        function aggregateGoogleModelStats(providerData, model) {
-            return Object.values(providerData).reduce((stats, keyData) => {
-                if (typeof keyData !== 'object' || !keyData.models || !keyData.models[model]) {
-                    return stats;
-                }
-
-                const modelData = keyData.models[model];
-                stats.totalRequests += modelData.requests_today;
-                stats.totalTokens += modelData.tokens_today;
-
-                if (modelData.status === 'invalid') {
-                    stats.invalidCount++;
-                } else if (modelData.quota_exhausted) {
-                    stats.exhaustedCount++;
-                } else {
-                    stats.availableCount++;
-                }
-
-                if (modelData.last_request) {
-                    const lastRequest = new Date(modelData.last_request);
-                    if (!stats.lastActivity || lastRequest > stats.lastActivity) {
-                        stats.lastActivity = lastRequest;
-                    }
-                }
-
-                return stats;
-            }, {
-                totalRequests: 0,
-                totalTokens: 0,
-                availableCount: 0,
-                exhaustedCount: 0,
-                invalidCount: 0,
-                lastActivity: null,
-            });
-        }
-
-        function renderGoogleModelRow(model, providerData, totalKeys) {
-            const stats = aggregateGoogleModelStats(providerData, model);
-            const firstProviderKey = Object.keys(providerData)[0];
-            const dailyLimit = providerData[firstProviderKey]?.daily_limit_per_model || 5;
-            const usagePercentage = totalKeys > 0 ? (stats.totalRequests / (totalKeys * dailyLimit)) * 100 : 0;
-            const lastActivityStr = stats.lastActivity ? stats.lastActivity.toLocaleString() : 'No activity';
-
-            return `
-                <tr>
-                    <td><div class="model-name">${model}</div></td>
-                    <td>
-                        <div class="key-status">
-                            <span class="key-indicator key-available">${stats.availableCount} available</span>
-                            ${stats.exhaustedCount > 0 ? `<span class="key-indicator key-exhausted">${stats.exhaustedCount} exhausted</span>` : ''}
-                            ${stats.invalidCount > 0 ? `<span class="key-indicator key-invalid">${stats.invalidCount} invalid</span>` : ''}
-                        </div>
-                    </td>
-                    <td>
-                        <div style="display: flex; align-items: center;">
-                            <div class="usage-bar">
-                                <div class="usage-fill" style="width: ${Math.min(usagePercentage, 100)}%"></div>
+                html += `
+                    <div class="provider-block">
+                        <div class="provider-header">
+                            <div class="provider-name">${providerName}</div>
+                            <div class="provider-summary">
+                                ${availableKeys}/${totalKeys} keys available
                             </div>
-                            <span class="usage-text">${stats.totalRequests} reqs, ${stats.totalTokens} tokens</span>
                         </div>
-                    </td>
-                    <td>${lastActivityStr}</td>
-                </tr>
-            `;
-        }
 
-        function renderProviderBlock(providerName, providerData) {
-            const totalKeys = getGoogleProviderKeyEntries(providerData).length;
-            const availableKeys = countAvailableGoogleKeys(providerData);
-            const modelRows = collectGoogleProviderModels(providerData)
-                .map(model => renderGoogleModelRow(model, providerData, totalKeys))
-                .join('');
+                        <table class="models-table">
+                            <thead>
+                                <tr>
+                                    <th>Model</th>
+                                    <th>Key Status</th>
+                                    <th>Usage Today</th>
+                                    <th>Last Activity</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
 
-            return `
-                <div class="provider-block">
-                    <div class="provider-header">
-                        <div class="provider-name">${providerName}</div>
-                        <div class="provider-summary">
-                            ${availableKeys}/${totalKeys} keys available
-                        </div>
+                // Collect all unique models across all keys
+                const allModels = new Set();
+                for (const keyData of Object.values(providerData)) {
+                    if (typeof keyData === 'object' && keyData.models) {
+                        Object.keys(keyData.models).forEach(model => allModels.add(model));
+                    }
+                }
+
+                // Render each model
+                for (const model of Array.from(allModels).sort()) {
+                    const modelStats = [];
+                    let totalRequests = 0;
+                    let totalTokens = 0;
+                    let availableCount = 0;
+                    let exhaustedCount = 0;
+                    let invalidCount = 0;
+                    let lastActivity = null;
+
+                    // Aggregate stats across all keys for this model
+                    for (const [keyName, keyData] of Object.entries(providerData)) {
+                        if (typeof keyData === 'object' && keyData.models && keyData.models[model]) {
+                            const modelData = keyData.models[model];
+                            totalRequests += modelData.requests_today;
+                            totalTokens += modelData.tokens_today;
+
+                            if (modelData.status === 'invalid') {
+                                invalidCount++;
+                            } else if (modelData.quota_exhausted) {
+                                exhaustedCount++;
+                            } else {
+                                availableCount++;
+                            }
+
+                            if (modelData.last_request) {
+                                const lastReq = new Date(modelData.last_request);
+                                if (!lastActivity || lastReq > lastActivity) {
+                                    lastActivity = lastReq;
+                                }
+                            }
+                        }
+                    }
+
+                    const usagePercentage = totalKeys > 0 ? (totalRequests / (totalKeys * (providerData[Object.keys(providerData)[0]]?.daily_limit_per_model || 5))) * 100 : 0;
+                    const lastActivityStr = lastActivity ? lastActivity.toLocaleString() : 'No activity';
+
+                    html += `
+                        <tr>
+                            <td><div class="model-name">${model}</div></td>
+                            <td>
+                                <div class="key-status">
+                                    <span class="key-indicator key-available">${availableCount} available</span>
+                                    ${exhaustedCount > 0 ? `<span class="key-indicator key-exhausted">${exhaustedCount} exhausted</span>` : ''}
+                                    ${invalidCount > 0 ? `<span class="key-indicator key-invalid">${invalidCount} invalid</span>` : ''}
+                                </div>
+                            </td>
+                            <td>
+                                <div style="display: flex; align-items: center;">
+                                    <div class="usage-bar">
+                                        <div class="usage-fill" style="width: ${Math.min(usagePercentage, 100)}%"></div>
+                                    </div>
+                                    <span class="usage-text">${totalRequests} reqs, ${totalTokens} tokens</span>
+                                </div>
+                            </td>
+                            <td>${lastActivityStr}</td>
+                        </tr>
+                    `;
+                }
+
+                html += `
+                            </tbody>
+                        </table>
                     </div>
+                `;
+            }
 
-                    <table class="models-table">
-                        <thead>
-                            <tr>
-                                <th>Model</th>
-                                <th>Key Status</th>
-                                <th>Usage Today</th>
-                                <th>Last Activity</th>
-                            </tr>
-                        </thead>
-                        <tbody>${modelRows}</tbody>
-                    </table>
-                </div>
-            `;
+            container.innerHTML = html;
         }
 
         async function refreshData() {

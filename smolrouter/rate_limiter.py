@@ -89,12 +89,17 @@ class GoogleGenAIRequestFunnel:
             self._active_count += 1
             self._total_requests += 1
 
-    def release_slot(self) -> None:
-        """Release concurrent slot when request completes"""
+    async def release_slot(self) -> None:
+        """Release concurrent slot when request completes."""
         if not self.enabled:
             return
 
-        self._active_count -= 1
+        async with self._lock:
+            if self._active_count <= 0:
+                logger.warning("Google GenAI rate limiter release_slot called with no active requests")
+                return
+            self._active_count -= 1
+
         self._semaphore.release()
 
     async def _wait_for_window_slot(self) -> None:

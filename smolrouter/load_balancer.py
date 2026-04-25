@@ -124,7 +124,15 @@ class ModelLoadBalancer:
         dash_match = re.match(r"^(.+)-(\d+)$", model_id)
         if dash_match:
             base = dash_match.group(1)
-            num = int(dash_match.group(2))
+            raw_suffix = dash_match.group(2)
+            num = int(raw_suffix)
+
+            # Treat obvious version/date suffixes as part of model identity, not an instance ID.
+            if len(raw_suffix) > 1 and raw_suffix.startswith("0"):
+                return model_id, 0
+            if num > 99:
+                return model_id, 0
+
             # Only treat as instance if it's not part of the model name
             # (e.g., gpt-4 should not become gpt with instance 4)
             if not base.endswith(("gpt", "llama", "mistral", "qwen")):

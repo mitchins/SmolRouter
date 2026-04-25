@@ -5,9 +5,40 @@ Pytest configuration for OpenAI Model Rerouter tests
 import pytest
 import os
 import asyncio
+import threading
 from unittest.mock import patch
 
 # Use Redis backend for tests - FakeRedis will handle the testing automatically
+
+
+def _run_async_fixture_step(coro):
+    """Run async fixture setup/teardown safely from sync fixtures."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result = {"value": None, "error": None}
+
+    def _runner():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result["value"] = loop.run_until_complete(coro)
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+
+    if result["error"]:
+        raise result["error"]
+
+    return result["value"]
 
 
 @pytest.fixture(autouse=True)
@@ -29,26 +60,17 @@ def fresh_redis_for_tests():
 
         warnings.warn("Tests should use FakeRedis, but real Redis is configured")
 
-    # Flush all data to start fresh
     try:
-        import asyncio
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're in an async context, create task
-                loop.create_task(redis_client.flushall())
-            else:
-                # Sync context, run directly
-                asyncio.run(redis_client.flushall())
-        except RuntimeError:
-            # No event loop, that's fine for sync tests
-            pass
+        _run_async_fixture_step(redis_client.flushall())
     except Exception:
-        # Reset failed, that's okay for tests
         pass
 
     yield
+
+    try:
+        _run_async_fixture_step(redis_client.flushall())
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -81,23 +103,13 @@ def isolated_db():
         await redis_client.flushall()  # Clear any existing data
         return redis_client
 
-    # Run the async initialization
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We're already in an async context
-            client = loop.run_until_complete(init_redis())
-        else:
-            client = asyncio.run(init_redis())
-    except RuntimeError:
-        # No event loop, create one
-        client = asyncio.run(init_redis())
+    client = _run_async_fixture_step(init_redis())
 
     yield client
 
     # Cleanup - flush all data
     try:
-        asyncio.run(client.flushall())
+        _run_async_fixture_step(client.flushall())
     except Exception:
         pass  # Cleanup failed, that's okay
 
@@ -138,12 +150,7 @@ def init_runtime_components(tmp_path_factory):
         # Initialize blob storage (starts janitor but harmless in tests)
         init_blob_storage()
 
-    try:
-        asyncio.run(_init())
-    except RuntimeError:
-        # If there's already an event loop (e.g., in CI plugins), create a new task
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(_init())
+    _run_async_fixture_step(_init())
 
 
 # Automatically use isolated database for logging tests

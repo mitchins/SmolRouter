@@ -8,6 +8,7 @@ proxy configurations, ensuring consistent behavior across all providers.
 import logging
 import httpx
 from typing import Optional, Dict
+from urllib.parse import urlsplit, urlunsplit
 from .interfaces import ProxyConfig
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,20 @@ class HttpClientFactory:
 
     def __init__(self):
         self._clients: Dict[str, httpx.AsyncClient] = {}
+
+    @staticmethod
+    def _mask_proxy_url(proxy_url: str) -> str:
+        """Mask proxy credentials before logging."""
+        try:
+            parsed = urlsplit(proxy_url)
+            if "@" not in parsed.netloc:
+                return proxy_url
+
+            _, host_info = parsed.netloc.rsplit("@", 1)
+            masked_netloc = f"***:***@{host_info}"
+            return urlunsplit((parsed.scheme, masked_netloc, parsed.path, parsed.query, parsed.fragment))
+        except Exception:
+            return "***"
 
     def create_client(
         self, timeout: float = 30.0, proxy_config: Optional[ProxyConfig] = None, **kwargs
@@ -41,7 +56,7 @@ class HttpClientFactory:
             if proxy_url:
                 # httpx uses 'proxy' parameter and takes a single proxy URL
                 client_kwargs["proxy"] = proxy_url
-                logger.info(f"Creating HTTP client with proxy: {proxy_url}")
+                logger.info(f"Creating HTTP client with proxy: {self._mask_proxy_url(proxy_url)}")
 
         return httpx.AsyncClient(**client_kwargs)
 

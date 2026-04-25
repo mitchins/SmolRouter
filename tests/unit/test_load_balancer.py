@@ -37,6 +37,7 @@ class TestModelLoadBalancer:
 
         # Should NOT parse these as instances (common model names)
         assert load_balancer.parse_model_name("gpt-4") == ("gpt-4", 0)
+        assert load_balancer.parse_model_name("gpt-4-0613") == ("gpt-4-0613", 0)
         assert load_balancer.parse_model_name("llama-7b") == ("llama-7b", 0)
         assert load_balancer.parse_model_name("mistral-7b") == ("mistral-7b", 0)
         assert load_balancer.parse_model_name("qwen-2.5") == ("qwen-2.5", 0)

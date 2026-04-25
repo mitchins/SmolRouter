@@ -10,6 +10,7 @@ from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
 from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
+from smolrouter.container import SmolRouterContainer
 from smolrouter.providers import OpenAIProvider, ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
 from smolrouter.strategies import SimpleModelStrategy
 
@@ -264,6 +265,33 @@ def test_provider_factory_converts_proxy_configuration_shapes():
     assert isinstance(processed["per_model_proxy"]["gemma-3-4b-it"], ProxyConfig)
     assert processed["proxy_pool"][0] is None
     assert isinstance(processed["proxy_pool"][1], ProxyConfig)
+
+@pytest.mark.asyncio
+async def test_container_streaming_route_returns_sse_when_mediator_is_non_streaming():
+    container = SmolRouterContainer()
+    container._initialized = True
+    container._mediator = Mock()
+    container._mediator.route_request = AsyncMock(
+        return_value=({"choices": [{"message": {"content": "hello"}}]}, 200, "provider:test", None)
+    )
+
+    stream_response, status_code, upstream, _ = await container.route_streaming_request(
+        "127.0.0.1",
+        "gpt-4o",
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        "/v1/chat/completions",
+        {},
+        30.0,
+    )
+
+    body = b""
+    async for chunk in stream_response.body_iterator:
+        body += chunk
+
+    assert status_code == 200
+    assert upstream == "provider:test"
+    assert b"data: [DONE]" in body
+    assert b"hello" in body
 
 
 @pytest.mark.asyncio
