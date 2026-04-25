@@ -16,138 +16,87 @@ from redis.exceptions import ConnectionError, TimeoutError
 from .redis_config import redis_client, is_fake_redis, get_redis_status
 
 
+UTC_OFFSET_SUFFIX = "+00:00"
+REDIS_REQUESTS_BY_TIME_KEY = "requests:by_time"
+REDIS_EMPTY_VALUES = ("", "None", None)
+REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
+
+
+def _normalize_int(value: Any, default: Optional[int] = None, none_values: tuple[Any, ...] = REDIS_EMPTY_VALUES) -> Optional[int]:
+    if value in none_values:
+        return default
+
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def _normalize_status_code(value: Any) -> str | int | None:
+    if value == "pending":
+        return "pending"
+
+    return _normalize_int(value, default=None, none_values=REDIS_STATUS_NONE_VALUES)
+
+
+def _normalize_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).lower() in ("1", "true", "yes")
+
+
+def _normalize_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+
+    try:
+        normalized = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", UTC_OFFSET_SUFFIX))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    if normalized.tzinfo is None:
+        return normalized.replace(tzinfo=timezone.utc)
+    return normalized
+
+
+def _load_blob_body(blob_storage: Any, key: Any) -> Any:
+    if not key:
+        return None
+    return blob_storage.retrieve(key)
+
+
 class LogRecord:
     """Object wrapper for Redis log data to provide attribute access"""
 
     def __init__(self, data: Dict[str, Any]):
-        from datetime import datetime, timezone
-
         for key, value in data.items():
             setattr(self, key, value)
 
-        # Convert string values to proper types (Redis stores everything as strings)
-        # These conversions are critical for template comparisons
-        if hasattr(self, "duration_ms") and self.duration_ms:
-            try:
-                self.duration_ms = int(self.duration_ms) if self.duration_ms not in ("", "None", None) else None
-            except (ValueError, TypeError):
-                self.duration_ms = None
-        else:
-            self.duration_ms = None
+        self.duration_ms = _normalize_int(getattr(self, "duration_ms", None))
+        self.status_code = _normalize_status_code(getattr(self, "status_code", None))
+        self.request_size = _normalize_int(getattr(self, "request_size", None), default=0) or 0
+        self.response_size = _normalize_int(getattr(self, "response_size", None), default=0) or 0
+        self.prompt_tokens = _normalize_int(getattr(self, "prompt_tokens", None))
+        self.completion_tokens = _normalize_int(getattr(self, "completion_tokens", None))
+        self.total_tokens = _normalize_int(getattr(self, "total_tokens", None))
 
-        if hasattr(self, "status_code") and self.status_code:
-            if self.status_code == "pending":
-                self.status_code = "pending"  # Keep as string for pending status
-            else:
-                try:
-                    self.status_code = (
-                        int(self.status_code) if self.status_code not in ("", "0", "None", None) else None
-                    )
-                except (ValueError, TypeError):
-                    self.status_code = None
-        else:
-            self.status_code = None
-
-        if hasattr(self, "request_size") and self.request_size:
-            try:
-                self.request_size = int(self.request_size) if self.request_size not in ("", "None", None) else 0
-            except (ValueError, TypeError):
-                self.request_size = 0
-        else:
-            self.request_size = 0
-
-        if hasattr(self, "response_size") and self.response_size:
-            try:
-                self.response_size = int(self.response_size) if self.response_size not in ("", "None", None) else 0
-            except (ValueError, TypeError):
-                self.response_size = 0
-        else:
-            self.response_size = 0
-
-        if hasattr(self, "prompt_tokens") and self.prompt_tokens:
-            try:
-                self.prompt_tokens = int(self.prompt_tokens) if self.prompt_tokens not in ("", "None", None) else None
-            except (ValueError, TypeError):
-                self.prompt_tokens = None
-
-        if hasattr(self, "completion_tokens") and self.completion_tokens:
-            try:
-                self.completion_tokens = (
-                    int(self.completion_tokens) if self.completion_tokens not in ("", "None", None) else None
-                )
-            except (ValueError, TypeError):
-                self.completion_tokens = None
-
-        if hasattr(self, "total_tokens") and self.total_tokens:
-            try:
-                self.total_tokens = int(self.total_tokens) if self.total_tokens not in ("", "None", None) else None
-            except (ValueError, TypeError):
-                self.total_tokens = None
-
-        # Add compatibility attributes that app.py expects
         self.id = getattr(self, "request_id", None)
 
-        # Parse timestamp from created_at if available - make timezone-aware
-        if hasattr(self, "created_at") and self.created_at:
-            try:
-                self.timestamp = datetime.fromisoformat(self.created_at.replace("Z", "+00:00"))
-                # Ensure it's timezone-aware
-                if self.timestamp.tzinfo is None:
-                    self.timestamp = self.timestamp.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                self.timestamp = datetime.now(timezone.utc)
-        else:
-            self.timestamp = datetime.now(timezone.utc)
-
-        # Parse completed_at if available - make timezone-aware
-        if hasattr(self, "completed_at") and self.completed_at and self.completed_at != "":
-            try:
-                self.completed_at = datetime.fromisoformat(self.completed_at.replace("Z", "+00:00"))
-                # Ensure it's timezone-aware
-                if self.completed_at.tzinfo is None:
-                    self.completed_at = self.completed_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                self.completed_at = None
-        else:
-            self.completed_at = None
-
-        # Ensure other expected attributes exist
-        if not hasattr(self, "upstream_url"):
-            self.upstream_url = ""
-        if not hasattr(self, "error_message"):
-            self.error_message = None
-
-        # Normalize duplicate detection fields
-        if hasattr(self, "duplicate_count"):
-            try:
-                self.duplicate_count = int(self.duplicate_count)
-            except Exception:
-                self.duplicate_count = 0
-        else:
-            self.duplicate_count = 0
-
-        if hasattr(self, "is_duplicate"):
-            try:
-                self.is_duplicate = str(self.is_duplicate).lower() in ("1", "true", "yes")
-            except Exception:
-                self.is_duplicate = False
-        else:
-            self.is_duplicate = False
+        self.timestamp = _normalize_datetime(getattr(self, "created_at", None)) or datetime.now(timezone.utc)
+        self.completed_at = _normalize_datetime(getattr(self, "completed_at", None))
+        self.upstream_url = getattr(self, "upstream_url", "")
+        self.error_message = getattr(self, "error_message", None)
+        self.duplicate_count = _normalize_int(getattr(self, "duplicate_count", None), default=0) or 0
+        self.is_duplicate = _normalize_bool(getattr(self, "is_duplicate", False), default=False)
 
         # Retrieve request/response bodies from blob storage if keys are present
         from .storage import get_blob_storage
 
         blob_storage = get_blob_storage()
-
-        if hasattr(self, "request_body_key") and self.request_body_key:
-            self.request_body = blob_storage.retrieve(self.request_body_key)
-        else:
-            self.request_body = None
-
-        if hasattr(self, "response_body_key") and self.response_body_key:
-            self.response_body = blob_storage.retrieve(self.response_body_key)
-        else:
-            self.response_body = None
+        self.request_body = _load_blob_body(blob_storage, getattr(self, "request_body_key", None))
+        self.response_body = _load_blob_body(blob_storage, getattr(self, "response_body_key", None))
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
@@ -162,63 +111,19 @@ class QuotaRecord:
     """Object wrapper for Redis quota data to provide attribute access"""
 
     def __init__(self, data: Dict[str, Any]):
-        from datetime import datetime, timezone
-
         for key, value in data.items():
             setattr(self, key, value)
 
-        # Ensure required attributes exist with defaults for Google GenAI provider
-        # Also ensure they're the right type (Redis returns strings)
-        self.requests_today = int(getattr(self, "requests_today", 0))
-        self.tokens_today = int(getattr(self, "tokens_today", 0))
-        self.error_count = int(getattr(self, "error_count", 0))
-
-        # Ensure string attributes exist
-        if not hasattr(self, "last_error"):
-            self.last_error = None
-        if not hasattr(self, "last_reset_date"):
-            self.last_reset_date = None
-        if not hasattr(self, "api_key_hash"):
-            self.api_key_hash = data.get("key_hash", "")
-        if not hasattr(self, "model_name"):
-            self.model_name = data.get("model_name", "")
-
-        # Handle boolean conversion from Redis string
-        if hasattr(self, "invalid_key"):
-            if isinstance(self.invalid_key, str):
-                self.invalid_key = self.invalid_key.lower() == "true"
-            elif isinstance(self.invalid_key, bool):
-                pass  # Already boolean
-            else:
-                self.invalid_key = False
-        else:
-            self.invalid_key = False
-
-        # Parse updated_at timestamp if available - make timezone-aware
-        if hasattr(self, "updated_at") and self.updated_at:
-            try:
-                if isinstance(self.updated_at, str):
-                    self.updated_at = datetime.fromisoformat(self.updated_at.replace("Z", "+00:00"))
-                    if self.updated_at.tzinfo is None:
-                        self.updated_at = self.updated_at.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError, AttributeError):
-                self.updated_at = None
-        else:
-            self.updated_at = None
-
-        # Parse quota_exhausted_at timestamp if available - make timezone-aware
-        if hasattr(self, "quota_exhausted_at") and self.quota_exhausted_at:
-            try:
-                if isinstance(self.quota_exhausted_at, str) and self.quota_exhausted_at != "":
-                    self.quota_exhausted_at = datetime.fromisoformat(self.quota_exhausted_at.replace("Z", "+00:00"))
-                    if self.quota_exhausted_at.tzinfo is None:
-                        self.quota_exhausted_at = self.quota_exhausted_at.replace(tzinfo=timezone.utc)
-                elif not isinstance(self.quota_exhausted_at, datetime):
-                    self.quota_exhausted_at = None
-            except (ValueError, TypeError, AttributeError):
-                self.quota_exhausted_at = None
-        else:
-            self.quota_exhausted_at = None
+        self.requests_today = _normalize_int(getattr(self, "requests_today", 0), default=0) or 0
+        self.tokens_today = _normalize_int(getattr(self, "tokens_today", 0), default=0) or 0
+        self.error_count = _normalize_int(getattr(self, "error_count", 0), default=0) or 0
+        self.last_error = getattr(self, "last_error", None)
+        self.last_reset_date = getattr(self, "last_reset_date", None)
+        self.api_key_hash = getattr(self, "api_key_hash", data.get("key_hash", ""))
+        self.model_name = getattr(self, "model_name", data.get("model_name", ""))
+        self.invalid_key = _normalize_bool(getattr(self, "invalid_key", False), default=False)
+        self.updated_at = _normalize_datetime(getattr(self, "updated_at", None))
+        self.quota_exhausted_at = _normalize_datetime(getattr(self, "quota_exhausted_at", None))
 
     def mark_request_success(self, tokens: int = 0):
         """Update local object state after successful request
@@ -235,10 +140,10 @@ class QuotaRecord:
         WARNING: This ONLY updates the in-memory object. Persistence must be handled separately.
         """
         self.error_count = getattr(self, "error_count", 0) + 1
+        if error:
+            self.last_error = error
         if quota_exhausted:
-            from datetime import datetime, timezone
-
-            self.quota_exhausted_at = datetime.now(timezone.utc).isoformat()
+            self.quota_exhausted_at = datetime.now(timezone.utc)
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
@@ -393,7 +298,7 @@ class RedisRequestLog:
 
         # Add to request index for queries
         ts = (timestamp or datetime.now(timezone.utc)).timestamp()
-        await client.zadd("requests:by_time", {request_id: ts})
+        await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: ts})
 
         # Add to IP index
         await client.sadd(f"requests:by_ip:{source_ip}", request_id)
@@ -503,7 +408,7 @@ class RedisRequestLog:
         client = await get_redis()
 
         # Get recent request IDs from sorted set
-        request_ids = await client.zrevrange("requests:by_time", 0, limit - 1)
+        request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
 
         # Get request data
         requests = []
@@ -557,10 +462,10 @@ class RedisRequestLog:
         client = await get_redis()
         set_key = f"requests:by_body:{body_hash}"
         try:
-            dup_ids = set(str(x) for x in await client.smembers(set_key))
+            dup_ids = {str(x) for x in await client.smembers(set_key)}
             if not dup_ids:
                 return []
-            recent_ids = [str(x) for x in await client.zrevrange("requests:by_time", 0, max_scan - 1)]
+            recent_ids = [str(x) for x in await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, max_scan - 1)]
             ordered = [rid for rid in recent_ids if rid in dup_ids]
             return ordered[:limit]
         except Exception:
