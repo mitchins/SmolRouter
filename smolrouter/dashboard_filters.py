@@ -125,23 +125,21 @@ def matches_dashboard_filter(log: object, query: DashboardFilterQuery) -> bool:
     return all(any(term.casefold() in value for value in searchable_values) for term in query.text_terms)
 
 
+def _field_value_pair(primary: object | None, secondary: object | None = None) -> tuple[str, str]:
+    return (_stringify(primary), _stringify(secondary))
+
+
 def _field_values(log: object, field: str) -> tuple[str, ...]:
     if field == "host":
-        return (_stringify(getattr(log, "source_ip", None)),)
+        return _field_value_pair(getattr(log, "source_ip", None))
 
     if field == "provider":
-        return (
-            _stringify(getattr(log, "provider_id", None)),
-            _stringify(getattr(log, "service_type", None)),
-        )
+        return _field_value_pair(getattr(log, "provider_id", None), getattr(log, "service_type", None))
 
     if field == "model":
-        return (
-            _stringify(getattr(log, "mapped_model", None)),
-            _stringify(getattr(log, "original_model", None)),
-        )
+        return _field_value_pair(getattr(log, "mapped_model", None), getattr(log, "original_model", None))
 
-    return ()
+    return _field_value_pair(None, None)
 
 
 def _searchable_values(log: object) -> tuple[str, ...]:
