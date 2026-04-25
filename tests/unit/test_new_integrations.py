@@ -1,10 +1,14 @@
 """Minimal regression tests for Google GenAI, Anthropic, and Z.AI integrations"""
 
 import asyncio
+import json
 import httpx
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, mock_open, patch
+
+from google.api_core.exceptions import InvalidArgument, PermissionDenied, ResourceExhausted
 
 from smolrouter.access_control import NoAccessControl
 from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
@@ -17,8 +21,37 @@ from smolrouter.google_genai_provider import (
 )
 from smolrouter.anthropic_provider import AnthropicProvider, AnthropicConfig
 from smolrouter.container import SmolRouterContainer
+from smolrouter.dummy_provider import DummyConfig, DummyProvider
+from smolrouter.redis_backend import QuotaRecord
 from smolrouter.providers import OpenAIProvider, ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
 from smolrouter.strategies import SimpleModelStrategy
+
+
+def _make_google_provider(**kwargs):
+    config_kwargs = {"name": "test-google", "type": "google-genai", "enabled": True}
+    config_kwargs.update(kwargs)
+    config_kwargs.setdefault("api_keys", ["test-key"])
+    config = GoogleGenAIConfig(**config_kwargs)
+    return GoogleGenAIProvider(config)
+
+
+def _make_dummy_provider(**kwargs):
+    config_kwargs = {"name": "test-dummy", "type": "dummy", "enabled": True, "url": "dummy://localhost/test"}
+    config_kwargs.update(kwargs)
+    config = DummyConfig(**config_kwargs)
+    return DummyProvider(config)
+
+
+def _make_anthropic_provider(**kwargs):
+    config = AnthropicConfig(
+        name="test-anthropic",
+        type="anthropic",
+        enabled=True,
+        url="https://api.anthropic.com",
+        api_keys=["sk-ant-test"],
+        **kwargs,
+    )
+    return AnthropicProvider(config)
 
 
 def test_google_genai_provider_creation():
@@ -80,13 +113,679 @@ def test_google_genai_proxy_pool_skips_unhealthy_entries():
     assert selected_proxy.to_httpx_proxy() == "http://127.0.0.1:8889"
 
 
-def test_google_genai_message_conversion_prefixes_system_content():
-    config = GoogleGenAIConfig(name="test-google", type="google-genai", enabled=True, api_keys=["test-key"])
-    provider = GoogleGenAIProvider(config)
+@pytest.mark.parametrize(
+    "model_name, expected_limit",
+    [
+        ("gemma-3-4b-it", 14400),
+        ("gemini-3.0-pro", 20),
+        ("gemini-2.5-flash-lite", 1000),
+        ("gemini-2.5-flash", 20),
+        ("gemini-2.0-flash-exp", 5),
+        ("gemini-2.0-flash", 20),
+        ("gemini-2.5-pro", 20),
+        ("gemini-1.5-pro", 50),
+        ("gemini-1.5-flash", 1000),
+        ("preview-model", 5),
+        ("custom-model", 321),
+    ],
+)
+def test_google_genai_model_daily_limits_cover_rules(model_name, expected_limit):
+    provider = _make_google_provider(max_requests_per_day=321)
 
-    converted = provider._convert_openai_message_to_genai_content({"role": "system", "content": "Keep this."})
+    assert provider.get_model_daily_limit(model_name) == expected_limit
 
-    assert converted == {"role": "user", "parts": [{"text": "System: Keep this."}]}
+
+def test_google_genai_message_and_response_conversion_cover_text_and_images():
+    provider = _make_google_provider()
+
+    openai_request = {
+        "model": "gemini-2.0-flash",
+        "messages": [
+            {"role": "system", "content": "Keep this."},
+            {"role": "assistant", "content": "Previous answer."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Look here"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+                ],
+            },
+        ],
+        "temperature": 0.5,
+        "max_tokens": 42,
+        "top_p": 0.9,
+    }
+
+    model_name, genai_request = provider._convert_openai_to_genai_request(openai_request)
+    assert model_name == "gemini-2.0-flash"
+    assert genai_request["generation_config"] == {"temperature": 0.5, "max_output_tokens": 42, "top_p": 0.9}
+    assert genai_request["contents"][0] == {"role": "user", "parts": [{"text": "System: Keep this."}]}
+    assert genai_request["contents"][1] == {"role": "model", "parts": [{"text": "Previous answer."}]}
+    assert genai_request["contents"][2]["parts"][0] == {"text": "Look here"}
+    assert genai_request["contents"][2]["parts"][1] == {
+        "inline_data": {"mime_type": "image/png", "data": "QUJD"}
+    }
+
+    genai_response = SimpleNamespace(
+        text=None,
+        candidates=[
+            SimpleNamespace(content=SimpleNamespace(parts=[SimpleNamespace(text="Hello "), SimpleNamespace(text="world")]))
+        ],
+        usage_metadata=SimpleNamespace(prompt_token_count=3, candidates_token_count=4, total_token_count=7),
+    )
+
+    openai_response = provider._convert_genai_to_openai_response(genai_response, "original-model")
+    assert openai_response["model"] == "original-model"
+    assert openai_response["choices"][0]["message"]["content"] == "Hello world"
+    assert openai_response["usage"] == {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+
+
+@pytest.mark.asyncio
+async def test_google_genai_health_check_succeeds_after_initial_failure():
+    provider = _make_google_provider(api_keys=["bad-key", "good-key"])
+
+    failing_client = Mock()
+    failing_client.models = Mock()
+    failing_client.models.list = Mock(side_effect=RuntimeError("boom"))
+
+    healthy_client = Mock()
+    healthy_client.models = Mock()
+    healthy_client.models.list = Mock(return_value=[SimpleNamespace(name="models/gemini-2.0-flash")])
+
+    with patch.object(provider, "_create_proxy_transport", return_value=(None, None)), patch(
+        "smolrouter.google_genai_provider.genai.Client", side_effect=[failing_client, healthy_client]
+    ) as client_factory:
+        assert await provider.health_check() is True
+
+    assert client_factory.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_google_genai_discover_models_uses_cache_and_filters_supported_actions():
+    provider = _make_google_provider(api_keys=["key-1"])
+
+    live_models = [
+        SimpleNamespace(
+            name="models/gemini-2.0-flash",
+            display_name="Gemini Flash",
+            description="Fast",
+            supported_actions=["generateContent"],
+            input_token_limit=8192,
+            output_token_limit=1024,
+        ),
+        SimpleNamespace(
+            name="models/text-embedding",
+            display_name="Embed",
+            description="Nope",
+            supported_actions=["embedContent"],
+            input_token_limit=2048,
+            output_token_limit=0,
+        ),
+    ]
+
+    live_client = Mock()
+    live_client.models = Mock()
+    live_client.models.list = Mock(return_value=live_models)
+
+    with patch.object(provider, "_create_proxy_transport", return_value=(None, None)), patch(
+        "smolrouter.google_genai_provider.genai.Client", return_value=live_client
+    ) as client_factory:
+        models = await provider.discover_models()
+        cached_models = await provider.discover_models()
+
+    assert client_factory.call_count == 1
+    assert cached_models is models
+    assert len(models) == 1
+    assert models[0].name == "gemini-2.0-flash"
+    assert models[0].metadata["display_name"] == "Gemini Flash"
+    assert models[0].metadata["input_token_limit"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_google_genai_discover_models_falls_back_to_static_json():
+    provider = _make_google_provider(api_keys=["key-1"])
+
+    with patch.object(provider, "_create_proxy_transport", return_value=(None, None)), patch(
+        "smolrouter.google_genai_provider.genai.Client", side_effect=RuntimeError("live discovery failed")
+    ), patch("pathlib.Path.exists", return_value=True), patch(
+        "builtins.open",
+        mock_open(
+            read_data=json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "models/gemini-2.5-flash",
+                            "displayName": "Gemini Flash",
+                            "description": "Fast",
+                            "supportedGenerationMethods": ["generateContent"],
+                            "inputTokenLimit": 8192,
+                            "outputTokenLimit": 1024,
+                            "version": "v1",
+                            "temperature": 1.0,
+                            "topP": 0.95,
+                            "topK": 32,
+                            "maxTemperature": 2.0,
+                            "thinking": True,
+                        },
+                        {
+                            "name": "models/gemini-embedding",
+                            "displayName": "Embed",
+                            "description": "Skip me",
+                            "supportedGenerationMethods": ["embedContent"],
+                        },
+                    ]
+                }
+            )
+        ),
+    ):
+        models = await provider.discover_models()
+
+    assert len(models) == 1
+    assert models[0].name == "gemini-2.5-flash"
+    assert models[0].metadata["thinking"] is True
+    assert models[0].metadata["version"] == "v1"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_generate_completion_orchestrates_helpers():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(original_model="original", observation_id="obs-123")
+
+    provider._build_completion_context = AsyncMock(return_value=context)
+    provider._run_completion_request = AsyncMock(return_value={"result": "ok"})
+    provider._finalize_completion = AsyncMock(return_value=({"id": "chatcmpl-test"}, None))
+
+    response = await provider.generate_completion({"model": "gemini-2.0-flash", "messages": [{"role": "user", "content": "Hi"}]})
+
+    assert response == ({"id": "chatcmpl-test"}, None)
+    provider._build_completion_context.assert_awaited_once()
+    provider._run_completion_request.assert_awaited_once_with(context)
+    provider._finalize_completion.assert_awaited_once_with(context, {"result": "ok"})
+
+
+@pytest.mark.asyncio
+async def test_google_genai_handle_completion_exception_branches():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(
+        original_model="original",
+        observation_id="obs-123",
+        model_name="gemini-2.0-flash",
+        api_key="test-key",
+        api_key_suffix="abc12345",
+        proxy_info=ProxyConfig(https_proxy="http://127.0.0.1:8888"),
+        proxy_url="http://127.0.0.1:8888",
+    )
+
+    provider._record_completion_failure = AsyncMock()
+    provider._mark_proxy_health = Mock()
+
+    quota_error = await provider._handle_completion_exception(context, ResourceExhausted("quota exhausted"))
+    assert isinstance(quota_error, GoogleGenAIRequestError)
+    assert quota_error.provider_id == "test-google"
+    provider._record_completion_failure.assert_awaited_once()
+    provider._record_completion_failure.reset_mock()
+
+    permission_error = await provider._handle_completion_exception(context, PermissionDenied("permission denied"))
+    assert isinstance(permission_error, GoogleGenAIRequestError)
+    provider._record_completion_failure.assert_awaited_once()
+    provider._record_completion_failure.reset_mock()
+
+    invalid_error = await provider._handle_completion_exception(context, InvalidArgument("invalid argument"))
+    assert isinstance(invalid_error, GoogleGenAIRequestError)
+    provider._record_completion_failure.assert_awaited_once()
+    provider._record_completion_failure.reset_mock()
+
+    generic_error = await provider._handle_completion_exception(context, RuntimeError("Connection refused"))
+    assert isinstance(generic_error, GoogleGenAIRequestError)
+    provider._mark_proxy_health.assert_called_once_with(
+        "http://127.0.0.1:8888", success=False, error="Connection refused"
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_genai_proxy_health_and_transport_helpers():
+    provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
+
+    provider._mark_proxy_health("http://127.0.0.1:8888", success=True)
+    healthy_snapshot = provider._proxy_health_snapshot("http://127.0.0.1:8888")
+    assert healthy_snapshot["status"] == "healthy"
+    assert healthy_snapshot["success_count"] == 1
+
+    provider._mark_proxy_health("http://127.0.0.1:8888", success=False, error="Connection refused")
+    unhealthy_snapshot = provider._proxy_health_snapshot("http://127.0.0.1:8888")
+    assert unhealthy_snapshot["status"] == "unhealthy"
+    assert unhealthy_snapshot["failure_count"] == 1
+    assert provider._proxy_available_for_use("http://127.0.0.1:8888") is False
+
+    provider._proxy_health["http://127.0.0.1:8888"].last_checked_at = provider._utc_now() - timedelta(
+        seconds=provider.PROXY_HEALTH_CHECK_INTERVAL_SECONDS + 1
+    )
+    assert provider._proxy_probe_due("http://127.0.0.1:8888") is True
+    assert provider._proxy_health_snapshot(None)["status"] == "direct"
+
+    no_proxy_transport = provider._create_proxy_transport()
+    assert no_proxy_transport == (None, None)
+
+    proxy_transport = provider._create_proxy_transport(ProxyConfig(https_proxy="http://127.0.0.1:8888"), "obs-1")
+    assert proxy_transport[0] is not None
+    assert proxy_transport[1] is not None
+
+    with patch.object(provider, "_configured_proxy_urls", return_value=["http://127.0.0.1:8888"]), patch.object(
+        provider, "_probe_proxy_url", AsyncMock(return_value=None)
+    ):
+        await provider.refresh_proxy_health(force=True)
+
+    stop_event = asyncio.Event()
+
+    async def pending_monitor_loop():
+        await stop_event.wait()
+
+    with patch.object(provider, "_configured_proxy_urls", return_value=["http://127.0.0.1:8888"]), patch.object(
+        provider,
+        "_proxy_health_monitor_loop",
+        new=pending_monitor_loop,
+    ):
+        provider.start_proxy_health_monitor()
+        provider.start_proxy_health_monitor()
+        assert provider._proxy_health_task is not None
+        assert not provider._proxy_health_task.done()
+        stop_event.set()
+        await provider.stop_proxy_health_monitor()
+
+    assert provider._proxy_health_task is None
+
+
+@pytest.mark.asyncio
+async def test_google_genai_proxy_health_monitor_loop_handles_errors():
+    provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
+    provider.refresh_proxy_health = AsyncMock(side_effect=RuntimeError("boom"))
+
+    await provider._proxy_health_monitor_loop()
+
+
+@pytest.mark.asyncio
+async def test_google_genai_proxy_health_monitor_loop_handles_cancellation():
+    provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
+    provider.refresh_proxy_health = AsyncMock(return_value=None)
+
+    with patch("smolrouter.google_genai_provider.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError)):
+        with pytest.raises(asyncio.CancelledError):
+            await provider._proxy_health_monitor_loop()
+
+
+@pytest.mark.asyncio
+async def test_google_genai_schedule_proxy_probe_registers_and_cleans_up():
+    provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
+
+    with patch.object(provider, "_probe_proxy_url", AsyncMock(return_value=None)):
+        provider._schedule_proxy_probe("http://127.0.0.1:8888", force=True)
+        scheduled_task = provider._proxy_probe_tasks["http://127.0.0.1:8888"]
+        await scheduled_task
+
+    assert "http://127.0.0.1:8888" not in provider._proxy_probe_tasks
+
+    with patch.object(provider, "_probe_proxy_url", AsyncMock(side_effect=RuntimeError("probe failed"))):
+        provider._schedule_proxy_probe("http://127.0.0.1:9999", force=True)
+        failing_task = provider._proxy_probe_tasks["http://127.0.0.1:9999"]
+        with pytest.raises(RuntimeError, match="probe failed"):
+            await failing_task
+
+    assert "http://127.0.0.1:9999" not in provider._proxy_probe_tasks
+
+
+@pytest.mark.asyncio
+async def test_google_genai_update_api_key_stats_covers_success_and_error_branches():
+    provider = _make_google_provider(api_keys=["test-key"])
+    api_key_backend = SimpleNamespace(
+        hash_api_key=lambda api_key: f"hash-{api_key}",
+        mark_invalid_by_hash=AsyncMock(),
+        mark_quota_exhausted=AsyncMock(),
+        mark_error=AsyncMock(),
+    )
+
+    success_quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 3,
+            "tokens_today": 10,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    invalid_quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    quota_exhausted = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    regular_quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+
+    provider._get_quota_record = AsyncMock(side_effect=[success_quota, invalid_quota, quota_exhausted, regular_quota])
+
+    with patch("smolrouter.redis_backend.RedisApiKeyQuota.increment_usage", AsyncMock(return_value=None)), patch(
+        "smolrouter.google_genai_provider.ApiKeyQuota", api_key_backend
+    ):
+        await provider._update_api_key_stats("test-key", "gemini-2.0-flash", success=True, tokens=9)
+        assert success_quota.requests_today == 4
+        assert success_quota.tokens_today == 19
+
+        provider.config.api_keys = ["test-key"]
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-2.0-flash",
+            success=False,
+            error="permission denied 403",
+            status_code=403,
+        )
+        assert api_key_backend.mark_invalid_by_hash.await_count == 1
+        assert provider.config.api_keys == []
+
+        provider.config.api_keys = ["test-key"]
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-2.0-flash",
+            success=False,
+            error="429 quota exceeded retry in 12s",
+            status_code=429,
+        )
+        assert quota_exhausted.error_count == 1
+        assert quota_exhausted.quota_exhausted_at is not None
+        assert api_key_backend.mark_quota_exhausted.await_count == 1
+
+        provider.config.api_keys = ["test-key"]
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-2.0-flash",
+            success=False,
+            error="something else",
+            status_code=500,
+        )
+        assert regular_quota.error_count == 1
+        assert api_key_backend.mark_error.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_google_genai_get_api_key_stats_groups_used_and_unused_keys():
+    provider = _make_google_provider(api_keys=["used-key", "unused-key"])
+    used_quota = QuotaRecord(
+        {
+            "api_key_hash": "abcdef1234567890",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 5,
+            "tokens_today": 11,
+            "error_count": 2,
+            "last_error": "boom",
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "quota_exhausted_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    api_key_backend = SimpleNamespace(
+        get_provider_usage=AsyncMock(return_value=[used_quota]),
+        hash_api_key=lambda api_key: "abcdef1234567890" if api_key == "used-key" else "unusedabcdef1234",
+    )
+
+    with patch("smolrouter.google_genai_provider.ApiKeyQuota", api_key_backend):
+        stats = await provider.get_api_key_stats(include_unused_models=True)
+
+    assert "_rate_limiter" in stats
+    assert len([key for key in stats if key != "_rate_limiter"]) == 2
+    used_entry = stats["abcdef12..."]["models"]["gemini-2.0-flash"]
+    assert used_entry["status"] == "exhausted"
+    assert used_entry["quota_exhausted"] is True
+
+
+@pytest.mark.asyncio
+async def test_google_genai_probe_proxy_url_marks_invalid_and_successful_hosts():
+    provider = _make_google_provider()
+
+    await provider._probe_proxy_url("http://")
+    assert provider._proxy_health_snapshot("http://")["status"] == "unhealthy"
+
+    writer = Mock()
+    writer.close = Mock()
+    writer.wait_closed = AsyncMock(side_effect=Exception("close failed"))
+
+    with patch("asyncio.open_connection", AsyncMock(return_value=(Mock(), writer))):
+        await provider._probe_proxy_url("http://127.0.0.1:8888")
+
+    assert provider._proxy_health_snapshot("http://127.0.0.1:8888")["status"] == "healthy"
+
+    with patch("asyncio.open_connection", AsyncMock(side_effect=OSError("connection refused"))):
+        await provider._probe_proxy_url("http://127.0.0.1:9999")
+
+    assert provider._proxy_health_snapshot("http://127.0.0.1:9999")["status"] == "unhealthy"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_select_best_api_key_handles_exhaustion_and_fallback():
+    exhausted_provider = _make_google_provider(api_keys=["key-a", "key-b"], predictive_429_enabled=True)
+    exhausted_today = exhausted_provider._get_pacific_date()
+    exhausted_provider._get_quota_record = AsyncMock(
+        side_effect=[
+            QuotaRecord(
+                {
+                    "api_key_hash": "hash-a",
+                    "model_name": "gemini-2.0-flash",
+                    "requests_today": 0,
+                    "tokens_today": 0,
+                    "error_count": 0,
+                    "last_reset_date": exhausted_today,
+                    "quota_exhausted_at": datetime.now(timezone.utc),
+                    "invalid_key": False,
+                }
+            ),
+            QuotaRecord(
+                {
+                    "api_key_hash": "hash-b",
+                    "model_name": "gemini-2.0-flash",
+                    "requests_today": 0,
+                    "tokens_today": 0,
+                    "error_count": 21,
+                    "last_reset_date": exhausted_today,
+                    "invalid_key": False,
+                }
+            ),
+        ]
+    )
+
+    with pytest.raises(ResourceExhausted):
+        await exhausted_provider._select_best_api_key("gemini-2.0-flash")
+
+    fallback_provider = _make_google_provider(api_keys=["key-a", "key-b"], predictive_429_enabled=False)
+    fallback_today = fallback_provider._get_pacific_date()
+    fallback_provider._get_quota_record = AsyncMock(
+        side_effect=[
+            QuotaRecord(
+                {
+                    "api_key_hash": "hash-a",
+                    "model_name": "gemini-2.0-flash",
+                    "requests_today": 0,
+                    "tokens_today": 0,
+                    "error_count": 0,
+                    "last_reset_date": fallback_today,
+                    "quota_exhausted_at": datetime.now(timezone.utc),
+                    "invalid_key": False,
+                }
+            ),
+            QuotaRecord(
+                {
+                    "api_key_hash": "hash-b",
+                    "model_name": "gemini-2.0-flash",
+                    "requests_today": 0,
+                    "tokens_today": 0,
+                    "error_count": 21,
+                    "last_reset_date": fallback_today,
+                    "invalid_key": False,
+                }
+            ),
+        ]
+    )
+
+    assert await fallback_provider._select_best_api_key("gemini-2.0-flash") == "key-a"
+
+
+def test_dummy_provider_discover_models_and_stats():
+    provider = _make_dummy_provider(response_delay_ms=0, failure_rate=0.0, response_tokens=12)
+
+    models = asyncio.run(provider.discover_models())
+
+    assert len(models) == 6
+    assert models[0].aliases == ["dummy-fast-3.5", "test-fast-3.5"]
+    assert models[0].endpoint == "dummy://localhost/test"
+
+    stats = provider.get_stats()
+    assert stats["provider_type"] == "dummy"
+    assert stats["config"]["response_tokens"] == 12
+    api_key_stats = provider.get_api_key_stats()["provider_stats"]
+    assert api_key_stats["dummy_mode"] is True
+    assert api_key_stats["dummy_provider"] is True
+
+
+@pytest.mark.asyncio
+async def test_dummy_provider_make_request_supports_messages_and_prompt():
+    provider = _make_dummy_provider(response_delay_ms=0, failure_rate=0.0, response_tokens=7)
+
+    message_response = await provider.make_request(
+        {"model": "dummy-standard-4.0", "messages": [{"role": "user", "content": "Hello there"}]},
+        {"authorization": "Bearer client-token"},
+    )
+    prompt_response = await provider.make_request(
+        {"model": "dummy-standard-4.0", "prompt": "Prompt only"},
+        {},
+    )
+
+    assert message_response["choices"][0]["message"]["content"] == "You said: Hello there"
+    assert prompt_response["choices"][0]["message"]["content"] == "You said: Prompt only"
+    assert message_response["usage"]["completion_tokens"] == 7
+    assert provider.model_stats["dummy-standard-4.0"].requests_today == 2
+    assert provider.get_stats()["models"]["dummy-standard-4.0"]["requests_today"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dummy_provider_make_request_failure_updates_error_count():
+    provider = _make_dummy_provider(response_delay_ms=0, failure_rate=1.0, response_tokens=5)
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
+        await provider.make_request(
+            {"model": "dummy-standard-4.0", "messages": [{"role": "user", "content": "Hello"}]},
+            {},
+        )
+
+    assert provider.model_stats["dummy-standard-4.0"].error_count == 1
+
+
+def test_anthropic_discover_models_and_health_check():
+    provider = _make_anthropic_provider()
+
+    client = Mock()
+    client.get = AsyncMock(return_value=Mock(status_code=404))
+    client.post = AsyncMock(
+        return_value=Mock(
+            status_code=200,
+            json=Mock(
+                return_value={
+                    "content": [{"type": "text", "text": "Hello from Anthropic"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 5, "output_tokens": 8},
+                }
+            ),
+        )
+    )
+
+    with patch("smolrouter.anthropic_provider.http_client_factory.get_client_for_model", return_value=client):
+        models = asyncio.run(provider.discover_models())
+        health = asyncio.run(provider.health_check())
+
+    assert health is True
+    assert len(models) >= 1
+    assert models[0].name == "claude-3-5-sonnet-20241022"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_make_request_success_and_stats():
+    provider = _make_anthropic_provider()
+
+    client = Mock()
+    client.post = AsyncMock(
+        return_value=Mock(
+            status_code=200,
+            json=Mock(
+                return_value={
+                    "content": [{"type": "text", "text": "Hello there!"}],
+                    "stop_reason": "max_tokens",
+                    "usage": {"input_tokens": 5, "output_tokens": 8},
+                }
+            ),
+        )
+    )
+
+    with patch("smolrouter.anthropic_provider.http_client_factory.get_client_for_model", return_value=client):
+        response = await provider.make_request(
+            {
+                "model": "claude-3-sonnet-20240229",
+                "messages": [{"role": "system", "content": "Keep this"}, {"role": "user", "content": "Hello"}],
+                "max_tokens": 64,
+            },
+            {"authorization": "Bearer sk-ant-client"},
+        )
+
+    assert response["choices"][0]["message"]["content"] == "Hello there!"
+    assert response["choices"][0]["finish_reason"] == "length"
+    assert provider.model_stats["claude-3-sonnet-20240229"].requests_today == 1
+    assert provider.model_stats["claude-3-sonnet-20240229"].tokens_today == 13
+    assert provider.get_stats()["provider_type"] == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_make_request_failure_updates_error_count():
+    provider = _make_anthropic_provider()
+
+    client = Mock()
+    client.post = AsyncMock(return_value=Mock(status_code=500, text="boom"))
+
+    with patch("smolrouter.anthropic_provider.http_client_factory.get_client_for_model", return_value=client):
+        with pytest.raises(RuntimeError, match="Anthropic API error 500"):
+            await provider.make_request(
+                {"model": "claude-3-sonnet-20240229", "messages": [{"role": "user", "content": "Hello"}]},
+                {},
+            )
+
+    assert provider.model_stats["claude-3-sonnet-20240229"].error_count == 2
 
 
 def test_google_genai_retry_after_and_status_code_helpers():
