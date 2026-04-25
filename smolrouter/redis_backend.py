@@ -9,7 +9,7 @@ import logging
 import os
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TypedDict, Unpack
 
 from redis.exceptions import ConnectionError, TimeoutError
 
@@ -20,6 +20,86 @@ UTC_OFFSET_SUFFIX = "+00:00"
 REDIS_REQUESTS_BY_TIME_KEY = "requests:by_time"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
+REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
+    {
+        "service_type",
+        "upstream_url",
+        "original_model",
+        "mapped_model",
+        "provider_id",
+        "request_id",
+        "user_agent",
+        "auth_user",
+        "request_size",
+        "request_body_hash",
+        "duration_ms",
+        "response_size",
+        "status_code",
+        "error_message",
+        "completed_at",
+        "timestamp",
+    }
+)
+REQUEST_LOG_COMPLETION_OPTION_KEYS = frozenset(
+    {
+        "response_size",
+        "error_message",
+        "duration_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "request_body_key",
+        "response_body_key",
+        "api_key_suffix",
+        "proxy_used",
+        "provider_id",
+        "api_key_index",
+        "api_key_total",
+    }
+)
+REQUEST_LOG_COMPLETION_TRUTHY_FIELDS = (
+    "request_body_key",
+    "response_body_key",
+    "api_key_suffix",
+    "proxy_used",
+    "provider_id",
+)
+REQUEST_LOG_COMPLETION_NUMERIC_FIELDS = ("api_key_index", "api_key_total")
+
+
+class RequestLogCreateOptions(TypedDict, total=False):
+    service_type: str
+    upstream_url: str
+    original_model: Optional[str]
+    mapped_model: Optional[str]
+    provider_id: Optional[str]
+    request_id: Optional[str]
+    user_agent: Optional[str]
+    auth_user: Optional[str]
+    request_size: Optional[int]
+    request_body_hash: Optional[str]
+    duration_ms: Optional[int]
+    response_size: Optional[int]
+    status_code: Optional[Any]
+    error_message: Optional[str]
+    completed_at: Optional[datetime]
+    timestamp: Optional[datetime]
+
+
+class RequestLogCompletionOptions(TypedDict, total=False):
+    response_size: Optional[int]
+    error_message: Optional[str]
+    duration_ms: Optional[int]
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
+    total_tokens: Optional[int]
+    request_body_key: Optional[str]
+    response_body_key: Optional[str]
+    api_key_suffix: Optional[str]
+    proxy_used: Optional[str]
+    provider_id: Optional[str]
+    api_key_index: Optional[int]
+    api_key_total: Optional[int]
 
 
 def _normalize_int(value: Any, default: Optional[int] = None, none_values: tuple[Any, ...] = REDIS_EMPTY_VALUES) -> Optional[int]:
@@ -76,6 +156,114 @@ def _should_use_increment_fallback(error: Exception, lua_disabled: bool) -> bool
     return ("unknown command" in error_text or "noscript" in error_text or lua_disabled) and (
         is_fake_redis() or lua_disabled
     )
+
+
+def _validate_option_names(option_fields: Dict[str, Any], allowed: frozenset[str], operation: str) -> None:
+    unexpected = sorted(set(option_fields) - allowed)
+    if unexpected:
+        raise TypeError(f"Unexpected {operation} fields: {', '.join(unexpected)}")
+
+
+def _resolve_request_id(request_id: Optional[str]) -> str:
+    if request_id is not None:
+        return request_id
+
+    return f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.urandom(4).hex()}"
+
+
+def _resolve_created_at(timestamp: Optional[datetime]) -> datetime:
+    return timestamp or datetime.now(timezone.utc)
+
+
+def _build_request_log_data(
+    request_id: str,
+    source_ip: str,
+    method: str,
+    path: str,
+    created_at: datetime,
+    option_fields: RequestLogCreateOptions,
+) -> Dict[str, Any]:
+    completed_at = option_fields.get("completed_at")
+    status_code = option_fields.get("status_code")
+
+    return {
+        "request_id": request_id,
+        "source_ip": source_ip,
+        "method": method,
+        "path": path,
+        "service_type": option_fields.get("service_type", "unknown"),
+        "upstream_url": option_fields.get("upstream_url", "unknown"),
+        "original_model": option_fields.get("original_model") or "",
+        "mapped_model": option_fields.get("mapped_model") or "",
+        "provider_id": option_fields.get("provider_id") or "",
+        "user_agent": option_fields.get("user_agent") or "",
+        "auth_user": option_fields.get("auth_user") or "",
+        "request_size": str(option_fields.get("request_size") or 0),
+        "created_at": created_at.isoformat(),
+        "completed_at": completed_at.isoformat() if completed_at else "",
+        "status_code": status_code if status_code is not None else "pending",
+        "response_size": str(option_fields.get("response_size") or 0),
+        "duration_ms": str(option_fields.get("duration_ms") or 0),
+        "error_message": option_fields.get("error_message") or "",
+    }
+
+
+async def _store_request_log(
+    client: Any,
+    request_id: str,
+    source_ip: str,
+    created_at: datetime,
+    request_data: Dict[str, Any],
+) -> None:
+    await client.hset(f"request:{request_id}", mapping=request_data)
+    await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
+    await client.sadd(f"requests:by_ip:{source_ip}", request_id)
+
+
+async def _index_duplicate_request_body(client: Any, request_id: str, request_body_hash: Optional[str]) -> None:
+    if not request_body_hash:
+        return
+
+    set_key = f"requests:by_body:{request_body_hash}"
+    try:
+        existing_count = await client.scard(set_key)
+    except Exception:
+        existing_count = 0
+
+    await client.hset(
+        f"request:{request_id}",
+        mapping={
+            "request_body_hash": request_body_hash,
+            "is_duplicate": "true" if existing_count > 0 else "false",
+            "duplicate_count": existing_count,
+        },
+    )
+    await client.sadd(set_key, request_id)
+
+
+def _build_completion_update_data(status_code: int, option_fields: RequestLogCompletionOptions) -> Dict[str, Any]:
+    update_data = {
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "status_code": status_code,
+        "response_size": option_fields.get("response_size") or 0,
+        "error_message": option_fields.get("error_message") or "",
+        "duration_ms": option_fields.get("duration_ms") or 0,
+        "prompt_tokens": option_fields.get("prompt_tokens") or 0,
+        "completion_tokens": option_fields.get("completion_tokens") or 0,
+        "total_tokens": option_fields.get("total_tokens") or 0,
+    }
+
+    for field_name in REQUEST_LOG_COMPLETION_TRUTHY_FIELDS:
+        value = option_fields.get(field_name)
+        if value:
+            update_data[field_name] = value
+
+    for field_name in REQUEST_LOG_COMPLETION_NUMERIC_FIELDS:
+        value = option_fields.get(field_name)
+        if value is not None:
+            update_data[field_name] = value
+
+    return update_data
 
 
 class LogRecord:
@@ -257,81 +445,18 @@ class RedisRequestLog:
         source_ip: str,
         method: str,
         path: str,
-        service_type: str = "unknown",
-        upstream_url: str = "unknown",
-        original_model: Optional[str] = None,
-        mapped_model: Optional[str] = None,
-        provider_id: Optional[str] = None,
-        request_id: Optional[str] = None,
-        user_agent: Optional[str] = None,
-        auth_user: Optional[str] = None,
-        request_size: Optional[int] = None,
-        request_body_hash: Optional[str] = None,
-        # Optional completion fields (for tests and backfills)
-        duration_ms: Optional[int] = None,
-        response_size: Optional[int] = None,
-        status_code: Optional[any] = None,
-        error_message: Optional[str] = None,
-        completed_at: Optional[datetime] = None,
-        timestamp: Optional[datetime] = None,
+        **option_fields: Unpack[RequestLogCreateOptions],
     ) -> str:
         """Create request log entry - returns request_id"""
+        _validate_option_names(option_fields, REQUEST_LOG_CREATE_OPTION_KEYS, "request log create")
+
         client = get_redis()
+        request_id = _resolve_request_id(option_fields.get("request_id"))
+        created_at = _resolve_created_at(option_fields.get("timestamp"))
+        request_data = _build_request_log_data(request_id, source_ip, method, path, created_at, option_fields)
 
-        # Generate request ID if not provided
-        if request_id is None:
-            request_id = f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.urandom(4).hex()}"
-
-        # Create request data (Redis doesn't handle None values)
-        request_data = {
-            "request_id": request_id,
-            "source_ip": source_ip,
-            "method": method,
-            "path": path,
-            "service_type": service_type,
-            "upstream_url": upstream_url,
-            "original_model": original_model or "",
-            "mapped_model": mapped_model or "",
-            "provider_id": provider_id or "",
-            "user_agent": user_agent or "",
-            "auth_user": auth_user or "",
-            "request_size": str(request_size or 0),
-            "created_at": (timestamp or datetime.now(timezone.utc)).isoformat(),
-            "completed_at": completed_at.isoformat() if completed_at else "",
-            "status_code": status_code if status_code is not None else "pending",
-            "response_size": str(response_size or 0),
-            "duration_ms": str(duration_ms or 0),
-            "error_message": error_message or "",
-        }
-
-        # Store in Redis hash
-        await client.hset(f"request:{request_id}", mapping=request_data)
-
-        # Add to request index for queries
-        ts = (timestamp or datetime.now(timezone.utc)).timestamp()
-        await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: ts})
-
-        # Add to IP index
-        await client.sadd(f"requests:by_ip:{source_ip}", request_id)
-
-        # Index by request body hash and set duplicate flags
-        if request_body_hash:
-            set_key = f"requests:by_body:{request_body_hash}"
-            try:
-                existing_count = await client.scard(set_key)
-            except Exception:
-                existing_count = 0
-            is_dup = existing_count > 0
-            await client.hset(
-                f"request:{request_id}",
-                mapping={
-                    "request_body_hash": request_body_hash,
-                    "is_duplicate": "true" if is_dup else "false",
-                    # Number of other matching requests (before adding this one)
-                    "duplicate_count": existing_count,
-                },
-            )
-            await client.sadd(set_key, request_id)
+        await _store_request_log(client, request_id, source_ip, created_at, request_data)
+        await _index_duplicate_request_body(client, request_id, option_fields.get("request_body_hash"))
 
         logger.debug(f"Created Redis request log: {request_id}")
         return request_id
@@ -340,57 +465,13 @@ class RedisRequestLog:
     async def update_completion(
         request_id: str,
         status_code: int,
-        response_size: Optional[int] = None,
-        error_message: Optional[str] = None,
-        duration_ms: Optional[int] = None,
-        prompt_tokens: Optional[int] = None,
-        completion_tokens: Optional[int] = None,
-        total_tokens: Optional[int] = None,
-        request_body_key: Optional[str] = None,
-        response_body_key: Optional[str] = None,
-        api_key_suffix: Optional[str] = None,
-        proxy_used: Optional[str] = None,
-        provider_id: Optional[str] = None,
-        api_key_index: Optional[int] = None,
-        api_key_total: Optional[int] = None,
-    ):
+        **option_fields: Unpack[RequestLogCompletionOptions],
+    ) -> None:
         """Update request with completion data"""
+        _validate_option_names(option_fields, REQUEST_LOG_COMPLETION_OPTION_KEYS, "request completion")
+
         client = get_redis()
-
-        update_data = {
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "status_code": status_code,
-            "response_size": response_size or 0,
-            "error_message": error_message or "",
-            "duration_ms": duration_ms or 0,
-            "prompt_tokens": prompt_tokens or 0,
-            "completion_tokens": completion_tokens or 0,
-            "total_tokens": total_tokens or 0,
-        }
-
-        # Store blob keys if provided (bodies are stored in blob storage, not Redis)
-        if request_body_key:
-            update_data["request_body_key"] = request_body_key
-
-        if response_body_key:
-            update_data["response_body_key"] = response_body_key
-
-        # Store metadata if provided
-        if api_key_suffix:
-            update_data["api_key_suffix"] = api_key_suffix
-
-        if proxy_used:
-            update_data["proxy_used"] = proxy_used
-
-        if provider_id:
-            update_data["provider_id"] = provider_id
-
-        if api_key_index is not None:
-            update_data["api_key_index"] = api_key_index
-
-        if api_key_total is not None:
-            update_data["api_key_total"] = api_key_total
-
+        update_data = _build_completion_update_data(status_code, option_fields)
         await client.hset(f"request:{request_id}", mapping=update_data)
         logger.debug(f"Updated Redis request completion: {request_id}")
 
