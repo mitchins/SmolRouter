@@ -24,6 +24,10 @@ from .config_paths import normalize_provider_file_references, resolve_routes_con
 logger = logging.getLogger(__name__)
 
 
+OPENAI_CHAT_COMPLETION_CHUNK_OBJECT = "chat.completion.chunk"
+OPENAI_SSE_DONE = b"data: [DONE]\n\n"
+
+
 @dataclass
 class SmolRouterConfig:
     """Complete configuration for SmolRouter"""
@@ -33,13 +37,13 @@ class SmolRouterConfig:
 
     # Legacy configuration (for backward compatibility)
     default_upstream: str = "http://localhost:8000"
-    model_map: Dict[str, str] = None
+    model_map: Optional[Dict[str, str]] = None
 
     # Strategy configuration
-    strategy: Dict[str, Any] = None
+    strategy: Optional[Dict[str, Any]] = None
 
     # Access control configuration
-    access_control: Dict[str, Any] = None
+    access_control: Optional[Dict[str, Any]] = None
 
     # Caching configuration
     cache_enabled: bool = True
@@ -51,9 +55,9 @@ class SmolRouterConfig:
     health_check_interval: int = 60  # seconds
 
     # Routing configuration (legacy support)
-    routes: List[Dict[str, Any]] = None
-    servers: Dict[str, str] = None
-    aliases: Dict[str, Any] = None
+    routes: Optional[List[Dict[str, Any]]] = None
+    servers: Optional[Dict[str, str]] = None
+    aliases: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         if self.model_map is None:
@@ -78,7 +82,7 @@ class SmolRouterContainer:
     a single point of configuration and initialization.
     """
 
-    def __init__(self, config: SmolRouterConfig = None):
+    def __init__(self, config: Optional[SmolRouterConfig] = None):
         self.config = config or self._create_default_config()
         self._providers = None
         self._mediator = None
@@ -203,7 +207,7 @@ class SmolRouterContainer:
 
         return priorities
 
-    def _extract_access_control_from_routes(self, routes_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_access_control_from_routes(self, _routes_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract access control rules from routes configuration"""
         # For now, return no access control
         # Future enhancement: analyze routes for IP-based rules
@@ -392,7 +396,7 @@ class SmolRouterContainer:
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
-        timeout: float,
+        request_timeout: float,
     ):
         """
         Route a request using the new architecture.
@@ -401,7 +405,11 @@ class SmolRouterContainer:
         """
         if not self._initialized:
             await self.initialize()
-        return await self._mediator.route_request(source_ip, model, request_payload, path, headers, timeout)
+
+        async with asyncio.timeout(request_timeout):
+            return await self._mediator.route_request(
+                source_ip, model, request_payload, path, headers, request_timeout
+            )
 
     async def route_streaming_request(
         self,
@@ -410,16 +418,17 @@ class SmolRouterContainer:
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
-        timeout: float,
+        request_timeout: float,
     ):
         """Route streaming requests.
 
         If a provider does not expose native streaming via the mediator, emit a
         standards-compatible SSE stream synthesized from the non-stream response.
         """
-        data, status_code, upstream_used, metadata = await self.route_request(
-            source_ip, model, request_payload, path, headers, timeout
-        )
+        async with asyncio.timeout(request_timeout):
+            data, status_code, upstream_used, metadata = await self.route_request(
+                source_ip, model, request_payload, path, headers, request_timeout
+            )
 
         if status_code >= 400:
             return JSONResponse(content=data, status_code=status_code), status_code, upstream_used, metadata
@@ -446,21 +455,21 @@ class SmolRouterContainer:
             content = choices[0]["message"].get("content") or ""
             first_chunk = {
                 "id": request_id,
-                "object": "chat.completion.chunk",
+                "object": OPENAI_CHAT_COMPLETION_CHUNK_OBJECT,
                 "created": created,
                 "model": model,
                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": None}],
             }
             final_chunk = {
                 "id": request_id,
-                "object": "chat.completion.chunk",
+                "object": OPENAI_CHAT_COMPLETION_CHUNK_OBJECT,
                 "created": created,
                 "model": model,
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             }
             yield f"data: {json.dumps(first_chunk)}\n\n".encode("utf-8")
             yield f"data: {json.dumps(final_chunk)}\n\n".encode("utf-8")
-            yield b"data: [DONE]\n\n"
+            yield OPENAI_SSE_DONE
             return
 
         if choices and isinstance(choices[0], dict) and "text" in choices[0]:
@@ -486,13 +495,13 @@ class SmolRouterContainer:
 
         fallback_chunk = {
             "id": request_id,
-            "object": "chat.completion.chunk",
+            "object": OPENAI_CHAT_COMPLETION_CHUNK_OBJECT,
             "created": created,
             "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }
         yield f"data: {json.dumps(fallback_chunk)}\n\n".encode("utf-8")
-        yield b"data: [DONE]\n\n"
+        yield OPENAI_SSE_DONE
 
     async def get_legacy_smart_router(self):
         """
@@ -525,7 +534,7 @@ class SmolRouterContainer:
             "stats": stats,
         }
 
-    async def close(self):
+    def close(self):
         """Clean shutdown of container"""
         if self._mediator:
             self._mediator.close()
@@ -555,14 +564,17 @@ class LegacySmartRouterAdapter:
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
-        timeout: float,
+        request_timeout: float,
     ):
         """
         Route a request using the new architecture.
 
         Returns: (response_data, status_code, upstream_used)
         """
-        return await self.mediator.route_request(source_ip, model, request_payload, path, headers, timeout)
+        async with asyncio.timeout(request_timeout):
+            return await self.mediator.route_request(
+                source_ip, model, request_payload, path, headers, request_timeout
+            )
 
 
 # Global container instance

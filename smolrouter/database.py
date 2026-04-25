@@ -137,7 +137,7 @@ class RequestLogEntry:
 
     def _schedule_completion_update(self) -> None:
         try:
-            asyncio.create_task(self._run_completion_update())
+            _completion_update_task = asyncio.create_task(self._run_completion_update())
         except RuntimeError:
             # No event loop running - run synchronously (tests/CLI)
             try:

@@ -10,6 +10,7 @@ import os
 import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, TypedDict, Unpack
+from zoneinfo import ZoneInfo
 
 from redis.exceptions import ConnectionError, TimeoutError
 
@@ -17,6 +18,7 @@ from .redis_config import redis_client, is_fake_redis, get_redis_status
 
 
 UTC_OFFSET_SUFFIX = "+00:00"
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 REDIS_REQUESTS_BY_TIME_KEY = "requests:by_time"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
@@ -65,6 +67,19 @@ REQUEST_LOG_COMPLETION_TRUTHY_FIELDS = (
     "provider_id",
 )
 REQUEST_LOG_COMPLETION_NUMERIC_FIELDS = ("api_key_index", "api_key_total")
+
+
+def _current_pacific_date() -> str:
+    return datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
+
+
+def _to_pacific_datetime(value: datetime, assume_utc: bool = False) -> datetime:
+    if value.tzinfo is None:
+        if assume_utc:
+            return value.replace(tzinfo=timezone.utc).astimezone(PACIFIC_TZ)
+        return value.replace(tzinfo=PACIFIC_TZ)
+
+    return value.astimezone(PACIFIC_TZ)
 
 
 class RequestLogCreateOptions(TypedDict, total=False):
@@ -632,10 +647,7 @@ class RedisApiKeyQuota:
 
         # Create new quota entry
         # Use Pacific timezone for Google API quota resets (midnight Pacific)
-        import pytz
-
-        pacific_tz = pytz.timezone("US/Pacific")
-        today = datetime.now(pacific_tz).strftime("%Y-%m-%d")
+        today = _current_pacific_date()
         quota_data = {
             "provider_id": provider_id,
             "key_hash": key_hash,
@@ -729,10 +741,7 @@ class RedisApiKeyQuota:
         key_hash = RedisApiKeyQuota.hash_api_key(api_key)
         quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
         # Use Pacific timezone for Google API quota resets (midnight Pacific)
-        import pytz
-
-        pacific_tz = pytz.timezone("US/Pacific")
-        today = datetime.now(pacific_tz).strftime("%Y-%m-%d")
+        today = _current_pacific_date()
         timestamp = datetime.now(timezone.utc).isoformat()
 
         try:

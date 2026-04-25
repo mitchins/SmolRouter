@@ -19,7 +19,7 @@ class ModelInfo:
     provider_id: str  # Provider identifier (e.g., "fast-kitten")
     provider_type: str  # Provider type (e.g., "ollama", "openai")
     endpoint: str  # Base URL of the provider
-    aliases: List[str] = None  # Alternative names for this model
+    aliases: Optional[List[str]] = None  # Alternative names for this model
     metadata: Dict[str, Any] = None  # Additional provider-specific metadata
 
     def __post_init__(self):
@@ -238,7 +238,7 @@ class ProviderConfig:
     metadata: Dict[str, Any] = None
     static_models: Optional[List[str]] = None
     proxy_config: Optional[ProxyConfig] = None  # Default proxy for all models
-    per_model_proxy: Dict[str, ProxyConfig] = None  # Model-specific proxy overrides
+    per_model_proxy: Optional[Dict[str, ProxyConfig]] = None  # Model-specific proxy overrides
 
     def __post_init__(self):
         if self.metadata is None:
@@ -251,8 +251,9 @@ class ProviderConfig:
     def get_proxy_for_model(self, model_name: str) -> Optional[ProxyConfig]:
         """Get proxy configuration for a specific model"""
         # Check for model-specific proxy first
-        if model_name in self.per_model_proxy:
-            return self.per_model_proxy[model_name]
+        per_model_proxy = self.per_model_proxy or {}
+        if model_name in per_model_proxy:
+            return per_model_proxy[model_name]
         # Fall back to default proxy
         return self.proxy_config
 
@@ -264,7 +265,7 @@ class ModelResolution:
     model: Optional[ModelInfo]
     resolved_from: str  # Original request
     fallback_used: bool = False
-    resolution_path: List[str] = None  # Steps taken during resolution
+    resolution_path: Optional[List[str]] = None  # Steps taken during resolution
 
     def __post_init__(self):
         if self.resolution_path is None:

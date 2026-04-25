@@ -35,6 +35,10 @@ class TestModelLoadBalancer:
         assert load_balancer.parse_model_name("my-custom-model-2") == ("my-custom-model", 2)
         assert load_balancer.parse_model_name("local-llm-3") == ("local-llm", 3)
 
+        # Versioned model names should stay separate
+        assert load_balancer.parse_model_name("phi-3") == ("phi-3", 0)
+        assert load_balancer.parse_model_name("phi-4") == ("phi-4", 0)
+
         # Should NOT parse these as instances (common model names)
         assert load_balancer.parse_model_name("gpt-4") == ("gpt-4", 0)
         assert load_balancer.parse_model_name("gpt-4-0613") == ("gpt-4-0613", 0)
@@ -77,6 +81,24 @@ class TestModelLoadBalancer:
 
         instances = load_balancer.instances["gpt-oss-20b"]
         assert len(instances) == 1  # Should not duplicate
+
+    def test_versioned_models_remain_separate_groups(self, load_balancer):
+        """Test that versioned model names are not collapsed into a shared group."""
+        load_balancer.register_model_instance("phi-3", "provider1", "http://localhost:1234")
+        load_balancer.register_model_instance("phi-4", "provider1", "http://localhost:1234")
+
+        groups = load_balancer.get_model_groups()
+
+        assert "phi-3" in groups
+        assert "phi-4" in groups
+        assert groups["phi-3"] == ["phi-3"]
+        assert groups["phi-4"] == ["phi-4"]
+
+        available_phi_3 = load_balancer.get_available_instances("phi-3")
+        available_phi_4 = load_balancer.get_available_instances("phi-4")
+
+        assert [instance.model_id for instance in available_phi_3] == ["phi-3"]
+        assert [instance.model_id for instance in available_phi_4] == ["phi-4"]
 
     def test_get_available_instances_healthy_only(self, load_balancer):
         """Test that only healthy instances are returned."""
@@ -160,7 +182,7 @@ class TestModelLoadBalancer:
         # End request
         await load_balancer.end_request(instance, response_time=1.5, success=True)
         assert instance.active_requests == 0
-        assert instance.avg_response_time == 1.5
+        assert instance.avg_response_time == pytest.approx(1.5)
 
     @pytest.mark.asyncio
     async def test_multiple_concurrent_requests(self, load_balancer):
@@ -204,7 +226,7 @@ class TestModelLoadBalancer:
         await load_balancer.end_request(instance, 3.0, True)
 
         # Average should be (1.0 + 3.0) / 2 = 2.0
-        assert instance.avg_response_time == 2.0
+        assert instance.avg_response_time == pytest.approx(2.0)
 
     @pytest.mark.asyncio
     async def test_failure_handling(self, load_balancer):
@@ -253,9 +275,31 @@ class TestModelLoadBalancer:
         assert stats["total_requests"] == 10
         assert stats["successful_requests"] == 8
         assert stats["failed_requests"] == 2
-        assert stats["success_rate"] == 0.8
+        assert stats["success_rate"] == pytest.approx(0.8)
         assert "gpt-oss-20b" in stats["instances"]
         assert len(stats["instances"]["gpt-oss-20b"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_instance_health_uses_local_failure_rate(self, load_balancer):
+        """Test that instance quarantine depends on that instance's own failure history."""
+        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
+        load_balancer.register_model_instance("gpt-oss-20b:2", "provider1", "http://localhost:1234")
+
+        instance = load_balancer.instances["gpt-oss-20b"][1]
+        instance.total_requests = 11
+        instance.active_requests = 1
+        instance.failure_count = 0
+
+        # Global stats are intentionally worse than this instance's own history.
+        load_balancer.stats.total_requests = 20
+        load_balancer.stats.failed_requests = 11
+        load_balancer.stats.successful_requests = 9
+
+        await load_balancer.end_request(instance, response_time=0.25, success=False)
+
+        assert instance.is_healthy is True
+        assert instance.failure_count == 1
+        assert load_balancer.stats.failed_requests == 12
 
     def test_get_model_groups(self, load_balancer):
         """Test getting model groups."""
@@ -296,7 +340,7 @@ class TestModelLoadBalancer:
 
         # Launch requests with slight staggered timing to simulate real load
         tasks = []
-        for i in range(6):
+        for _ in range(6):
             # Small staggered delay so requests start at slightly different times
             await asyncio.sleep(0.01)
             task = asyncio.create_task(simulate_request())

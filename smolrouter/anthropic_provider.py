@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class AnthropicConfig(ProviderConfig):
     """Configuration for Anthropic provider"""
 
-    api_keys: List[str] = None  # Will be initialized in __post_init__ if None
+    api_keys: Optional[List[str]] = None  # Will be initialized in __post_init__ if None
     api_keys_file: Optional[str] = None
     max_requests_per_day: Optional[int] = None  # Not used for rotation, just monitoring
     timeout: float = 30.0
@@ -124,7 +124,9 @@ class AnthropicProvider(IModelProvider):
         # Determine API key to use (client passthrough preferred)
         api_key = self._get_api_key(client_headers)
         if not api_key:
-            raise Exception("No Anthropic API key available - pass via Authorization header or configure fallback keys")
+            raise RuntimeError(
+                "No Anthropic API key available - pass via Authorization header or configure fallback keys"
+            )
 
         # Convert OpenAI format to Anthropic format
         anthropic_request = self._convert_openai_to_anthropic(request_data)
@@ -149,7 +151,7 @@ class AnthropicProvider(IModelProvider):
                 error_msg = f"Anthropic API error {response.status_code}: {response.text}"
                 stats.last_error = error_msg
                 stats.error_count += 1
-                raise Exception(error_msg)
+                raise RuntimeError(error_msg)
 
             anthropic_response = response.json()
 
