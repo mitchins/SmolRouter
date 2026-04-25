@@ -493,11 +493,28 @@ def strip_think_chain_from_text(text: str, provider_type: Optional[str] = None, 
             # Remove the entire block including tags
             result = result[:start] + result[end + len(end_tag) :]
 
-    # Preserve original spacing and newlines, but avoid stray spaces before punctuation
-    try:
-        result = re.sub(r"\s+([,.!?])", r"\1", result)
-    except Exception:
-        pass
+    # Preserve original spacing and newlines, but avoid stray spaces before punctuation.
+    # Use a linear scan instead of a regex to avoid backtracking concerns.
+    cleaned_parts: list[str] = []
+    index = 0
+    length = len(result)
+    while index < length:
+        current_char = result[index]
+        if current_char.isspace():
+            whitespace_start = index
+            while index < length and result[index].isspace():
+                index += 1
+
+            if index < length and result[index] in ",.!?":
+                continue
+
+            cleaned_parts.append(result[whitespace_start:index])
+            continue
+
+        cleaned_parts.append(current_char)
+        index += 1
+
+    result = "".join(cleaned_parts)
     return result
 
 
