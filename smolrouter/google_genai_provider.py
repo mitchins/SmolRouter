@@ -20,6 +20,7 @@ import httpx
 from google import genai
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 
+from .config_loading import load_config_entries
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
 from .database import ApiKeyQuota
 from .redis_backend import QuotaRecord
@@ -174,7 +175,7 @@ class GoogleGenAIConfig(ProviderConfig):
 
     def __init__(self, **kwargs):
         # Extract Google-specific fields before calling parent
-        self.api_keys = kwargs.pop("api_keys", [])
+        self.api_keys = list(kwargs.pop("api_keys", []) or [])
         self.api_keys_file = kwargs.pop("api_keys_file", None)
         self.max_requests_per_day = kwargs.pop("max_requests_per_day", 1500)
         self.max_tokens_per_minute = kwargs.pop("max_tokens_per_minute", 32000)
@@ -207,8 +208,7 @@ class GoogleGenAIConfig(ProviderConfig):
         # Load API keys from file if specified
         if self.api_keys_file:
             try:
-                with open(self.api_keys_file, "r") as f:
-                    file_keys = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+                file_keys = load_config_entries(self.api_keys_file)
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:

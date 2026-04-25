@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, mock_open, patch
 
+import smolrouter.providers as providers_module
 from google.api_core.exceptions import InvalidArgument, PermissionDenied, ResourceExhausted
 
 from smolrouter.access_control import NoAccessControl
@@ -52,6 +53,17 @@ def _make_anthropic_provider(**kwargs):
         **kwargs,
     )
     return AnthropicProvider(config)
+
+
+def _make_openai_provider(**kwargs):
+    config_kwargs = {
+        "name": "test-openai",
+        "type": "openai",
+        "enabled": True,
+        "url": "https://example.com/openai/v1",
+    }
+    config_kwargs.update(kwargs)
+    return OpenAIProvider(ProviderConfig(**config_kwargs))
 
 
 def test_google_genai_provider_creation():
@@ -916,6 +928,46 @@ def test_supported_provider_types_include_zai_coding():
     assert "zai-coding" in supported_types
 
 
+def test_provider_factory_sorts_enabled_providers_and_skips_invalid_entries(caplog):
+    caplog.set_level("INFO")
+
+    providers = ProviderFactory.create_providers_from_config(
+        [
+            {
+                "name": "later-openai",
+                "type": "openai",
+                "enabled": True,
+                "url": "https://example.com/openai/v1",
+                "priority": 5,
+            },
+            {
+                "name": "disabled-openai",
+                "type": "openai",
+                "enabled": False,
+                "url": "https://example.com/openai/v1",
+                "priority": 0,
+            },
+            {
+                "name": "first-dummy",
+                "type": "dummy",
+                "enabled": True,
+                "url": "dummy://localhost/test",
+                "priority": 1,
+            },
+            {
+                "name": "broken-provider",
+                "type": "missing-provider",
+                "enabled": True,
+                "url": "https://example.com/openai/v1",
+            },
+        ]
+    )
+
+    assert [provider.get_provider_id() for provider in providers] == ["first-dummy", "later-openai"]
+    assert "Skipping disabled provider: disabled-openai" in caplog.text
+    assert "Failed to create provider from config" in caplog.text
+
+
 def test_openai_provider_preserves_prefixed_base_path():
     provider = OpenAIProvider(
         ProviderConfig(
@@ -938,6 +990,114 @@ def test_openai_provider_preserves_prefixed_base_path():
             api_key="test-key",
         )
     )._build_request_url("/v1/models") == "https://integrate.api.nvidia.com/v1/models"
+
+
+def test_openai_provider_loads_static_models_from_file(tmp_path, monkeypatch):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "openai-models-2025-september.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "id": "gpt-4o",
+                        "object": "model",
+                        "created": 123,
+                        "owned_by": "openai",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(providers_module, "__file__", str(tmp_path / "providers.py"))
+
+    models = _make_openai_provider()._get_static_openai_models()
+
+    assert [model.id for model in models] == ["gpt-4o@test-openai"]
+    assert models[0].metadata["static"] is True
+
+
+@pytest.mark.parametrize("file_contents", [None, "{not-json}"])
+def test_openai_provider_falls_back_when_static_model_file_is_unavailable(tmp_path, monkeypatch, file_contents):
+    if file_contents is not None:
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "openai-models-2025-september.json").write_text(file_contents)
+
+    monkeypatch.setattr(providers_module, "__file__", str(tmp_path / "providers.py"))
+
+    models = _make_openai_provider()._get_static_openai_models()
+
+    assert [model.name for model in models] == ["gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"]
+    assert all(model.metadata["fallback"] is True for model in models)
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_openai_provider_discovers_models_from_live_endpoint(mock_client):
+    provider = _make_openai_provider(api_key="test-key")
+
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "data": [
+            {
+                "id": "gpt-4o",
+                "object": "model",
+                "created": 123,
+                "owned_by": "openai",
+                "permission": [],
+            }
+        ]
+    }
+    mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+
+    models = await provider.discover_models()
+
+    assert [model.id for model in models] == ["gpt-4o@test-openai"]
+    assert models[0].metadata["owned_by"] == "openai"
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_openai_provider_falls_back_to_static_models_on_upstream_errors(mock_client):
+    provider = _make_openai_provider(api_key="test-key")
+    fallback_models = [ModelInfo("fallback@test-openai", "fallback", "test-openai", "openai", provider.get_endpoint())]
+
+    unauthorized_request = httpx.Request("GET", provider._build_request_url("/v1/models"))
+    unauthorized_response = httpx.Response(401, request=unauthorized_request)
+    http_error = httpx.HTTPStatusError(
+        "Unauthorized",
+        request=unauthorized_request,
+        response=unauthorized_response,
+    )
+
+    mock_client.return_value.__aenter__.return_value.get = AsyncMock(side_effect=[http_error, RuntimeError("boom")])
+
+    with patch.object(provider, "_get_static_openai_models", return_value=fallback_models) as fallback:
+        assert await provider.discover_models() == fallback_models
+        assert await provider.discover_models() == fallback_models
+
+    assert fallback.call_count == 2
+
+
+def test_openai_provider_keeps_configured_auth_and_normalizes_passthrough_headers():
+    provider = _make_openai_provider(api_key="server-token")
+
+    headers = provider._merge_client_headers(
+        provider._get_headers(),
+        {
+            "authorization": b"Bearer client-token",
+            "openai-project": b"project-123",
+            "user-agent": "test-client/1.0",
+            "x-ignore": "ignored",
+        },
+    )
+
+    assert headers["Authorization"] == "Bearer server-token"
+    assert headers["openai-project"] == "project-123"
+    assert headers["user-agent"] == "test-client/1.0"
+    assert "x-ignore" not in headers
 
 
 @pytest.mark.asyncio
@@ -1013,10 +1173,75 @@ async def test_openai_provider_forwards_client_auth_for_passthrough_provider(moc
     assert called_headers["openai-organization"] == "org-123"
 
 
+@pytest.mark.asyncio
+async def test_openai_provider_generate_completion_returns_http_error_payload_when_available():
+    provider = _make_openai_provider(api_key="test-key")
+    response = Mock()
+    response.status_code = 429
+    response.text = '{"error": {"message": "slow down"}}'
+    response.json.return_value = {"error": {"message": "slow down"}}
+    error = httpx.HTTPStatusError(
+        "Too Many Requests",
+        request=httpx.Request("POST", provider._build_request_url("/v1/chat/completions")),
+        response=response,
+    )
+
+    with patch.object(provider, "_post_completion_request", AsyncMock(side_effect=error)):
+        payload, status_code = await provider.generate_completion({"model": "gpt-4o", "messages": []})
+
+    assert status_code == 429
+    assert payload == {"error": {"message": "slow down"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("side_effect", "expected_status", "expected_code", "expected_message"),
+    [
+        (
+            httpx.HTTPStatusError(
+                "Bad Gateway",
+                request=httpx.Request("POST", "https://example.com/openai/v1/chat/completions"),
+                response=Mock(
+                    status_code=502,
+                    text="bad gateway",
+                    json=Mock(side_effect=ValueError("not-json")),
+                ),
+            ),
+            502,
+            "502",
+            "OpenAI API error: 502",
+        ),
+        (httpx.TimeoutException("slow request"), 408, "timeout", "timed out"),
+        (
+            httpx.ConnectError(
+                "connection refused",
+                request=httpx.Request("POST", "https://example.com/openai/v1/chat/completions"),
+            ),
+            503,
+            "connection_failed",
+            "Failed to connect",
+        ),
+        (RuntimeError("boom"), 500, None, "Failed to call OpenAI API: boom"),
+    ],
+)
+async def test_openai_provider_generate_completion_maps_failures(
+    side_effect, expected_status, expected_code, expected_message
+):
+    provider = _make_openai_provider(api_key="test-key")
+
+    with patch.object(provider, "_post_completion_request", AsyncMock(side_effect=side_effect)):
+        payload, status_code = await provider.generate_completion({"model": "gpt-4o", "messages": []})
+
+    assert status_code == expected_status
+    assert expected_message in payload["error"]["message"]
+    if expected_code is not None:
+        assert payload["error"]["code"] == expected_code
+
+
 def test_zai_coding_config_loads_api_key_file(tmp_path):
     """Test Z.AI config loads a key from an env-style file."""
     key_file = tmp_path / "glm.env"
-    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+    key_file.write_text('export ZAI_API_KEY="dummy-zai-token" # active\n')
 
     config = ZaiCodingConfig(
         name="test-zai",
@@ -1135,6 +1360,25 @@ async def test_zai_coding_provider_uses_configured_key(mock_client, tmp_path):
     called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
     assert called_headers["Authorization"] == "Bearer dummy-zai-token"
     assert "client-token" not in called_headers["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_zai_coding_provider_health_check_requires_api_key(tmp_path):
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    provider = ZaiCodingProvider(
+        ZaiCodingConfig(
+            name="test-zai",
+            type="zai-coding",
+            enabled=True,
+            url="https://api.z.ai/api/coding/paas/v4",
+            api_key_file=str(key_file),
+        )
+    )
+    provider.config.api_key = None
+
+    assert await provider.health_check() is False
 
 
 @pytest.mark.asyncio
@@ -1263,6 +1507,33 @@ def test_google_genai_config_initialization():
     # With API keys list
     config1 = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys=["key1", "key2"])
     assert len(config1.api_keys) == 2
+
+
+def test_google_genai_config_loads_api_keys_file_with_comments(tmp_path):
+    key_file = tmp_path / "google_keys.txt"
+    key_file.write_text("# comment\nkey-one\n\n  key-two  \n")
+
+    config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
+
+    assert config.api_keys == ["key-one", "key-two"]
+
+
+def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
+    key_file = tmp_path / "anthropic_keys.txt"
+    key_file.write_text("# ignored\nsk-ant-one\nsk-ant-two\n")
+
+    config = AnthropicConfig(
+        name="test",
+        type="anthropic",
+        enabled=True,
+        url="https://api.anthropic.com",
+        api_keys_file=str(key_file),
+    )
+
+    assert config.api_keys == ["sk-ant-one", "sk-ant-two"]
+
+    provider = AnthropicProvider(config)
+    assert provider.config.api_keys == ["sk-ant-one", "sk-ant-two"]
 
 
 def test_anthropic_request_format_conversion():

@@ -9,7 +9,7 @@ import logging
 import os
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, TypedDict, Unpack
+from typing import Dict, List, Optional, Any, Mapping, TypedDict, Unpack
 from zoneinfo import ZoneInfo
 
 from redis.exceptions import ConnectionError, TimeoutError
@@ -162,6 +162,20 @@ def _load_blob_body(blob_storage: Any, key: Any) -> Any:
     return blob_storage.retrieve(key)
 
 
+def _prepare_quota_record_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    quota_data = dict(data)
+    last_reset = quota_data.get("last_reset", "")
+
+    if not quota_data.get("last_reset_date"):
+        quota_data["last_reset_date"] = last_reset
+
+    if not quota_data.get("api_key_hash") and quota_data.get("key_hash"):
+        quota_data["api_key_hash"] = quota_data["key_hash"]
+
+    quota_data["invalid_key"] = _normalize_bool(quota_data.get("invalid_key", False), default=False)
+    return quota_data
+
+
 def _is_lua_fallback_enabled(lua_disabled: bool) -> bool:
     return lua_disabled or is_fake_redis() or os.getenv("REDIS_DISABLE_LUA", "false").lower() in ("1", "true", "yes")
 
@@ -173,7 +187,7 @@ def _should_use_increment_fallback(error: Exception, lua_disabled: bool) -> bool
     )
 
 
-def _validate_option_names(option_fields: Dict[str, Any], allowed: frozenset[str], operation: str) -> None:
+def _validate_option_names(option_fields: Mapping[str, Any], allowed: frozenset[str], operation: str) -> None:
     unexpected = sorted(set(option_fields) - allowed)
     if unexpected:
         raise TypeError(f"Unexpected {operation} fields: {', '.join(unexpected)}")
@@ -325,16 +339,18 @@ class QuotaRecord:
     """Object wrapper for Redis quota data to provide attribute access"""
 
     def __init__(self, data: Dict[str, Any]):
-        for key, value in data.items():
+        normalized_data = _prepare_quota_record_data(data)
+
+        for key, value in normalized_data.items():
             setattr(self, key, value)
 
         self.requests_today = _normalize_int(getattr(self, "requests_today", 0), default=0) or 0
         self.tokens_today = _normalize_int(getattr(self, "tokens_today", 0), default=0) or 0
         self.error_count = _normalize_int(getattr(self, "error_count", 0), default=0) or 0
         self.last_error = getattr(self, "last_error", None)
-        self.last_reset_date = getattr(self, "last_reset_date", None)
-        self.api_key_hash = getattr(self, "api_key_hash", data.get("key_hash", ""))
-        self.model_name = getattr(self, "model_name", data.get("model_name", ""))
+        self.last_reset_date = getattr(self, "last_reset_date", normalized_data.get("last_reset", ""))
+        self.api_key_hash = getattr(self, "api_key_hash", normalized_data.get("key_hash", ""))
+        self.model_name = getattr(self, "model_name", normalized_data.get("model_name", ""))
         self.invalid_key = _normalize_bool(getattr(self, "invalid_key", False), default=False)
         self.updated_at = _normalize_datetime(getattr(self, "updated_at", None))
         self.quota_exhausted_at = _normalize_datetime(getattr(self, "quota_exhausted_at", None))
@@ -348,7 +364,7 @@ class QuotaRecord:
         self.requests_today = getattr(self, "requests_today", 0) + 1
         self.tokens_today = getattr(self, "tokens_today", 0) + tokens
 
-    def mark_request_failure(self, error: str = None, quota_exhausted: bool = False):
+    def mark_request_failure(self, error: Optional[str] = None, quota_exhausted: bool = False):
         """Update local object state after failed request
 
         WARNING: This ONLY updates the in-memory object. Persistence must be handled separately.
@@ -635,15 +651,7 @@ class RedisApiKeyQuota:
         existing = await client.hgetall(quota_key)
 
         if existing:
-            # Convert Redis data back to proper types
-            quota_data = dict(existing)
-            quota_data["requests_today"] = int(quota_data.get("requests_today", 0))
-            quota_data["tokens_today"] = int(quota_data.get("tokens_today", 0))
-            quota_data["error_count"] = int(quota_data.get("error_count", 0))
-            quota_data["last_reset"] = quota_data.get("last_reset", "")
-            quota_data["last_reset_date"] = quota_data.get("last_reset", "")  # Alias for compatibility
-            quota_data["invalid_key"] = quota_data.get("invalid_key", "false").lower() == "true"
-            return QuotaRecord(quota_data), False
+            return QuotaRecord(existing), False
 
         # Create new quota entry
         # Use Pacific timezone for Google API quota resets (midnight Pacific)
@@ -794,13 +802,7 @@ class RedisApiKeyQuota:
         for quota_key in quota_keys:
             data = await client.hgetall(quota_key)
             if data:
-                quota_data = dict(data)
-                quota_data["requests_today"] = int(quota_data.get("requests_today", 0))
-                quota_data["tokens_today"] = int(quota_data.get("tokens_today", 0))
-                quota_data["error_count"] = int(quota_data.get("error_count", 0))
-                quota_data["last_reset_date"] = quota_data.get("last_reset", "")
-                quota_data["invalid_key"] = quota_data.get("invalid_key", "false").lower() == "true"
-                quotas.append(QuotaRecord(quota_data))
+                quotas.append(QuotaRecord(data))
 
         return quotas
 
@@ -835,7 +837,9 @@ class RedisApiKeyQuota:
         return count
 
     @staticmethod
-    async def mark_quota_exhausted(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
+    async def mark_quota_exhausted(
+        api_key: str, provider_id: str, model_name: str, error: Optional[str] = None
+    ) -> None:
         """Mark a quota entry as exhausted and persist to Redis.
 
         Args:
@@ -865,7 +869,7 @@ class RedisApiKeyQuota:
         logger.debug(f"Marked quota as exhausted: {quota_key}")
 
     @staticmethod
-    async def mark_error(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
+    async def mark_error(api_key: str, provider_id: str, model_name: str, error: Optional[str] = None) -> None:
         """Mark an error for a quota entry and persist to Redis.
 
         Args:

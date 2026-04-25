@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import smolrouter.redis_backend as redis_backend_module
 import smolrouter.storage as storage_module
-from smolrouter.redis_backend import LogRecord, QuotaRecord, RedisRequestLog
+from smolrouter.redis_backend import LogRecord, QuotaRecord, RedisApiKeyQuota, RedisRequestLog
 from smolrouter.redis_config import redis_client
 
 
@@ -118,6 +119,24 @@ def test_quota_record_parses_booleans_and_timestamps():
     assert quota.quota_exhausted_at == datetime(2026, 4, 25, 4, 0, 0, tzinfo=timezone.utc)
 
 
+def test_quota_record_hydrates_last_reset_and_key_hash_aliases():
+    quota = QuotaRecord(
+        {
+            "requests_today": "1",
+            "tokens_today": "2",
+            "error_count": "0",
+            "invalid_key": "false",
+            "last_reset": "2026-04-25",
+            "key_hash": "hash-alias",
+            "model_name": "gemini-2.5-flash",
+        }
+    )
+
+    assert quota.last_reset_date == "2026-04-25"
+    assert quota.api_key_hash == "hash-alias"
+    assert quota.invalid_key is False
+
+
 def test_quota_record_failure_tracks_last_error_and_quota_exhaustion():
     quota = QuotaRecord({"requests_today": "1", "tokens_today": "10", "error_count": "0"})
 
@@ -153,3 +172,106 @@ async def test_request_log_update_completion_rejects_unexpected_fields():
             status_code=200,
             unexpected_field="boom",
         )
+
+
+@pytest.mark.asyncio
+async def test_request_log_round_trip_preserves_recency_and_duplicate_indexes(monkeypatch):
+    monkeypatch.setattr(
+        storage_module,
+        "get_blob_storage",
+        lambda: FakeBlobStorage({"req-blob": b'{"prompt": "hi"}', "resp-blob": b'{"ok": true}'}),
+    )
+    await redis_client.flushall()
+
+    first_time = datetime(2026, 4, 25, 1, 0, 0, tzinfo=timezone.utc)
+    second_time = first_time + timedelta(seconds=5)
+
+    first_id = await RedisRequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-1",
+        timestamp=first_time,
+        request_body_hash="body-hash",
+    )
+    second_id = await RedisRequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-2",
+        timestamp=second_time,
+        request_body_hash="body-hash",
+    )
+
+    await RedisRequestLog.update_request_body_key(second_id, "req-blob")
+    await RedisRequestLog.update_completion(
+        request_id=second_id,
+        status_code=201,
+        response_size=12,
+        response_body_key="resp-blob",
+        provider_id="provider-a",
+        api_key_index=1,
+        api_key_total=3,
+    )
+
+    record = await RedisRequestLog.get_by_id(second_id)
+    recent = await RedisRequestLog.get_recent(limit=2)
+    by_source_ip = await RedisRequestLog.get_by_source_ip("192.168.1.100", limit=1)
+    duplicate_ids = await RedisRequestLog.get_duplicate_request_ids("body-hash")
+    recent_duplicate_ids = await RedisRequestLog.get_recent_duplicate_request_ids("body-hash", limit=1)
+
+    assert record is not None
+    assert record.request_body == b'{"prompt": "hi"}'
+    assert record.response_body == b'{"ok": true}'
+    assert record.provider_id == "provider-a"
+    assert record.is_duplicate is True
+    assert record.duplicate_count == 1
+    assert [item.id for item in recent] == [second_id, first_id]
+    assert [item.id for item in by_source_ip] == [second_id]
+    assert set(duplicate_ids) == {first_id, second_id}
+    assert recent_duplicate_ids == [second_id]
+
+
+@pytest.mark.asyncio
+async def test_api_key_quota_round_trip_and_usage_markers(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    quota_a, created_a = await RedisApiKeyQuota.get_or_create_quota("sk-test", "provider-a", "gemini-2.5-flash")
+    quota_b, created_b = await RedisApiKeyQuota.get_or_create_quota("sk-test", "provider-b", "gemini-2.5-flash")
+    updated = await RedisApiKeyQuota.increment_usage(
+        "sk-test",
+        "provider-a",
+        "gemini-2.5-flash",
+        request_count=2,
+        token_count=50,
+    )
+    existing_a, was_created = await RedisApiKeyQuota.get_or_create_quota("sk-test", "provider-a", "gemini-2.5-flash")
+
+    await RedisApiKeyQuota.mark_error("sk-test", "provider-a", "gemini-2.5-flash", "temporary failure")
+    await RedisApiKeyQuota.mark_quota_exhausted("sk-test", "provider-a", "gemini-2.5-flash", "daily limit")
+    marked_invalid = await RedisApiKeyQuota.mark_invalid(RedisApiKeyQuota.hash_api_key("sk-test"), "provider-a")
+
+    provider_a_usage = await RedisApiKeyQuota.get_provider_usage("provider-a")
+    provider_b_usage = await RedisApiKeyQuota.get_provider_usage("provider-b")
+
+    assert created_a is True
+    assert created_b is True
+    assert quota_a.requests_today == 0
+    assert quota_b.requests_today == 0
+    assert updated["requests_today"] == 2
+    assert updated["tokens_today"] == 50
+    assert was_created is False
+    assert existing_a.requests_today == 2
+    assert existing_a.tokens_today == 50
+    assert marked_invalid == 1
+    assert len(provider_a_usage) == 1
+    assert provider_a_usage[0].error_count == 2
+    assert provider_a_usage[0].last_error == "daily limit"
+    assert provider_a_usage[0].invalid_key is True
+    assert provider_a_usage[0].quota_exhausted_at is not None
+    assert len(provider_b_usage) == 1
+    assert provider_b_usage[0].invalid_key is False

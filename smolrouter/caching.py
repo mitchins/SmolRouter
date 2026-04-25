@@ -8,7 +8,7 @@ models from multiple providers, with configurable TTL and invalidation.
 import asyncio
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Awaitable, Callable, Dict, List, Optional, Any, cast
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class ProviderHealthInfo:
     """Detailed health information for a provider"""
 
-    healthy: bool = None  # None = unknown, True = healthy, False = unhealthy
+    healthy: Optional[bool] = None
     last_checked: Optional[datetime] = None
     last_healthy: Optional[datetime] = None
 
@@ -81,7 +81,7 @@ class InMemoryModelCache(IModelCache):
                 await asyncio.sleep(self.cleanup_interval)
                 await self._cleanup_expired()
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 logger.error(f"Error in cache cleanup loop: {e}")
 
@@ -118,7 +118,7 @@ class InMemoryModelCache(IModelCache):
             )
             return entry.data.copy()  # Return copy to prevent external modification
 
-    async def cache_models(self, provider_id: str, models: List[ModelInfo], ttl_seconds: int = None):
+    async def cache_models(self, provider_id: str, models: List[ModelInfo], ttl_seconds: Optional[int] = None):
         """Cache models for a provider with TTL"""
         if ttl_seconds is None:
             ttl_seconds = self.default_ttl
@@ -134,7 +134,7 @@ class InMemoryModelCache(IModelCache):
             self._cache[cache_key] = entry
             logger.debug(f"Cached {len(models)} models for provider {provider_id} (TTL: {ttl_seconds}s)")
 
-    async def invalidate_cache(self, provider_id: str = None):
+    async def invalidate_cache(self, provider_id: Optional[str] = None):
         """Invalidate cache for specific provider or all providers"""
         async with self._lock:
             if provider_id is None:
@@ -195,11 +195,11 @@ class NoOpModelCache(IModelCache):
     async def get_cached_models(self, provider_id: str) -> Optional[List[ModelInfo]]:
         return None
 
-    async def cache_models(self, provider_id: str, models: List[ModelInfo], ttl_seconds: int = None):
-        pass
+    async def cache_models(self, provider_id: str, models: List[ModelInfo], ttl_seconds: Optional[int] = None):
+        return None
 
-    async def invalidate_cache(self, provider_id: str = None):
-        pass
+    async def invalidate_cache(self, provider_id: Optional[str] = None):
+        return None
 
     async def is_cache_valid(self, provider_id: str) -> bool:
         return False
@@ -214,7 +214,11 @@ class ModelAggregator:
     """
 
     def __init__(
-        self, providers: List, cache: IModelCache = None, default_cache_ttl: int = 300, health_check_interval: int = 30
+        self,
+        providers: List,
+        cache: Optional[IModelCache] = None,
+        default_cache_ttl: int = 300,
+        health_check_interval: int = 30,
     ):
         self.providers = providers
         self.cache = cache or InMemoryModelCache(default_ttl=default_cache_ttl)
@@ -243,7 +247,7 @@ class ModelAggregator:
                 await asyncio.sleep(self.health_check_interval)
                 await self._update_provider_health()
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 logger.error(f"Error in health monitoring loop: {e}")
 
@@ -367,7 +371,7 @@ class ModelAggregator:
 
         return await self._discover_models_from_provider(provider, force_refresh)
 
-    async def refresh_provider_cache(self, provider_id: str = None):
+    async def refresh_provider_cache(self, provider_id: Optional[str] = None):
         """Refresh cache for specific provider or all providers"""
         if provider_id:
             await self.cache.invalidate_cache(provider_id)
@@ -378,23 +382,25 @@ class ModelAggregator:
 
     async def get_provider_health(self) -> Dict[str, bool]:
         """Get health status of all providers (backward compatibility)"""
-        return {
-            provider_id: health_info.healthy if health_info.healthy is not None else False
-            for provider_id, health_info in self._provider_health.items()
-        }
+        async with self._discovery_lock:
+            return {
+                provider_id: health_info.healthy if health_info.healthy is not None else False
+                for provider_id, health_info in self._provider_health.items()
+            }
 
     async def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
         """Get detailed health status of all providers"""
-        result = {}
-        for provider_id, health_info in self._provider_health.items():
-            result[provider_id] = {
-                "healthy": health_info.healthy,
-                "status": health_info.status,
-                "last_checked": health_info.last_checked.isoformat() if health_info.last_checked else None,
-                "last_healthy": health_info.last_healthy.isoformat() if health_info.last_healthy else None,
-                "last_checked_ago": self._time_ago(health_info.last_checked) if health_info.last_checked else "never",
-            }
-        return result
+        async with self._discovery_lock:
+            result = {}
+            for provider_id, health_info in self._provider_health.items():
+                result[provider_id] = {
+                    "healthy": health_info.healthy,
+                    "status": health_info.status,
+                    "last_checked": health_info.last_checked.isoformat() if health_info.last_checked else None,
+                    "last_healthy": health_info.last_healthy.isoformat() if health_info.last_healthy else None,
+                    "last_checked_ago": self._time_ago(health_info.last_checked) if health_info.last_checked else "never",
+                }
+            return result
 
     def _time_ago(self, timestamp: datetime) -> str:
         """Get human-readable time ago string"""
@@ -416,13 +422,21 @@ class ModelAggregator:
     async def get_aggregation_stats(self) -> Dict[str, Any]:
         """Get aggregation statistics for monitoring"""
         cache_stats = {}
-        if hasattr(self.cache, "get_cache_stats"):
-            cache_stats = await self.cache.get_cache_stats()
+        get_cache_stats = cast(
+            Optional[Callable[[], Awaitable[Dict[str, Any]]]],
+            getattr(self.cache, "get_cache_stats", None),
+        )
+        if get_cache_stats is not None:
+            cache_stats = await get_cache_stats()
+
+        async with self._discovery_lock:
+            provider_health = self._provider_health.copy()
+            healthy_providers = sum(1 for health_info in provider_health.values() if health_info.healthy is True)
 
         return {
             "provider_count": len(self.providers),
-            "provider_health": self._provider_health.copy(),
-            "healthy_providers": sum(1 for healthy in self._provider_health.values() if healthy),
+            "provider_health": provider_health,
+            "healthy_providers": healthy_providers,
             "cache_stats": cache_stats,
             "default_cache_ttl": self.default_cache_ttl,
             "health_check_interval": self.health_check_interval,
@@ -433,5 +447,6 @@ class ModelAggregator:
         if self._health_check_task and not self._health_check_task.done():
             self._health_check_task.cancel()
 
-        if hasattr(self.cache, "close"):
-            self.cache.close()
+        close_cache = cast(Optional[Callable[[], None]], getattr(self.cache, "close", None))
+        if close_cache is not None:
+            close_cache()
