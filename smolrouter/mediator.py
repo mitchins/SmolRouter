@@ -92,6 +92,24 @@ class ModelMediator:
         self._models_registered_in_lb = True
         logger.info(f"Registered {len(models)} models in load balancer")
 
+    async def _resolve_model_via_load_balancer(
+        self, requested_model: str, available_models: List[ModelInfo]
+    ) -> Optional[ModelInfo]:
+        """Resolve a model name through the load balancer and attach LB metadata."""
+        instance = await model_load_balancer.select_instance(requested_model)
+        if not instance:
+            return None
+
+        logger.info(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
+
+        for model in available_models:
+            if model.name == instance.model_id and model.endpoint == instance.provider_url:
+                model._lb_selected_instance = instance.model_id
+                model._lb_instance = instance
+                return model
+
+        return None
+
     async def resolve_model_for_request(
         self, requested_model: str, client: ClientContext, force_refresh: bool = False
     ) -> Optional[ModelInfo]:
@@ -124,28 +142,21 @@ class ModelMediator:
         # Register models in load balancer if not already done
         self._register_models_in_load_balancer(available_models)
 
-        # Step 2: Check if load balancing is needed (multiple instances of the same base model)
-        instance = await model_load_balancer.select_instance(requested_model)
-        if instance:
-            # Load balancer found multiple instances - use the selected one
-            logger.info(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
-            # Find the corresponding ModelInfo for the selected instance
-            for model in available_models:
-                if model.name == instance.model_id and model.endpoint == instance.provider_url:
-                    # Store the selected instance name for request mutation
-                    model._lb_selected_instance = instance.model_id
-                    # Store the full LB instance for completion tracking (to call end_request)
-                    model._lb_instance = instance
-                    return model
-
-        # Step 3: Fall back to strategy resolution (single model or no load balancing needed)
+        # Step 2: Resolve aliases and other strategy rules before load balancing.
+        # This preserves legacy remaps like gpt-4 -> llama3-70b even when the
+        # original request name also exists as a concrete model.
         resolved_model = await self.strategy.resolve_model_request(requested_model, available_models)
+
+        candidate_model_name = resolved_model.name if resolved_model else requested_model
+        lb_resolved_model = await self._resolve_model_via_load_balancer(candidate_model_name, available_models)
+        if lb_resolved_model:
+            return lb_resolved_model
 
         if resolved_model is None:
             logger.warning(f"Could not resolve model '{requested_model}' for client {client.ip}")
             return None
 
-        # Step 3: Final access control check (should pass since model came from filtered list)
+        # Step 4: Final access control check (should pass since model came from filtered list)
         if not await self.access_control.can_access_model(resolved_model, client):
             logger.warning(f"Access denied to resolved model '{resolved_model.id}' for client {client.ip}")
             return None
