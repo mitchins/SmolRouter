@@ -359,6 +359,85 @@ class OpenAIProvider(BaseModelProvider):
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         return headers
 
+    @staticmethod
+    def _normalize_client_header_value(value: Any) -> Any:
+        return value.decode("utf-8") if isinstance(value, bytes) else value
+
+    def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+        passthrough_headers = {"openai-organization", "openai-project", "user-agent"}
+        if not client_headers:
+            return headers
+
+        for key, value in client_headers.items():
+            normalized_value = self._normalize_client_header_value(value)
+            normalized_key = key.lower()
+
+            if normalized_key == "authorization":
+                if not self.config.api_key:
+                    headers["Authorization"] = normalized_value
+                continue
+
+            if normalized_key in passthrough_headers:
+                headers[key] = normalized_value
+
+        return headers
+
+    async def _post_completion_request(
+        self,
+        url: str,
+        openai_request: Dict[str, Any],
+        headers: Dict[str, str],
+    ) -> Tuple[Dict[str, Any], int]:
+        async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+            response = await client.post(
+                url,
+                json=openai_request,
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response.json(), 200
+
+    @staticmethod
+    def _http_status_error_response(error: httpx.HTTPStatusError) -> Tuple[Dict[str, Any], int]:
+        logger.error(f"OpenAI API error: {error.response.status_code} - {error.response.text}")
+        try:
+            return error.response.json(), error.response.status_code
+        except Exception:
+            return {
+                "error": {
+                    "message": f"OpenAI API error: {error.response.status_code}",
+                    "type": "api_error",
+                    "code": str(error.response.status_code),
+                }
+            }, error.response.status_code
+
+    def _timeout_error_response(self, error: httpx.TimeoutException) -> Tuple[Dict[str, Any], int]:
+        logger.error(f"OpenAI API timeout: {error}")
+        return {
+            "error": {
+                "message": f"Request to OpenAI API timed out after {self.config.timeout}s",
+                "type": "timeout_error",
+                "code": "timeout",
+            }
+        }, 408
+
+    @staticmethod
+    def _connection_error_response(error: httpx.ConnectError) -> Tuple[Dict[str, Any], int]:
+        logger.error(f"OpenAI API connection error: {error}")
+        return {
+            "error": {
+                "message": f"Failed to connect to OpenAI API: {str(error)}",
+                "type": "connection_error",
+                "code": "connection_failed",
+            }
+        }, 503
+
+    @staticmethod
+    def _unexpected_api_error_response(error: Exception) -> Tuple[Dict[str, Any], int]:
+        error_msg = str(error) if str(error).strip() else f"Unknown error of type {type(error).__name__}"
+        logger.error(f"Error calling OpenAI API: {error_msg}")
+        return {"error": {"message": f"Failed to call OpenAI API: {error_msg}", "type": "api_error"}}, 500
+
     async def generate_completion(
         self,
         openai_request: Dict[str, Any],
@@ -367,68 +446,17 @@ class OpenAIProvider(BaseModelProvider):
     ) -> Tuple[Dict[str, Any], int]:
         """Generate completion by passing through to OpenAI API"""
         try:
-            headers = self._get_headers()
-            if client_headers:
-                for key, value in client_headers.items():
-                    # Convert bytes to string if needed
-                    if isinstance(value, bytes):
-                        value = value.decode("utf-8")
-
-                    # Only use client Authorization for passthrough providers.
-                    # Configured OpenAI-compatible providers must keep their own upstream key.
-                    if key.lower() == "authorization" and not self.config.api_key:
-                        headers["Authorization"] = value
-                    # Pass through other relevant headers
-                    elif key.lower() in ["openai-organization", "openai-project", "user-agent"]:
-                        headers[key] = value
-
-            url = self._build_request_url(endpoint)
-
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
-                response = await client.post(
-                    url,
-                    json=openai_request,  # Pass through request as-is
-                    headers=headers,
-                )
-                response.raise_for_status()
-                return response.json(), 200
+            headers = self._merge_client_headers(self._get_headers(), client_headers)
+            return await self._post_completion_request(self._build_request_url(endpoint), openai_request, headers)
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"OpenAI API error: {e.response.status_code} - {e.response.text}")
-            # Return error in OpenAI format with proper status code
-            try:
-                error_response = e.response.json()
-                return error_response, e.response.status_code
-            except Exception:
-                return {
-                    "error": {
-                        "message": f"OpenAI API error: {e.response.status_code}",
-                        "type": "api_error",
-                        "code": str(e.response.status_code),
-                    }
-                }, e.response.status_code
+            return self._http_status_error_response(e)
         except httpx.TimeoutException as e:
-            logger.error(f"OpenAI API timeout: {e}")
-            return {
-                "error": {
-                    "message": f"Request to OpenAI API timed out after {self.config.timeout}s",
-                    "type": "timeout_error",
-                    "code": "timeout",
-                }
-            }, 408
+            return self._timeout_error_response(e)
         except httpx.ConnectError as e:
-            logger.error(f"OpenAI API connection error: {e}")
-            return {
-                "error": {
-                    "message": f"Failed to connect to OpenAI API: {str(e)}",
-                    "type": "connection_error",
-                    "code": "connection_failed",
-                }
-            }, 503
+            return self._connection_error_response(e)
         except Exception as e:
-            error_msg = str(e) if str(e).strip() else f"Unknown error of type {type(e).__name__}"
-            logger.error(f"Error calling OpenAI API: {error_msg}")
-            return {"error": {"message": f"Failed to call OpenAI API: {error_msg}", "type": "api_error"}}, 500
+            return self._unexpected_api_error_response(e)
 
 
 @dataclass
@@ -577,6 +605,27 @@ class ProviderFactory:
 
         return provider_class(config)
 
+    @staticmethod
+    def _convert_proxy_entry(proxy_entry: Any, proxy_config_cls: Any) -> Any:
+        return proxy_config_cls(**proxy_entry) if isinstance(proxy_entry, dict) else proxy_entry
+
+    @classmethod
+    def _convert_per_model_proxy(cls, per_model_proxy: Any, proxy_config_cls: Any) -> Any:
+        if not isinstance(per_model_proxy, dict):
+            return per_model_proxy
+
+        return {
+            model_name: cls._convert_proxy_entry(proxy_value, proxy_config_cls)
+            for model_name, proxy_value in per_model_proxy.items()
+        }
+
+    @classmethod
+    def _convert_proxy_pool(cls, proxy_pool: Any, proxy_config_cls: Any) -> Any:
+        if not isinstance(proxy_pool, list):
+            return proxy_pool
+
+        return [None if entry is None else cls._convert_proxy_entry(entry, proxy_config_cls) for entry in proxy_pool]
+
     @classmethod
     def _convert_proxy_configs(cls, provider_config: Dict[str, Any]) -> Dict[str, Any]:
         """Convert dictionary proxy configurations to ProxyConfig objects"""
@@ -589,28 +638,11 @@ class ProviderFactory:
         if "proxy_config" in config and isinstance(config["proxy_config"], dict):
             config["proxy_config"] = ProxyConfig(**config["proxy_config"])
 
-        # Convert per_model_proxy dict values to ProxyConfig objects
-        if "per_model_proxy" in config and isinstance(config["per_model_proxy"], dict):
-            per_model_proxy = {}
-            for model_name, proxy_dict in config["per_model_proxy"].items():
-                if isinstance(proxy_dict, dict):
-                    per_model_proxy[model_name] = ProxyConfig(**proxy_dict)
-                else:
-                    per_model_proxy[model_name] = proxy_dict
-            config["per_model_proxy"] = per_model_proxy
+        if "per_model_proxy" in config:
+            config["per_model_proxy"] = cls._convert_per_model_proxy(config["per_model_proxy"], ProxyConfig)
 
-        # Convert proxy_pool list entries to ProxyConfig objects
-        # proxy_pool is a list where each entry is either null (direct) or a proxy dict
-        if "proxy_pool" in config and isinstance(config["proxy_pool"], list):
-            proxy_pool = []
-            for entry in config["proxy_pool"]:
-                if entry is None:
-                    proxy_pool.append(None)  # Direct connection
-                elif isinstance(entry, dict):
-                    proxy_pool.append(ProxyConfig(**entry))
-                else:
-                    proxy_pool.append(entry)  # Already a ProxyConfig or other
-            config["proxy_pool"] = proxy_pool
+        if "proxy_pool" in config:
+            config["proxy_pool"] = cls._convert_proxy_pool(config["proxy_pool"], ProxyConfig)
 
         return config
 

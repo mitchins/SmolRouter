@@ -23,6 +23,7 @@ logger = logging.getLogger("smolrouter.database")
 
 # Configuration
 MAX_AGE_DAYS = int(os.getenv("MAX_LOG_AGE_DAYS", "7"))  # Auto-purge logs older than N days (0 = disabled)
+JSON_BLOB_CONTENT_TYPE = "application/json"
 
 # Global cleanup task
 _cleanup_task = None
@@ -67,138 +68,99 @@ class RequestLogEntry:
         self.is_duplicate = kwargs.get("is_duplicate", False)
         self.duplicate_count = kwargs.get("duplicate_count", 0)
 
+    def _has_completion_data(self) -> bool:
+        return bool(getattr(self, "completed_at", None))
+
+    async def _store_request_body_if_needed(self, blob_storage) -> str | None:
+        request_body_key = getattr(self, "request_body_key", None)
+        request_body_bytes = getattr(self, "request_body", None)
+
+        if request_body_key or not request_body_bytes:
+            return request_body_key
+
+        request_body_key = await asyncio.to_thread(
+            blob_storage.store,
+            request_body_bytes,
+            content_type=JSON_BLOB_CONTENT_TYPE,
+        )
+        self.request_body_key = request_body_key
+        return request_body_key
+
+    async def _store_response_body_if_present(self, blob_storage) -> str | None:
+        response_body_bytes = getattr(self, "response_body", None)
+        if not response_body_bytes:
+            return None
+
+        response_body_key = await asyncio.to_thread(
+            blob_storage.store,
+            response_body_bytes,
+            content_type=JSON_BLOB_CONTENT_TYPE,
+        )
+        self.response_body_key = response_body_key
+        return response_body_key
+
+    def _completion_update_kwargs(self, request_body_key: str | None, response_body_key: str | None) -> dict:
+        return {
+            "request_id": self.request_id,
+            "status_code": getattr(self, "status_code", 200),
+            "response_size": getattr(self, "response_size", 0),
+            "error_message": getattr(self, "error_message", None),
+            "duration_ms": getattr(self, "duration_ms", None),
+            "prompt_tokens": getattr(self, "prompt_tokens", None),
+            "completion_tokens": getattr(self, "completion_tokens", None),
+            "total_tokens": getattr(self, "total_tokens", None),
+            "request_body_key": request_body_key,
+            "response_body_key": response_body_key,
+            "api_key_suffix": getattr(self, "api_key_suffix", None),
+            "proxy_used": getattr(self, "proxy_used", None),
+            "provider_id": getattr(self, "provider_id", None),
+            "api_key_index": getattr(self, "api_key_index", None),
+            "api_key_total": getattr(self, "api_key_total", None),
+        }
+
+    async def _store_completion_update(self) -> None:
+        from .storage import get_blob_storage
+        from .redis_backend import RedisRequestLog
+
+        blob_storage = get_blob_storage()
+        request_body_key = await self._store_request_body_if_needed(blob_storage)
+        response_body_key = await self._store_response_body_if_present(blob_storage)
+        await RedisRequestLog.update_completion(
+            **self._completion_update_kwargs(request_body_key, response_body_key)
+        )
+
+    async def _run_completion_update(self) -> None:
+        try:
+            await self._store_completion_update()
+        except Exception as e:
+            logger.error(f"Failed to store blobs/update completion asynchronously: {e}")
+
+    def _schedule_completion_update(self) -> None:
+        try:
+            asyncio.create_task(self._run_completion_update())
+        except RuntimeError:
+            # No event loop running - run synchronously (tests/CLI)
+            try:
+                asyncio.run(self._run_completion_update())
+            except Exception as e:
+                logger.error(f"Failed to run async store/update: {e}")
+
     def save(self):
         """Update Redis with completion data when request is finished"""
-        if hasattr(self, "completed_at") and self.completed_at:
-            import asyncio
-            from .storage import get_blob_storage
+        if not self._has_completion_data():
+            return
 
-            # Capture local refs for async task
-            request_id = self.request_id
-            status_code = getattr(self, "status_code", 200)
-            response_size = getattr(self, "response_size", 0)
-            error_message = getattr(self, "error_message", None)
-            duration_ms = getattr(self, "duration_ms", None)
-            prompt_tokens = getattr(self, "prompt_tokens", None)
-            completion_tokens = getattr(self, "completion_tokens", None)
-            total_tokens = getattr(self, "total_tokens", None)
-            api_key_suffix = getattr(self, "api_key_suffix", None)
-            proxy_used = getattr(self, "proxy_used", None)
-            provider_id = getattr(self, "provider_id", None)
-            api_key_index = getattr(self, "api_key_index", None)
-            api_key_total = getattr(self, "api_key_total", None)
-            request_body_bytes = getattr(self, "request_body", None)
-            response_body_bytes = getattr(self, "response_body", None)
-            existing_request_body_key = getattr(self, "request_body_key", None)
-
-            blob_storage = get_blob_storage()
-
-            async def _store_and_update():
-                from .redis_backend import RedisRequestLog
-
-                try:
-                    # Only store request body if it wasn't already stored at request start
-                    req_key = existing_request_body_key
-                    if not req_key and request_body_bytes:
-                        req_key = await asyncio.to_thread(
-                            blob_storage.store, request_body_bytes, content_type="application/json"
-                        )
-                        self.request_body_key = req_key
-
-                    # Always store response body on completion
-                    resp_key = None
-                    if response_body_bytes:
-                        resp_key = await asyncio.to_thread(
-                            blob_storage.store, response_body_bytes, content_type="application/json"
-                        )
-                        self.response_body_key = resp_key
-
-                    await RedisRequestLog.update_completion(
-                        request_id=request_id,
-                        status_code=status_code,
-                        response_size=response_size,
-                        error_message=error_message,
-                        duration_ms=duration_ms,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                        request_body_key=req_key,
-                        response_body_key=resp_key,
-                        api_key_suffix=api_key_suffix,
-                        proxy_used=proxy_used,
-                        provider_id=provider_id,
-                        api_key_index=api_key_index,
-                        api_key_total=api_key_total,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to store blobs/update completion asynchronously: {e}")
-
-            try:
-                asyncio.create_task(_store_and_update())
-            except RuntimeError:
-                # No event loop running - run synchronously (tests/CLI)
-                try:
-                    asyncio.run(_store_and_update())
-                except Exception as e:
-                    logger.error(f"Failed to run async store/update: {e}")
+        self._schedule_completion_update()
 
     async def save_async(self):
         """Async version of save() that awaits blob storage and Redis updates.
 
         Useful in tests to avoid races with background tasks.
         """
-        if hasattr(self, "completed_at") and self.completed_at:
-            from .storage import get_blob_storage
-            from .redis_backend import RedisRequestLog
+        if not self._has_completion_data():
+            return
 
-            request_id = self.request_id
-            status_code = getattr(self, "status_code", 200)
-            response_size = getattr(self, "response_size", 0)
-            error_message = getattr(self, "error_message", None)
-            duration_ms = getattr(self, "duration_ms", None)
-            prompt_tokens = getattr(self, "prompt_tokens", None)
-            completion_tokens = getattr(self, "completion_tokens", None)
-            total_tokens = getattr(self, "total_tokens", None)
-            api_key_suffix = getattr(self, "api_key_suffix", None)
-            proxy_used = getattr(self, "proxy_used", None)
-            provider_id = getattr(self, "provider_id", None)
-            request_body_bytes = getattr(self, "request_body", None)
-            response_body_bytes = getattr(self, "response_body", None)
-            existing_request_body_key = getattr(self, "request_body_key", None)
-
-            blob_storage = get_blob_storage()
-
-            # Only store request body if it wasn't already stored at request start
-            req_key = existing_request_body_key
-            if not req_key and request_body_bytes:
-                req_key = await asyncio.to_thread(
-                    blob_storage.store, request_body_bytes, content_type="application/json"
-                )
-                self.request_body_key = req_key
-
-            # Always store response body on completion
-            resp_key = None
-            if response_body_bytes:
-                resp_key = await asyncio.to_thread(
-                    blob_storage.store, response_body_bytes, content_type="application/json"
-                )
-                self.response_body_key = resp_key
-
-            await RedisRequestLog.update_completion(
-                request_id=request_id,
-                status_code=status_code,
-                response_size=response_size,
-                error_message=error_message,
-                duration_ms=duration_ms,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
-                request_body_key=req_key,
-                response_body_key=resp_key,
-                api_key_suffix=api_key_suffix,
-                proxy_used=proxy_used,
-                provider_id=provider_id,
-            )
+        await self._store_completion_update()
 
     def set_request_body(self, body):
         """Store request body for logging"""
@@ -483,7 +445,7 @@ async def background_cleanup_task():
 
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
-            break
+            raise
         except Exception as e:
             logger.error(f"Error in background cleanup: {e}")
             # Continue running despite errors
@@ -593,33 +555,53 @@ def estimate_token_count(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _estimate_tokens_from_message_content(content) -> int:
+    if isinstance(content, str):
+        return estimate_token_count(content)
+
+    if not isinstance(content, list):
+        return 0
+
+    total_tokens = 0
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            total_tokens += estimate_token_count(item.get("text", ""))
+    return total_tokens
+
+
+def _estimate_tokens_from_messages(messages) -> int:
+    if not isinstance(messages, list):
+        return 0
+
+    total_tokens = 0
+    for message in messages:
+        if isinstance(message, dict):
+            total_tokens += _estimate_tokens_from_message_content(message.get("content", ""))
+    return total_tokens
+
+
+def _estimate_tokens_from_prompt(prompt) -> int:
+    if isinstance(prompt, str):
+        return estimate_token_count(prompt)
+
+    if not isinstance(prompt, list):
+        return 0
+
+    return sum(estimate_token_count(str(item)) for item in prompt)
+
+
 def estimate_tokens_from_request(request_data: dict) -> int:
     """Extract token count from request data"""
     if not request_data:
         return 0
 
-    total_tokens = 0
-
-    # Handle different request formats
     if "messages" in request_data:  # Chat completions
-        for message in request_data.get("messages", []):
-            content = message.get("content", "")
-            if isinstance(content, str):
-                total_tokens += estimate_token_count(content)
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        total_tokens += estimate_token_count(item.get("text", ""))
+        return _estimate_tokens_from_messages(request_data.get("messages", []))
 
-    elif "prompt" in request_data:  # Legacy completions
-        prompt = request_data.get("prompt", "")
-        if isinstance(prompt, str):
-            total_tokens += estimate_token_count(prompt)
-        elif isinstance(prompt, list):
-            for p in prompt:
-                total_tokens += estimate_token_count(str(p))
+    if "prompt" in request_data:  # Legacy completions
+        return _estimate_tokens_from_prompt(request_data.get("prompt", ""))
 
-    return total_tokens
+    return 0
 
 
 def extract_tokens_from_openai_response(response_data: dict) -> tuple:
