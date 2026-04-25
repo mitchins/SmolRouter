@@ -1,9 +1,10 @@
 import pytest
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 import httpx
 from httpx import AsyncClient
+from fastapi.testclient import TestClient
 
 from smolrouter.app import app
 from smolrouter.database import RequestLog, get_log_stats
@@ -248,6 +249,118 @@ async def test_api_stats_endpoint(isolated_db, sample_logs, disable_logging):
 
 
 @pytest.mark.asyncio
+async def test_api_client_endpoint_uses_redis_client_logs(isolated_db, sample_logs, disable_logging):
+    """Test the client-specific API uses Redis-backed per-IP lookup and keeps stats independent of log limit."""
+    inflight_log = await RequestLog.create(
+        source_ip="192.168.1.100",  # NOSONAR S1313
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4o-mini",
+        mapped_model="gpt-4o-mini",
+        timestamp=datetime.now() - timedelta(minutes=2),
+    )
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/clients/192.168.1.100", params={"limit": 2})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["client_ip"] == "192.168.1.100"
+    assert payload["stats"]["total_requests"] == 3
+    assert payload["stats"]["successful_requests"] == 2
+    assert payload["stats"]["recent_requests"] == 3
+    assert payload["stats"]["inflight_requests"] == 1
+    assert set(payload["stats"]["models_used"]) == {"gemma3-12b", "gpt-3.5-turbo", "gpt-4o-mini"}
+    assert len(payload["logs"]) == 2
+
+    inflight_entry = next(log for log in payload["logs"] if log["id"] == inflight_log.id)
+    assert inflight_entry["status_code"] is None
+    assert isinstance(inflight_entry["duration_ms"], int)
+
+
+@pytest.mark.asyncio
+async def test_api_performance_endpoint_uses_redis_recent_logs(isolated_db, disable_logging):
+    """Performance API should return Redis-backed completed requests with token data and respect filters."""
+    now = datetime.now(timezone.utc)
+    recent_log = await RequestLog.create(
+        source_ip="192.168.1.150",  # NOSONAR S1313
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        duration_ms=1800,
+        status_code=200,
+        completed_at=now - timedelta(hours=1),
+        timestamp=now - timedelta(hours=1),
+    )
+    recent_log.prompt_tokens = 120
+    recent_log.completion_tokens = 30
+    recent_log.total_tokens = 150
+    await recent_log.save_async()
+
+    old_log = await RequestLog.create(
+        source_ip="192.168.1.151",  # NOSONAR S1313
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        duration_ms=3200,
+        status_code=200,
+        completed_at=now - timedelta(hours=30),
+        timestamp=now - timedelta(hours=30),
+    )
+    old_log.prompt_tokens = 200
+    old_log.completion_tokens = 50
+    old_log.total_tokens = 250
+    await old_log.save_async()
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/performance",
+            params={"hours": 24, "model": "llama3-70b", "service_type": "openai", "limit": 10},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["total_points"] == 1
+    point = payload["data_points"][0]
+    assert point["id"] == recent_log.id
+    assert point["prompt_tokens"] == 120
+    assert point["completion_tokens"] == 30
+    assert point["total_tokens"] == 150
+    assert point["duration_ms"] == 1800
+    assert point["mapped_model"] == "llama3-70b"
+    assert point["service_type"] == "openai"
+
+
+def test_client_dashboard_websocket_sends_initial_data_and_refresh(isolated_db, sample_logs, disable_logging):
+    """Client dashboard websocket should send Redis-backed initial data and respond to refresh/ping."""
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/clients/192.168.1.100") as websocket:
+            initial_payload = websocket.receive_json()
+            assert initial_payload["type"] == "client_dashboard_update"
+            assert initial_payload["client_ip"] == "192.168.1.100"
+            assert initial_payload["stats"]["total_requests"] == 2
+            assert initial_payload["stats"]["successful_requests"] == 2
+            assert len(initial_payload["logs"]) == 2
+
+            websocket.send_json({"type": "ping"})
+            assert websocket.receive_json() == {"type": "pong"}
+
+            websocket.send_json({"type": "refresh"})
+            refreshed_payload = websocket.receive_json()
+            assert refreshed_payload["type"] == "client_dashboard_update"
+            assert refreshed_payload["client_ip"] == "192.168.1.100"
+            assert refreshed_payload["stats"]["total_requests"] == 2
+
+
+@pytest.mark.asyncio
 async def test_api_inflight_endpoint(isolated_db, sample_logs, disable_logging):
     """Test the inflight requests API endpoint"""
     # Create an inflight request
@@ -331,6 +444,16 @@ async def test_request_detail_view_404(isolated_db, disable_logging):
 
 
 @pytest.mark.asyncio
+async def test_request_detail_api_404(isolated_db, disable_logging):
+    """Test the JSON request detail endpoint with non-existent request."""
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/requests/999999")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Request not found"}
+
+
+@pytest.mark.asyncio
 async def test_request_detail_view_inflight(isolated_db, disable_logging):
     """Test the request detail view for inflight requests"""
     # Create an inflight request (no completed_at)
@@ -351,6 +474,57 @@ async def test_request_detail_view_inflight(isolated_db, disable_logging):
         content = response.text
         assert "Inflight" in content
         assert "Still processing" in content
+
+
+@pytest.mark.asyncio
+async def test_request_detail_api_serializes_bodies_and_duplicates(isolated_db, disable_logging):
+    """Test JSON request details include decoded bodies and duplicate request metadata."""
+    timestamp = datetime.now()
+    primary_log = await RequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        request_body_hash="body-hash-123",
+        duration_ms=1500,
+        request_size=64,
+        response_size=128,
+        status_code=200,
+        completed_at=timestamp,
+        timestamp=timestamp,
+    )
+    primary_log.set_request_body(b'{"model": "gpt-4"}')
+    primary_log.set_response_body(b'{"choices": [{"message": {"content": "Hello!"}}]}')
+    await primary_log.save_async()
+
+    duplicate_log = await RequestLog.create(
+        source_ip="192.168.1.101",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="http://localhost:8000",
+        original_model="gpt-4",
+        mapped_model="llama3-70b",
+        request_body_hash="body-hash-123",
+        status_code=429,
+        completed_at=timestamp,
+        timestamp=timestamp,
+    )
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/api/requests/{primary_log.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == primary_log.id
+    assert payload["request_body"] == '{"model": "gpt-4"}'
+    assert payload["response_body"] == '{"choices": [{"message": {"content": "Hello!"}}]}'
+    assert payload["duplicate"]["request_body_hash"] == "body-hash-123"
+    assert payload["duplicate"]["duplicates"][0]["id"] == duplicate_log.id
+    assert payload["duplicate"]["duplicates"][0]["source_ip"] == "192.168.1.101"
 
 
 @pytest.mark.asyncio
