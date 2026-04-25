@@ -34,3 +34,21 @@ async def test_janitor_loop_reraises_cancelled_error(tmp_path, monkeypatch):
 
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+def test_filesystem_store_triggers_sync_cleanup_when_projected_size_exceeds_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 10)
+
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    cleanup_calls = []
+
+    monkeypatch.setattr(storage, "_total_size_bytes", lambda: 9)
+
+    def _fake_cleanup(needed_bytes=0):
+        cleanup_calls.append(needed_bytes)
+
+    monkeypatch.setattr(storage, "_cleanup_for_space", _fake_cleanup)
+
+    storage.store(b"12345")
+
+    assert cleanup_calls == [4]

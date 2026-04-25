@@ -605,7 +605,7 @@
                 updateSummaryStats(data);
 
                 // Store providers data globally for model list updates
-                globalThis.currentProvidersData = data.upstreams || [];
+                window.currentProvidersData = data.upstreams || [];
 
                 // Render provider cards
                 renderProviders(data);
@@ -683,7 +683,7 @@
                                     </button>
                                 </div>
                                 <div class="models-list" id="models-${provider.id}">
-                                    ${renderModelsList(provider.models || [], provider.id, getProviderUsageStore()[provider.id])}
+                                    ${renderModelsList(provider.models || [], provider.id, window.providerUsageData?.[provider.id])}
                                 </div>
                             </div>
 
@@ -723,102 +723,90 @@
             return '';
         }
 
-        function getProviderUsageStore() {
-            if (!globalThis.providerUsageData) {
-                globalThis.providerUsageData = {};
-            }
-            return globalThis.providerUsageData;
-        }
-
-        function getCurrentProvidersData() {
-            return globalThis.currentProvidersData || [];
-        }
-
-        function isGoogleGenAIProvider(providerId) {
-            if (!providerId) {
-                return false;
+        function renderModelsList(models, providerId, usageData = {}) {
+            if (!models || models.length === 0) {
+                return '<div class="model-tag">No models available</div>';
             }
 
-            const providerCard = document.querySelector(`[data-provider-id="${providerId}"]`);
-            return Boolean(
-                providerCard &&
-                (providerCard.innerHTML.includes('google-genai') || providerCard.innerHTML.includes('auto_awesome'))
-            );
-        }
+            // For Google GenAI, show used models first with stats
+            if (providerId) {
+                const providerCard = document.querySelector(`[data-provider-id="${providerId}"]`);
+                const isGoogleGenAI = providerCard && (providerCard.innerHTML.includes('google-genai') || providerCard.innerHTML.includes('auto_awesome'));
 
-        function getUsageStatusClass(usagePercent) {
-            if (usagePercent > 80) {
-                return 'high';
+                if (isGoogleGenAI && usageData) {
+                    // Get used models with actual usage
+                    const usedModels = Object.entries(usageData).filter(([_, usage]) => usage.requests > 0);
+
+                    let html = '';
+
+                    if (usedModels.length > 0) {
+                        html += '<div class="used-models-section">';
+                        html += '<h4><span class="material-icons">trending_up</span> Active Models Today</h4>';
+                        html += '<div class="used-models-grid">';
+
+                        usedModels.forEach(([modelName, usage]) => {
+                            const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
+                            const statusClass = usagePercent > 80 ? 'high' : usagePercent > 50 ? 'medium' : 'low';
+
+                            html += `
+                                <div class="used-model-card ${statusClass}">
+                                    <div class="model-name">${modelName}</div>
+                                    <div class="model-stats">
+                                        <div class="stat">
+                                            <span class="label">Requests:</span>
+                                            <span class="value">${usage.requests}/${usage.limit}</span>
+                                        </div>
+                                        <div class="usage-bar">
+                                            <div class="usage-fill" style="width: ${usagePercent}%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+
+                        html += '</div></div>';
+                    }
+
+                    // Show "View All Models" button for unused models
+                    const unusedCount = models.length - usedModels.length;
+                    if (unusedCount > 0) {
+                        html += `<div class="all-models-section">
+                            <button class="view-all-models" onclick="showAllModels('${providerId}')">
+                                <span class="material-icons">apps</span>
+                                View All ${models.length} Models (${unusedCount} unused)
+                            </button>
+                        </div>`;
+                    }
+
+                    return html;
+                }
             }
-            if (usagePercent > 50) {
-                return 'medium';
-            }
-            return 'low';
-        }
 
-        function renderGoogleUsedModelsSection(usedModels) {
-            if (usedModels.length === 0) {
-                return '';
-            }
+            // Default behavior for other providers - show used models first
+            const usedModels = models.filter(model => {
+                return usageData[model.name] && usageData[model.name].requests > 0;
+            });
 
-            const modelCards = usedModels.map(([modelName, usage]) => {
-                const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
-                const statusClass = getUsageStatusClass(usagePercent);
-
-                return `
-                    <div class="used-model-card ${statusClass}">
-                        <div class="model-name">${modelName}</div>
-                        <div class="model-stats">
-                            <div class="stat">
-                                <span class="label">Requests:</span>
-                                <span class="value">${usage.requests}/${usage.limit}</span>
-                            </div>
-                            <div class="usage-bar">
-                                <div class="usage-fill" style="width: ${usagePercent}%"></div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-
-            return `
-                <div class="used-models-section">
-                    <h4><span class="material-icons">trending_up</span> Active Models Today</h4>
-                    <div class="used-models-grid">${modelCards}</div>
-                </div>
-            `;
-        }
-
-        function renderAllModelsButton(providerId, modelsCount, unusedCount) {
-            if (unusedCount <= 0) {
-                return '';
-            }
-
-            return `<div class="all-models-section">
-                <button class="view-all-models" onclick="showAllModels('${providerId}')">
-                    <span class="material-icons">apps</span>
-                    View All ${modelsCount} Models (${unusedCount} unused)
-                </button>
-            </div>`;
-        }
-
-        function renderDefaultModelsList(models, providerId, usageData = {}) {
-            const usedModels = models.filter(model => usageData[model.name] && usageData[model.name].requests > 0);
-            const unusedModels = models.filter(model => !usageData[model.name] || usageData[model.name].requests === 0);
+            const unusedModels = models.filter(model => {
+                return !usageData[model.name] || usageData[model.name].requests === 0;
+            });
 
             let html = '';
 
+            // Show used models first
             if (usedModels.length > 0) {
                 html += usedModels.slice(0, 10).map(model =>
                     `<div class="model-tag used" title="${model.display_name || model.name}">${model.display_name || model.name}</div>`
                 ).join('');
             }
 
+            // Show a few unused models
             if (unusedModels.length > 0) {
                 html += unusedModels.slice(0, 5).map(model =>
                     `<div class="model-tag" title="${model.display_name || model.name}">${model.display_name || model.name}</div>`
                 ).join('');
 
+                // Show "view more" if there are many unused models
                 if (unusedModels.length > 5) {
                     html += `<button class="show-more-models" onclick="showAllModels('${providerId}')">
                         <span class="material-icons">expand_more</span>
@@ -828,20 +816,6 @@
             }
 
             return html;
-        }
-
-        function renderModelsList(models, providerId, usageData = {}) {
-            if (!models || models.length === 0) {
-                return '<div class="model-tag">No models available</div>';
-            }
-
-            if (isGoogleGenAIProvider(providerId) && usageData) {
-                const usedModels = Object.entries(usageData).filter(([_, usage]) => usage.requests > 0);
-                const unusedCount = models.length - usedModels.length;
-                return renderGoogleUsedModelsSection(usedModels) + renderAllModelsButton(providerId, models.length, unusedCount);
-            }
-
-            return renderDefaultModelsList(models, providerId, usageData);
         }
 
         function getProviderIcon(type) {
@@ -880,7 +854,7 @@
                     updateGoogleGenAIStats(data);
                 }
             } catch (error) {
-                console.debug('Google GenAI stats not available', error);
+                console.log('Google GenAI stats not available');
             }
 
             // Load Anthropic stats if available
@@ -891,145 +865,128 @@
                     updateAnthropicStats(data);
                 }
             } catch (error) {
-                console.debug('Anthropic stats not available', error);
+                console.log('Anthropic stats not available');
             }
-        }
-
-        function isGoogleKeyOperational(key) {
-            return !Object.values(key.models || {}).some(model =>
-                model.quota_exhausted || model.requests_today >= (model.daily_limit_per_model || 5)
-            );
-        }
-
-        function addModelUsage(summary, key) {
-            Object.entries(key.models || {}).forEach(([modelName, modelStats]) => {
-                if (!summary.modelUsage[modelName]) {
-                    summary.modelUsage[modelName] = {
-                        requests: 0,
-                        limit: modelStats.daily_limit_per_model || key.daily_limit_per_model || 5
-                    };
-                }
-                summary.modelUsage[modelName].requests += modelStats.requests_today || 0;
-            });
-        }
-
-        function summarizeGoogleApiKeys(apiKeys) {
-            return Object.values(apiKeys).reduce((summary, key) => {
-                summary.totalRequests += key.total_requests_today || 0;
-                summary.totalQuota += (key.daily_limit_per_model || 5) * Object.keys(key.models || {}).length;
-                if (isGoogleKeyOperational(key)) {
-                    summary.workingKeys += 1;
-                }
-                addModelUsage(summary, key);
-                return summary;
-            }, {
-                totalRequests: 0,
-                totalQuota: 0,
-                workingKeys: 0,
-                modelUsage: {}
-            });
-        }
-
-        function updateQuotaFillElement(quotaFill, usagePercent) {
-            quotaFill.style.width = usagePercent + '%';
-            if (usagePercent > 80) {
-                quotaFill.className = 'quota-fill danger';
-            } else if (usagePercent > 60) {
-                quotaFill.className = 'quota-fill warning';
-            }
-        }
-
-        function renderGoogleModelQuotaList(modelUsage) {
-            const sortedModels = Object.entries(modelUsage)
-                .sort(([_, usageA], [__, usageB]) => {
-                    if (usageA.requests > 0 && usageB.requests === 0) return -1;
-                    if (usageA.requests === 0 && usageB.requests > 0) return 1;
-                    return usageB.requests - usageA.requests;
-                });
-
-            return sortedModels.map(([modelName, usage]) => {
-                const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
-                const isUsed = usage.requests > 0;
-                let barClass = 'quota-fill';
-                if (usagePercent > 80) barClass += ' danger';
-                else if (usagePercent > 60) barClass += ' warning';
-
-                return `
-                    <div class="model-quota-item" style="${isUsed ? 'border-left: 3px solid #10b981;' : ''}">
-                        <div>
-                            <div class="model-quota-name">${modelName}${isUsed ? ' ●' : ''}</div>
-                            <div class="quota-bar" style="width: 150px; height: 12px; margin-top: 4px;">
-                                <div class="${barClass}" style="width: ${usagePercent}%"></div>
-                            </div>
-                        </div>
-                        <div class="model-quota-usage">
-                            ${usage.requests}/${usage.limit} requests
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        function updateProviderModelsList(providerId, modelUsage) {
-            const modelsList = document.getElementById(`models-${providerId}`);
-            if (!modelsList) {
-                return;
-            }
-
-            const provider = getCurrentProvidersData().find(p => p.id === providerId);
-            if (provider) {
-                modelsList.innerHTML = renderModelsList(provider.models || [], providerId, modelUsage);
-            }
-        }
-
-        function updateGoogleProviderStats(providerId, stats) {
-            const quotaSection = document.getElementById(`quota-${providerId}`);
-            if (!quotaSection || !stats.api_keys) {
-                return;
-            }
-
-            const summary = summarizeGoogleApiKeys(stats.api_keys);
-            const totalKeys = stats.summary?.total_keys || Object.keys(stats.api_keys).length;
-            const usagePercent = Math.min((summary.totalRequests / Math.max(summary.totalQuota, 1)) * 100, 100);
-            const quotaFill = quotaSection.querySelector('.quota-fill');
-            const quotaText = quotaSection.querySelector('.quota-text');
-            const apiKeyInfo = document.getElementById(`api-key-info-${providerId}`);
-            const modelQuotasDiv = document.getElementById(`model-quotas-${providerId}`);
-
-            getProviderUsageStore()[providerId] = summary.modelUsage;
-            updateQuotaFillElement(quotaFill, usagePercent);
-
-            quotaText.innerHTML = `
-                <span>${summary.totalRequests} requests today</span>
-                <span><button onclick="toggleApiKeyInfo('${providerId}')" style="background: none; border: none; color: #667eea; cursor: pointer; font-size: 0.85rem;">Show Details</button></span>
-            `;
-
-            apiKeyInfo.innerHTML = `${totalKeys} API keys (${summary.workingKeys} working)`;
-
-            let workingKeysInfo = quotaSection.querySelector('.working-keys-info');
-            if (!workingKeysInfo) {
-                workingKeysInfo = document.createElement('div');
-                workingKeysInfo.className = 'working-keys-info';
-                quotaSection.appendChild(workingKeysInfo);
-            }
-
-            const workingPercent = Math.round((summary.workingKeys / totalKeys) * 100);
-            workingKeysInfo.innerHTML = `
-                <span class="material-icons">vpn_key</span>
-                <span>${summary.workingKeys}/${totalKeys} keys active (${workingPercent}% operational)</span>
-            `;
-
-            if (modelQuotasDiv) {
-                modelQuotasDiv.innerHTML = renderGoogleModelQuotaList(summary.modelUsage);
-            }
-
-            updateProviderModelsList(providerId, summary.modelUsage);
         }
 
         function updateGoogleGenAIStats(data) {
             if (data.providers) {
                 Object.entries(data.providers).forEach(([providerId, stats]) => {
-                    updateGoogleProviderStats(providerId, stats);
+                    const quotaSection = document.getElementById(`quota-${providerId}`);
+                    if (quotaSection && stats.api_keys) {
+                        // Calculate working keys and model usage
+                        let totalRequests = 0;
+                        let totalQuota = 0;
+                        let workingKeys = 0;
+                        const modelUsage = {};
+
+                        Object.values(stats.api_keys).forEach(key => {
+                            totalRequests += key.total_requests_today || 0;
+                            totalQuota += (key.daily_limit_per_model || 5) * Object.keys(key.models || {}).length;
+
+                            // Count working keys (not exhausted)
+                            const hasExhaustedModels = Object.values(key.models || {}).some(model =>
+                                model.quota_exhausted || model.requests_today >= (model.daily_limit_per_model || 5)
+                            );
+                            if (!hasExhaustedModels) {
+                                workingKeys++;
+                            }
+
+                            // Aggregate per-model usage
+                            Object.entries(key.models || {}).forEach(([modelName, modelStats]) => {
+                                if (!modelUsage[modelName]) {
+                                    modelUsage[modelName] = {
+                                        requests: 0,
+                                        limit: modelStats.daily_limit_per_model || key.daily_limit_per_model || 5
+                                    };
+                                }
+                                modelUsage[modelName].requests += modelStats.requests_today || 0;
+                            });
+                        });
+
+                        // Store usage data globally for models list
+                        if (!window.providerUsageData) window.providerUsageData = {};
+                        window.providerUsageData[providerId] = modelUsage;
+
+                        const usagePercent = Math.min((totalRequests / Math.max(totalQuota, 1)) * 100, 100);
+                        const quotaFill = quotaSection.querySelector('.quota-fill');
+                        const quotaText = quotaSection.querySelector('.quota-text');
+                        const apiKeyInfo = document.getElementById(`api-key-info-${providerId}`);
+                        const modelQuotasDiv = document.getElementById(`model-quotas-${providerId}`);
+
+                        quotaFill.style.width = usagePercent + '%';
+
+                        if (usagePercent > 80) {
+                            quotaFill.className = 'quota-fill danger';
+                        } else if (usagePercent > 60) {
+                            quotaFill.className = 'quota-fill warning';
+                        }
+
+                        const totalKeys = stats.summary?.total_keys || Object.keys(stats.api_keys).length;
+                        quotaText.innerHTML = `
+                            <span>${totalRequests} requests today</span>
+                            <span><button onclick="toggleApiKeyInfo('${providerId}')" style="background: none; border: none; color: #667eea; cursor: pointer; font-size: 0.85rem;">Show Details</button></span>
+                        `;
+
+                        // Show working API keys info
+                        apiKeyInfo.innerHTML = `${totalKeys} API keys (${workingKeys} working)`;
+
+                        // Add working keys indicator below quota section
+                        let workingKeysInfo = quotaSection.querySelector('.working-keys-info');
+                        if (!workingKeysInfo) {
+                            workingKeysInfo = document.createElement('div');
+                            workingKeysInfo.className = 'working-keys-info';
+                            quotaSection.appendChild(workingKeysInfo);
+                        }
+
+                        const workingPercent = Math.round((workingKeys / totalKeys) * 100);
+                        workingKeysInfo.innerHTML = `
+                            <span class="material-icons">vpn_key</span>
+                            <span>${workingKeys}/${totalKeys} keys active (${workingPercent}% operational)</span>
+                        `;
+
+                        // Update per-model quota display
+                        if (modelQuotasDiv) {
+                            // Sort models by usage (used models first, then by request count)
+                            const sortedModels = Object.entries(modelUsage)
+                                .sort(([a, usageA], [b, usageB]) => {
+                                    if (usageA.requests > 0 && usageB.requests === 0) return -1;
+                                    if (usageA.requests === 0 && usageB.requests > 0) return 1;
+                                    return usageB.requests - usageA.requests;
+                                });
+
+                            modelQuotasDiv.innerHTML = sortedModels.map(([modelName, usage]) => {
+                                const usagePercent = Math.min((usage.requests / usage.limit) * 100, 100);
+                                const isUsed = usage.requests > 0;
+                                let barClass = 'quota-fill';
+                                if (usagePercent > 80) barClass += ' danger';
+                                else if (usagePercent > 60) barClass += ' warning';
+
+                                return `
+                                    <div class="model-quota-item" style="${isUsed ? 'border-left: 3px solid #10b981;' : ''}">
+                                        <div>
+                                            <div class="model-quota-name">${modelName}${isUsed ? ' ●' : ''}</div>
+                                            <div class="quota-bar" style="width: 150px; height: 12px; margin-top: 4px;">
+                                                <div class="${barClass}" style="width: ${usagePercent}%"></div>
+                                            </div>
+                                        </div>
+                                        <div class="model-quota-usage">
+                                            ${usage.requests}/${usage.limit} requests
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('');
+                        }
+
+                        // Update models list with new usage data
+                        const modelsList = document.getElementById(`models-${providerId}`);
+                        if (modelsList) {
+                            const provider = window.currentProvidersData?.find(p => p.id === providerId);
+                            if (provider) {
+                                modelsList.innerHTML = renderModelsList(provider.models || [], providerId, modelUsage);
+                            }
+                        }
+                    }
                 });
             }
         }

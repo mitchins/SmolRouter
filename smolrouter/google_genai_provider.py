@@ -1487,7 +1487,7 @@ class GoogleGenAIProvider(IModelProvider):
                 )
             finally:
                 # Always release slot, even on error
-                self._rate_limiter.release_slot()
+                await self._rate_limiter.release_slot()
 
             # Convert response back to OpenAI format
             openai_response = self._convert_genai_to_openai_response(response, original_model)

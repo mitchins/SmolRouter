@@ -10,8 +10,10 @@ import json
 import yaml
 import logging
 import asyncio
+import time
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from .interfaces import ClientContext
 from .providers import ProviderFactory, IModelProvider
@@ -400,6 +402,97 @@ class SmolRouterContainer:
         if not self._initialized:
             await self.initialize()
         return await self._mediator.route_request(source_ip, model, request_payload, path, headers, timeout)
+
+    async def route_streaming_request(
+        self,
+        source_ip: str,
+        model: str,
+        request_payload: Dict[str, Any],
+        path: str,
+        headers: Dict[str, str],
+        timeout: float,
+    ):
+        """Route streaming requests.
+
+        If a provider does not expose native streaming via the mediator, emit a
+        standards-compatible SSE stream synthesized from the non-stream response.
+        """
+        data, status_code, upstream_used, metadata = await self.route_request(
+            source_ip, model, request_payload, path, headers, timeout
+        )
+
+        if status_code >= 400:
+            return JSONResponse(content=data, status_code=status_code), status_code, upstream_used, metadata
+
+        async def _single_response_sse_stream():
+            stream_chunks = self._build_openai_sse_chunks(data, model)
+            for chunk in stream_chunks:
+                yield chunk
+
+        return (
+            StreamingResponse(_single_response_sse_stream(), media_type="text/event-stream"),
+            status_code,
+            upstream_used,
+            metadata,
+        )
+
+    def _build_openai_sse_chunks(self, response_data: Dict[str, Any], model: str):
+        """Build an OpenAI-compatible SSE sequence from a non-streaming payload."""
+        created = int(time.time())
+        request_id = f"chatcmpl-{created}"
+        choices = response_data.get("choices") or []
+
+        if choices and isinstance(choices[0], dict) and isinstance(choices[0].get("message"), dict):
+            content = choices[0]["message"].get("content") or ""
+            first_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": content}, "finish_reason": None}],
+            }
+            final_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(first_chunk)}\n\n".encode("utf-8")
+            yield f"data: {json.dumps(final_chunk)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+
+        if choices and isinstance(choices[0], dict) and "text" in choices[0]:
+            text = choices[0].get("text") or ""
+            first_chunk = {
+                "id": request_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "text": text, "finish_reason": None}],
+            }
+            final_chunk = {
+                "id": request_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+            }
+            yield f"data: {json.dumps(first_chunk)}\n\n".encode("utf-8")
+            yield f"data: {json.dumps(final_chunk)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
+            return
+
+        fallback_chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        yield f"data: {json.dumps(fallback_chunk)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
 
     async def get_legacy_smart_router(self):
         """

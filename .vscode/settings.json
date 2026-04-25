@@ -2,5 +2,17 @@
     "sonarlint.connectedMode.project": {
         "connectionId": "mitchins",
         "projectKey": "mitchins_SmolRouter"
-    }
+    },
+    "chat.tools.terminal.autoApprove": {
+        "./scripts/run_audit.sh": true
+    },
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
 }

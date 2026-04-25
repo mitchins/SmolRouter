@@ -14,6 +14,13 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _extract_api_key_suffix(header_value: str) -> str:
+    """Extract and retain only a non-sensitive API key suffix."""
+    if header_value.startswith("Bearer "):
+        header_value = header_value[7:]
+    return header_value[-8:] if len(header_value) > 8 else header_value
+
+
 @dataclass
 class RequestObservation:
     """Ground truth observation of a request"""
@@ -22,7 +29,7 @@ class RequestObservation:
     timestamp: datetime = field(default_factory=datetime.now)
 
     # API Key verification (extracted from actual headers)
-    api_key_used: Optional[str] = None  # Full key from Authorization header  # pragma: allowlist secret
+    api_key_used: Optional[str] = None  # Suffix only (never retain full key)  # pragma: allowlist secret
     api_key_header_name: Optional[str] = None  # Which header was used
 
     # Proxy verification (extracted from actual connection)
@@ -64,12 +71,7 @@ class TransportObserver:
                 if header_name in request.headers:
                     obs.api_key_header_name = header_name
                     header_value = request.headers[header_name]
-
-                    # Extract key from "Bearer <key>" or raw key
-                    if header_value.startswith("Bearer "):
-                        obs.api_key_used = header_value[7:]
-                    else:
-                        obs.api_key_used = header_value
+                    obs.api_key_used = _extract_api_key_suffix(str(header_value))
                     break
 
             # Extract request details
@@ -85,7 +87,7 @@ class TransportObserver:
 
             self.observations[request_id] = obs
             logger.debug(
-                f"📡 Ground truth captured for {request_id}: key=...{obs.api_key_used[-8:] if obs.api_key_used else 'NONE'}, url={obs.url}"
+                f"📡 Ground truth captured for {request_id}: key=...{obs.api_key_used if obs.api_key_used else 'NONE'}, url={obs.url}"
             )
 
         return on_request
@@ -108,7 +110,7 @@ class TransportObserver:
         """Get the ground truth observation for a request"""
         return self.observations.get(request_id)
 
-    def verify_api_key(self, request_id: str, expected_suffix: str) -> bool:
+    def verify_api_key(self, request_id: str, expected_suffix: str) -> Optional[bool]:
         """
         Verify that the API key used matches expectation.
 
@@ -118,7 +120,7 @@ class TransportObserver:
         if not obs or not obs.api_key_used:
             return None
 
-        actual_suffix = obs.api_key_used[-8:] if len(obs.api_key_used) > 8 else obs.api_key_used
+        actual_suffix = obs.api_key_used
         matches = actual_suffix == expected_suffix
 
         if not matches:
@@ -130,7 +132,7 @@ class TransportObserver:
 
         return matches
 
-    def verify_proxy(self, request_id: str, expected_proxy: Optional[str]) -> bool:
+    def verify_proxy(self, request_id: str, expected_proxy: Optional[str]) -> Optional[bool]:
         """
         Verify that the proxy used matches expectation.
 
@@ -147,7 +149,7 @@ class TransportObserver:
             logger.debug(f"✅ Proxy verified for {request_id}: no proxy used (as expected)")
             return True
 
-        # One is None = mismatch
+        # One side missing implies mismatch
         if (expected_proxy is None) != (actual_proxy is None):
             logger.error(f"❌ Proxy mismatch for {request_id}: expected={expected_proxy}, actual={actual_proxy}")
             return False
@@ -214,12 +216,7 @@ class ObservingHTTPTransport(httpx.HTTPTransport):
             if header_name.lower() in [h.lower() for h in request.headers.keys()]:
                 obs.api_key_header_name = header_name
                 header_value = request.headers[header_name]
-
-                # Extract key from "Bearer <key>" or raw key
-                if isinstance(header_value, str) and header_value.startswith("Bearer "):
-                    obs.api_key_used = header_value[7:]
-                else:
-                    obs.api_key_used = str(header_value)
+                obs.api_key_used = _extract_api_key_suffix(str(header_value))
                 break
 
         # Extract request details
@@ -274,12 +271,7 @@ class ObservingAsyncHTTPTransport(httpx.AsyncHTTPTransport):
             if header_name.lower() in [h.lower() for h in request.headers.keys()]:
                 obs.api_key_header_name = header_name
                 header_value = request.headers[header_name]
-
-                # Extract key from "Bearer <key>" or raw key
-                if isinstance(header_value, str) and header_value.startswith("Bearer "):
-                    obs.api_key_used = header_value[7:]
-                else:
-                    obs.api_key_used = str(header_value)
+                obs.api_key_used = _extract_api_key_suffix(str(header_value))
                 break
 
         # Extract request details

@@ -106,6 +106,14 @@ class FilesystemBlobStorage(BlobStorage):
             logger.warning(f"Blob size {len(data)} bytes exceeds limit {MAX_BLOB_SIZE} bytes, truncating")
             data = data[:MAX_BLOB_SIZE]
 
+        try:
+            current_size = self._total_size_bytes()
+            projected_size = current_size + len(data)
+            if projected_size > MAX_TOTAL_STORAGE_SIZE:
+                self._cleanup_for_space(projected_size - MAX_TOTAL_STORAGE_SIZE)
+        except Exception as e:
+            logger.error(f"Failed to enforce storage cap before write: {e}")
+
         # Generate a unique key and path
         attempts = 0
         while True:
@@ -211,9 +219,36 @@ class FilesystemBlobStorage(BlobStorage):
             logger.error(f"Failed to check storage limit: {e}")
             return True  # Allow storage if we can't check
 
-    def _cleanup_for_space(self):
-        """Deprecated: cleanup now handled by background janitor."""
-        logger.debug("_cleanup_for_space called but janitor is responsible for pruning; ignoring.")
+    def _cleanup_for_space(self, needed_bytes: int = 0):
+        """Synchronously prune oldest data to make room for incoming writes."""
+        try:
+            current_size = self._total_size_bytes()
+            cap = MAX_TOTAL_STORAGE_SIZE
+            if needed_bytes <= 0 and current_size <= cap:
+                return
+
+            target = max(int(cap * WATERMARK_FRACTION), cap - max(needed_bytes, 0))
+            if target < 0:
+                target = 0
+
+            buckets = self._list_hour_buckets()
+            prune_candidates = self._get_prune_candidates(buckets)
+
+            for bucket in list(prune_candidates):
+                if current_size <= target:
+                    break
+                bucket_size = self._dir_size_bytes(bucket)
+                shutil.rmtree(bucket, ignore_errors=True)
+                current_size -= bucket_size
+
+            if current_size > target:
+                oldest = self._select_oldest_bucket(prune_candidates, buckets)
+                if oldest and oldest.exists():
+                    current_size = self._prune_bucket_files(oldest, current_size, target)
+
+            logger.info(f"Synchronous prune complete: current={current_size}, target={target}")
+        except Exception as e:
+            logger.error(f"Failed synchronous storage cleanup: {e}")
 
     # ---------- Background Janitor (size-based pruning) ----------
     def _list_hour_buckets(self) -> List[Path]:

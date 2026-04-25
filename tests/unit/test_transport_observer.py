@@ -53,7 +53,7 @@ def test_sync_transport_observes_api_key():
     assert obs_id in observer.observations
     observation = observer.observations[obs_id]
 
-    assert observation.api_key_used == test_key
+    assert observation.api_key_used == "12345678"
     assert observation.api_key_header_name == "x-goog-api-key"  # pragma: allowlist secret
     assert observation.method == "GET"
     assert observation.url == "https://example.com/test"
@@ -90,7 +90,7 @@ async def test_async_transport_observes_api_key():
     assert obs_id in observer.observations
     observation = observer.observations[obs_id]
 
-    assert observation.api_key_used == "async_key_87654321"  # pragma: allowlist secret
+    assert observation.api_key_used == "87654321"  # pragma: allowlist secret
     assert observation.api_key_header_name == "x-goog-api-key"  # pragma: allowlist secret
     assert observation.method == "POST"
     assert observation.url == "https://api.example.com/v1/generate"
@@ -172,7 +172,7 @@ def test_observer_bearer_token_extraction():
 
     # Verify Bearer prefix was stripped
     observation = observer.observations[obs_id]
-    assert observation.api_key_used == "sk-test123456789"  # pragma: allowlist secret
+    assert observation.api_key_used == "23456789"  # pragma: allowlist secret
     assert observation.api_key_header_name == "authorization"  # pragma: allowlist secret
 
 
