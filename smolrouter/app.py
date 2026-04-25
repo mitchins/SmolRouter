@@ -445,6 +445,58 @@ def should_strip_thinking_for_provider(provider_type: str, provider_url: str) ->
     return False
 
 
+THINKING_TAG_PAIRS = (
+    ("<think>", "</think>"),
+    ("[think]", "[/think]"),
+    ("<thinking>", "</thinking>"),
+    ("<reasoning>", "</reasoning>"),
+)
+
+
+def _remove_thinking_tag_blocks(text: str, start_tag: str, end_tag: str) -> str:
+    result = text
+    while True:
+        start = result.find(start_tag)
+        if start == -1:
+            return result
+
+        end = result.find(end_tag, start)
+        if end == -1:
+            return result[:start]
+
+        result = result[:start] + result[end + len(end_tag) :]
+
+
+def _remove_thinking_blocks(text: str) -> str:
+    result = text
+    for start_tag, end_tag in THINKING_TAG_PAIRS:
+        result = _remove_thinking_tag_blocks(result, start_tag, end_tag)
+    return result
+
+
+def _remove_spaces_before_punctuation(text: str) -> str:
+    cleaned_parts: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        current_char = text[index]
+        if current_char.isspace():
+            whitespace_start = index
+            while index < length and text[index].isspace():
+                index += 1
+
+            if index < length and text[index] in ",.!?":
+                continue
+
+            cleaned_parts.append(text[whitespace_start:index])
+            continue
+
+        cleaned_parts.append(current_char)
+        index += 1
+
+    return "".join(cleaned_parts)
+
+
 def strip_think_chain_from_text(text: str, provider_type: Optional[str] = None, provider_url: Optional[str] = None) -> str:
     """Remove thinking chain blocks from text using simple string operations.
 
@@ -464,58 +516,11 @@ def strip_think_chain_from_text(text: str, provider_type: Optional[str] = None, 
     Returns:
         Text with thinking chains removed, all formatting preserved
     """
-    # If provider info is available, check if we should strip
-    if provider_type and provider_url:
-        if not should_strip_thinking_for_provider(provider_type, provider_url):
-            return text
+    if provider_type and provider_url and not should_strip_thinking_for_provider(provider_type, provider_url):
+        return text
 
-    result = text
-
-    # Define thinking tag pairs to remove
-    thinking_tags = [
-        ("<think>", "</think>"),  # Qwen, DeepSeek-R1
-        ("[think]", "[/think]"),  # SmolLM, bracket format
-        ("<thinking>", "</thinking>"),  # XML style
-        ("<reasoning>", "</reasoning>"),  # Alternative format
-    ]
-
-    # Remove each type of thinking block
-    for start_tag, end_tag in thinking_tags:
-        while True:
-            start = result.find(start_tag)
-            if start == -1:
-                break
-            end = result.find(end_tag, start)
-            if end == -1:
-                # Handle unclosed tags - remove from start_tag to end of text
-                result = result[:start]
-                break
-            # Remove the entire block including tags
-            result = result[:start] + result[end + len(end_tag) :]
-
-    # Preserve original spacing and newlines, but avoid stray spaces before punctuation.
-    # Use a linear scan instead of a regex to avoid backtracking concerns.
-    cleaned_parts: list[str] = []
-    index = 0
-    length = len(result)
-    while index < length:
-        current_char = result[index]
-        if current_char.isspace():
-            whitespace_start = index
-            while index < length and result[index].isspace():
-                index += 1
-
-            if index < length and result[index] in ",.!?":
-                continue
-
-            cleaned_parts.append(result[whitespace_start:index])
-            continue
-
-        cleaned_parts.append(current_char)
-        index += 1
-
-    result = "".join(cleaned_parts)
-    return result
+    result = _remove_thinking_blocks(text)
+    return _remove_spaces_before_punctuation(result)
 
 
 @dataclass
