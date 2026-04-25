@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import hashlib
+import inspect
 import yaml
 import uuid
 from dataclasses import dataclass
@@ -39,32 +40,73 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-rerouter")
 
 
+async def _initialize_lua_scripting() -> None:
+    from smolrouter.database import RedisApiKeyQuota
+
+    await RedisApiKeyQuota.initialize_lua_script()
+
+
+async def _initialize_request_logging_system() -> None:
+    global ENABLE_LOGGING
+
+    if not ENABLE_LOGGING:
+        return
+
+    from smolrouter.database import init_database, start_background_cleanup
+
+    try:
+        await init_database()
+        start_background_cleanup()
+    except Exception as e:
+        logger.error(f"Failed to initialize logging database: {e}")
+        logger.warning("Request logging will be disabled")
+        ENABLE_LOGGING = False
+
+
+async def _stop_proxy_health_monitor(provider: Any) -> None:
+    stop_monitor = getattr(provider, "stop_proxy_health_monitor", None)
+    if not callable(stop_monitor):
+        return
+
+    stop_result = stop_monitor()
+    if inspect.isawaitable(stop_result):
+        await stop_result
+
+
+async def _shutdown_proxy_health_monitors(active_container: Any) -> None:
+    if not active_container:
+        return
+
+    try:
+        for provider in active_container.get_providers():
+            await _stop_proxy_health_monitor(provider)
+    except Exception as e:
+        logger.warning(f"Failed to stop proxy health monitor cleanly: {e}")
+
+
+def _stop_logging_cleanup_if_enabled() -> None:
+    if not ENABLE_LOGGING:
+        return
+
+    from smolrouter.database import stop_background_cleanup
+
+    stop_background_cleanup()
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """FastAPI lifespan handler to replace deprecated on_event startup/shutdown."""
     global ENABLE_LOGGING
 
     # CRITICAL: Initialize Lua script FIRST - server won't start if this fails
-    from smolrouter.database import RedisApiKeyQuota
-
     logger.info("🔧 Initializing critical systems (lifespan)...")
     try:
-        await RedisApiKeyQuota.initialize_lua_script()
+        await _initialize_lua_scripting()
     except Exception as e:
         logger.critical(f"❌ FATAL: Cannot start server - Lua script initialization failed: {e}")
         raise
 
-    # Initialize logging DB and cleanup
-    if ENABLE_LOGGING:
-        from smolrouter.database import init_database, start_background_cleanup
-
-        try:
-            await init_database()
-            start_background_cleanup()
-        except Exception as e:
-            logger.error(f"Failed to initialize logging database: {e}")
-            logger.warning("Request logging will be disabled")
-            ENABLE_LOGGING = False
+    await _initialize_request_logging_system()
 
     # Initialize new architecture container
     await init_new_architecture()
@@ -74,20 +116,8 @@ async def app_lifespan(app: FastAPI):
     try:
         yield
     finally:
-        if container:
-            try:
-                for provider in container.get_providers():
-                    stop_monitor = getattr(provider, "stop_proxy_health_monitor", None)
-                    if callable(stop_monitor):
-                        await stop_monitor()
-            except Exception as e:
-                logger.warning(f"Failed to stop proxy health monitor cleanly: {e}")
-
-        # Shutdown cleanup
-        if ENABLE_LOGGING:
-            from smolrouter.database import stop_background_cleanup
-
-            stop_background_cleanup()
+        await _shutdown_proxy_health_monitors(container)
+        _stop_logging_cleanup_if_enabled()
 
 
 app = FastAPI(
@@ -631,11 +661,7 @@ async def start_request_log(
             async def _store_request_body_async():
                 try:
                     key = await asyncio.to_thread(blob_storage.store, request_body, content_type="application/json")
-                    await RedisRequestLog.update_completion(
-                        request_id=request_id,
-                        status_code="pending",  # Keep as pending
-                        request_body_key=key,
-                    )
+                    await RedisRequestLog.update_request_body_key(request_id=request_id, request_body_key=key)
                 except Exception as e:
                     logger.error(f"Failed to store request body asynchronously: {e}")
 
@@ -1822,7 +1848,7 @@ async def _get_dashboard_logs(limit: int = 100, q: str | None = None, service_ty
 
 
 @app.get("/api/logs")
-async def api_logs(limit: int = 100, service_type: str = None, q: str = None):
+async def api_logs(limit: int = 100, service_type: str | None = None, q: str | None = None):
     """API endpoint for getting logs as JSON"""
     try:
         logs, _ = await _get_dashboard_logs(limit=limit, q=q, service_type=service_type)
@@ -1845,7 +1871,7 @@ async def api_stats():
 
 
 @app.get("/api/dashboard")
-async def api_dashboard(limit: int = 100, q: str = None):
+async def api_dashboard(limit: int = 100, q: str | None = None):
     """Combined API endpoint for dashboard data (logs + stats)"""
     try:
         logs, parsed_query = await _get_dashboard_logs(limit=limit, q=q)
@@ -1919,7 +1945,7 @@ async def api_load_balancer():
 
 
 @app.get("/api/performance")
-async def api_performance(limit: int = 1000, hours: int = 24, model: str = None, service_type: str = None):
+async def api_performance(limit: int = 1000, hours: int = 24, model: str | None = None, service_type: str | None = None):
     """Get performance analytics data for scatter plot visualization.
 
     Returns data points with prompt_tokens (x-axis) vs duration_ms (y-axis),
@@ -2683,7 +2709,13 @@ async def request_detail(request_id: str, request: Request):
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load request details: {e}</p>", status_code=500)
 
 
-@app.get("/api/requests/{request_id}")
+@app.get(
+    "/api/requests/{request_id}",
+    responses={
+        404: {"description": "Request not found"},
+        500: {"description": "Internal server error"},
+    },
+)
 async def get_request_details(request_id: str, request: Request):
     """API endpoint for request details with JSON response"""
     # Check WebUI access security
@@ -2787,7 +2819,10 @@ async def testing_page(request: Request):
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load testing page: {e}</p>", status_code=500)
 
 
-@app.get("/api/testing/models")
+@app.get(
+    "/api/testing/models",
+    responses={500: {"description": "Failed to fetch available models"}},
+)
 async def get_available_models_for_testing(request: Request):
     """API endpoint to get available models for testing UI"""
     # Check WebUI access security
@@ -2836,7 +2871,10 @@ async def get_available_models_for_testing(request: Request):
         raise HTTPException(status_code=500, detail="Failed to fetch available models")
 
 
-@app.get("/api/clients/{client_ip}")
+@app.get(
+    "/api/clients/{client_ip}",
+    responses={500: {"description": "Internal server error"}},
+)
 async def get_client_data(client_ip: str, request: Request, limit: int = 100):
     """API endpoint for client-specific data"""
     # Check WebUI access security
