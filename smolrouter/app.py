@@ -6,6 +6,7 @@ import time
 import hashlib
 import yaml
 import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -138,6 +139,9 @@ ROUTES_CONFIG = str(resolve_routes_config_path(os.getenv("ROUTES_CONFIG")))
 DISABLE_THINKING = os.getenv("DISABLE_THINKING", "false").lower() in ("1", "true", "yes")
 STRIP_THINKING = os.getenv("STRIP_THINKING", "false").lower() in ("1", "true", "yes")
 STRIP_JSON_MARKDOWN = os.getenv("STRIP_JSON_MARKDOWN", "false").lower() in ("1", "true", "yes")
+
+INVALID_JSON_REQUEST_ERROR = "Invalid JSON in request body"
+EXCESSIVE_WHITESPACE_PATTERN = r"\s{2,}"
 ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "yes")
 
 # Timeout configuration
@@ -237,6 +241,29 @@ def load_routes_config() -> Dict:
 ROUTES_CONFIG_DATA = load_routes_config()
 
 
+def _matches_model_pattern(model_pattern: Any, model: str) -> bool:
+    """Check whether a model name matches an exact or slash-delimited regex pattern."""
+    if model_pattern is None:
+        return True
+
+    if not isinstance(model_pattern, str):
+        return model == model_pattern
+
+    if model_pattern.startswith("/") and model_pattern.endswith("/"):
+        return re.search(model_pattern[1:-1], model) is not None
+
+    return model == model_pattern
+
+
+def _route_matches_request(match_criteria: Dict[str, Any], source_host: str, model: str) -> bool:
+    """Check whether the configured route criteria match the current request."""
+    expected_host = match_criteria.get("source_host")
+    if expected_host is not None and source_host != expected_host:
+        return False
+
+    return _matches_model_pattern(match_criteria.get("model"), model)
+
+
 def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
     """Find the best matching route for a request.
 
@@ -251,38 +278,19 @@ def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
         match_criteria = route.get("match", {})
         route_config = route.get("route", {})
 
-        # Check if this route matches
-        matches = True
+        if not _route_matches_request(match_criteria, source_host, model):
+            continue
 
-        # Check source host match (if specified)
-        if "source_host" in match_criteria:
-            expected_host = match_criteria["source_host"]
-            if source_host != expected_host:
-                matches = False
+        upstream = route_config.get("upstream")
+        if not upstream:
+            continue
 
-        # Check model match (if specified) - supports regex
-        if matches and "model" in match_criteria:
-            model_pattern = match_criteria["model"]
-            if model_pattern.startswith("/") and model_pattern.endswith("/"):
-                # Regex pattern
-                pattern = model_pattern[1:-1]  # Remove slashes
-                if not re.search(pattern, model):
-                    matches = False
-            else:
-                # Exact match
-                if model != model_pattern:
-                    matches = False
-
-        if matches:
-            upstream = route_config.get("upstream")
-            model_override = route_config.get("model")
-
-            if upstream:
-                logger.debug(
-                    f"Route matched: {source_host}/{model} -> {upstream}"
-                    + (f" (model: {model_override})" if model_override else "")
-                )
-                return upstream, model_override
+        model_override = route_config.get("model")
+        logger.debug(
+            f"Route matched: {source_host}/{model} -> {upstream}"
+            + (f" (model: {model_override})" if model_override else "")
+        )
+        return upstream, model_override
 
     # No specific route found, use default
     logger.debug(f"No specific route found for {source_host}/{model}, using default upstream")
@@ -407,7 +415,7 @@ def should_strip_thinking_for_provider(provider_type: str, provider_url: str) ->
     return False
 
 
-def strip_think_chain_from_text(text: str, provider_type: str = None, provider_url: str = None) -> str:
+def strip_think_chain_from_text(text: str, provider_type: Optional[str] = None, provider_url: Optional[str] = None) -> str:
     """Remove thinking chain blocks from text using simple string operations.
 
     Supports multiple thinking tag formats:
@@ -463,10 +471,70 @@ def strip_think_chain_from_text(text: str, provider_type: str = None, provider_u
     return result
 
 
+@dataclass
+class RoutedRequestResult:
+    data: Any
+    status_code: int
+    upstream_used: str
+    metadata: Any = None
+    is_streaming: bool = False
+
+
 def _extract_model_from_provider_url(model_name: str) -> str:
     """Extract the actual model name from provider URL format"""
     # For gemini-* and claude-* models, use as-is
     return model_name
+
+
+JSON_CODE_BLOCK_START_MARKER = "```json"
+JSON_CODE_BLOCK_END_MARKER = "```"
+JSON_INLINE_MARKER = "[json]"
+
+
+def _normalize_json_markdown_content(json_content: Any) -> str:
+    """Normalize JSON extracted from markdown fences into a compact single line."""
+    if hasattr(json_content, "group"):
+        json_content = json_content.group(1)
+
+    if not json_content:
+        return ""
+
+    normalized_content = str(json_content).strip()
+    if not normalized_content:
+        return ""
+
+    if "\n" not in normalized_content:
+        return re.sub(r"\s+", " ", normalized_content).strip()
+
+    return " ".join(line.strip() for line in normalized_content.splitlines() if line.strip())
+
+
+def _replace_json_code_blocks(text: str) -> str:
+    """Replace markdown JSON code blocks with their normalized JSON payload."""
+    result = text
+    while True:
+        start_idx = result.find(JSON_CODE_BLOCK_START_MARKER)
+        if start_idx == -1:
+            return result
+
+        content_start = start_idx + len(JSON_CODE_BLOCK_START_MARKER)
+        end_idx = result.find(JSON_CODE_BLOCK_END_MARKER, content_start)
+        if end_idx == -1:
+            return result
+
+        cleaned = _normalize_json_markdown_content(result[content_start:end_idx])
+        result = result[:start_idx] + cleaned + result[end_idx + len(JSON_CODE_BLOCK_END_MARKER) :]
+
+
+def _replace_json_marker_blocks(text: str) -> str:
+    """Replace [json]... [json] segments with their normalized JSON payload."""
+    parts = text.split(JSON_INLINE_MARKER)
+    if len(parts) <= 2:
+        return text
+
+    return "".join(
+        _normalize_json_markdown_content(part) if index % 2 else part for index, part in enumerate(parts)
+    )
 
 
 def strip_json_markdown_from_text(text: str) -> str:
@@ -492,63 +560,8 @@ def strip_json_markdown_from_text(text: str) -> str:
     Returns:
         Text with JSON markdown blocks replaced by pure JSON content
     """
-
-    def extract_json_content(json_content):
-        # Handle both string input and regex match objects for backward compatibility
-        if hasattr(json_content, "group"):
-            json_content = json_content.group(1).strip()
-        elif json_content:
-            json_content = json_content.strip()
-        else:
-            return ""
-
-        # If it's multiline JSON (contains newlines), clean up line by line
-        if "\n" in json_content:
-            lines = json_content.split("\n")
-            cleaned_lines = []
-            for line in lines:
-                stripped = line.strip()
-                if stripped:  # Only keep non-empty lines
-                    cleaned_lines.append(stripped)
-            return " ".join(cleaned_lines)
-        else:
-            # For inline JSON, just normalize internal whitespace
-            # Use regex to normalize whitespace while preserving JSON structure
-            return re.sub(r"\s+", " ", json_content).strip()
-
-    # Pattern 1: ```json...content...``` blocks (with or without newlines)
-    # Using string methods instead of regex to avoid potential ReDoS
-    result = text
-    start_marker = "```json"
-    end_marker = "```"
-
-    while start_marker in result:
-        start_idx = result.find(start_marker)
-        if start_idx == -1:
-            break
-
-        # Find the closing marker after the opening one
-        end_idx = result.find(end_marker, start_idx + len(start_marker))
-        if end_idx == -1:
-            break
-
-        # Extract and process the JSON content
-        json_content = result[start_idx + len(start_marker) : end_idx]
-        cleaned = extract_json_content(json_content)
-
-        # Replace the entire block with cleaned content
-        result = result[:start_idx] + cleaned + result[end_idx + len(end_marker) :]
-
-    # Pattern 2: [json] content [json] blocks
-    marker = "[json]"
-    parts = result.split(marker)
-    if len(parts) > 2:
-        # Process alternating parts (content between markers)
-        for i in range(1, len(parts), 2):
-            if i < len(parts):
-                parts[i] = extract_json_content(parts[i])
-        result = "".join(parts)
-
+    result = _replace_json_code_blocks(text)
+    result = _replace_json_marker_blocks(result)
     return result.strip()
 
 
@@ -556,10 +569,10 @@ async def start_request_log(
     request: Request,
     service_type: str,
     upstream_url: str,
-    original_model: str = None,
-    mapped_model: str = None,
-    auth_payload: dict = None,
-    request_body: bytes = None,
+    original_model: Optional[str] = None,
+    mapped_model: Optional[str] = None,
+    auth_payload: Optional[Dict[str, Any]] = None,
+    request_body: Optional[bytes] = None,
 ):
     """Create initial log entry for inflight tracking"""
     if not ENABLE_LOGGING:
@@ -675,12 +688,133 @@ def _complete_lb_request(lb_instance, start_time: float, success: bool):
         logger.error(f"Failed to complete load balancer request tracking: {e}")
 
 
+def _complete_lb_request_from_metadata(metadata: Any, start_time: float, status_code: int) -> None:
+    """Complete load balancer tracking when request metadata includes an LB instance."""
+    lb_instance = getattr(metadata, "lb_instance", None) if metadata else None
+    if lb_instance:
+        _complete_lb_request(lb_instance, start_time, status_code < 400)
+
+
+def _estimate_prompt_tokens_from_request_body(request_body: Optional[bytes]) -> int:
+    """Estimate prompt tokens from the original request body."""
+    if not request_body:
+        return 0
+
+    try:
+        request_data = json.loads(request_body.decode("utf-8"))
+        return estimate_tokens_from_request(request_data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return estimate_token_count(request_body.decode("utf-8", errors="ignore"))
+
+
+def _extract_completion_text(response_json: Dict[str, Any]) -> str:
+    """Extract response text from OpenAI-style choices for token estimation."""
+    content_parts = []
+    for choice in response_json.get("choices", []):
+        message_content = choice.get("message", {}).get("content")
+        if message_content:
+            content_parts.append(message_content)
+            continue
+
+        text_content = choice.get("text")
+        if text_content:
+            content_parts.append(text_content)
+
+    return "".join(content_parts)
+
+
+def _estimate_completion_tokens_from_response_body(response_body: Optional[bytes]) -> int:
+    """Estimate completion tokens from a serialized upstream response body."""
+    if not response_body:
+        return 0
+
+    try:
+        response_text = response_body.decode("utf-8")
+    except UnicodeDecodeError:
+        return 0
+
+    try:
+        response_json = json.loads(response_text)
+    except json.JSONDecodeError:
+        return estimate_token_count(response_text)
+
+    if response_json.get("response"):
+        return estimate_token_count(response_json["response"])
+
+    if response_json.get("choices"):
+        return estimate_token_count(_extract_completion_text(response_json))
+
+    return 0
+
+
+def _calculate_token_counts(
+    response_data: Dict[str, Any],
+    request_body: Optional[bytes],
+    response_body: Optional[bytes],
+) -> Tuple[int, int, int]:
+    """Derive prompt/completion token counts from usage data or body estimation."""
+    try:
+        if response_data.get("usage"):
+            return extract_tokens_from_openai_response(response_data)
+
+        prompt_tokens = _estimate_prompt_tokens_from_request_body(request_body)
+        completion_tokens = _estimate_completion_tokens_from_response_body(response_body)
+        return prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
+    except Exception as e:
+        logger.debug(f"Failed to calculate token counts: {e}")
+        return 0, 0, 0
+
+
+def _update_completed_log_entry(
+    log_entry: Any,
+    duration_ms: int,
+    request_size: int,
+    response_size: int,
+    status_code: Any,
+    error_message: Optional[str],
+    request_body: Optional[bytes],
+    response_body: Optional[bytes],
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> None:
+    """Apply completion metrics to the log entry before persisting it."""
+    log_entry.duration_ms = duration_ms
+    log_entry.request_size = request_size
+    log_entry.response_size = response_size
+    log_entry.status_code = status_code
+    if request_body:
+        log_entry.set_request_body(request_body)
+    if response_body:
+        log_entry.set_response_body(response_body)
+    log_entry.error_message = error_message
+    log_entry.completed_at = datetime.now()
+    log_entry.prompt_tokens = prompt_tokens
+    log_entry.completion_tokens = completion_tokens
+    log_entry.total_tokens = total_tokens
+
+
+def _broadcast_request_completion(log_entry: Any) -> str:
+    """Broadcast a request completion event in a fire-and-forget fashion."""
+    request_id = getattr(log_entry, "request_id", "unknown")
+
+    import asyncio
+
+    try:
+        logger.debug(f"Broadcasting request_completed event for request {request_id}")
+        asyncio.create_task(broadcast_request_event("request_completed", log_entry))
+    except Exception as e:
+        logger.error(f"Failed to broadcast request completion event: {e}")
+
+    return request_id
+
+
 def complete_request_log(
     log_entry,
     start_time: float,
     response_data: dict,
-    request_body: bytes = None,
-    response_body: bytes = None,
+    request_body: Optional[bytes] = None,
+    response_body: Optional[bytes] = None,
     metadata=None,
 ):
     """Complete the log entry when request finishes.
@@ -693,598 +827,680 @@ def complete_request_log(
         response_body: Response body bytes (optional)
         metadata: RequestMetadata with lb_instance for load balancer tracking (optional)
     """
+    status_code = response_data.get("status_code", 200)
+
     if not ENABLE_LOGGING or not log_entry:
         # Still need to complete load balancer tracking even if logging disabled
-        if metadata and hasattr(metadata, "lb_instance") and metadata.lb_instance:
-            _complete_lb_request(metadata.lb_instance, start_time, response_data.get("status_code", 200) < 400)
+        _complete_lb_request_from_metadata(metadata, start_time, status_code)
         return
 
     try:
-        # Calculate metrics
         duration_ms = int((time.time() - start_time) * 1000)
         request_size = len(request_body) if request_body else 0
         response_size = len(response_body) if response_body else 0
 
-        # Calculate token counts for performance analytics
-        prompt_tokens = 0
-        completion_tokens = 0
-        total_tokens = 0
+        prompt_tokens, completion_tokens, total_tokens = _calculate_token_counts(
+            response_data,
+            request_body,
+            response_body,
+        )
 
-        try:
-            # Try to extract accurate token counts from OpenAI usage data first
-            if response_data.get("usage"):
-                prompt_tokens, completion_tokens, total_tokens = extract_tokens_from_openai_response(response_data)
-            else:
-                # Fall back to estimation if usage data not available
-                if request_body:
-                    try:
-                        request_data = json.loads(request_body.decode("utf-8"))
-                        prompt_tokens = estimate_tokens_from_request(request_data)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        prompt_tokens = estimate_token_count(str(request_body.decode("utf-8", errors="ignore")))
-
-                if response_body:
-                    try:
-                        response_text = response_body.decode("utf-8")
-                        # Try to parse as JSON and extract content
-                        try:
-                            response_json = json.loads(response_text)
-                            if response_json.get("response"):  # Ollama format
-                                completion_tokens = estimate_token_count(response_json["response"])
-                            elif response_json.get("choices"):  # OpenAI format
-                                content = ""
-                                for choice in response_json["choices"]:
-                                    if choice.get("message", {}).get("content"):
-                                        content += choice["message"]["content"]
-                                    elif choice.get("text"):
-                                        content += choice["text"]
-                                completion_tokens = estimate_token_count(content)
-                        except json.JSONDecodeError:
-                            # If not JSON, estimate from raw text
-                            completion_tokens = estimate_token_count(response_text)
-                    except UnicodeDecodeError:
-                        completion_tokens = 0
-
-                total_tokens = prompt_tokens + completion_tokens
-
-        except Exception as e:
-            logger.debug(f"Failed to calculate token counts: {e}")
-            # Keep defaults of 0 if calculation fails
-
-        # Update log entry with completion data
-        log_entry.duration_ms = duration_ms
-        log_entry.request_size = request_size
-        log_entry.response_size = response_size
-        log_entry.status_code = response_data.get("status_code")
-        # Store bodies in blob storage
-        if request_body:
-            log_entry.set_request_body(request_body)
-        if response_body:
-            log_entry.set_response_body(response_body)
-        log_entry.error_message = response_data.get("error_message")
-        log_entry.completed_at = datetime.now()
-
-        # Store token counts for performance analytics
-        log_entry.prompt_tokens = prompt_tokens
-        log_entry.completion_tokens = completion_tokens
-        log_entry.total_tokens = total_tokens
+        _update_completed_log_entry(
+            log_entry,
+            duration_ms,
+            request_size,
+            response_size,
+            status_code,
+            response_data.get("error_message"),
+            request_body,
+            response_body,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        )
 
         log_entry.save()
 
-        # Enhanced completion logging with request ID
-        request_id = getattr(log_entry, "request_id", "unknown")
-
-        # Broadcast request completion event (fire and forget)
-        import asyncio
-
-        try:
-            logger.debug(f"Broadcasting request_completed event for request {request_id}")
-            asyncio.create_task(broadcast_request_event("request_completed", log_entry))
-        except Exception as e:
-            logger.error(f"Failed to broadcast request completion event: {e}")
+        request_id = _broadcast_request_completion(log_entry)
         logger.debug(
-            f"[{request_id}] Request completed: {duration_ms}ms, {response_data.get('status_code', 'unknown')} status, "
+            f"[{request_id}] Request completed: {duration_ms}ms, {status_code} status, "
             f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}"
         )
 
-        if response_data.get("error_message"):
-            logger.warning(f"[{request_id}] Request had error: {response_data['error_message']}")
+        error_message = response_data.get("error_message")
+        if error_message:
+            logger.warning(f"[{request_id}] Request had error: {error_message}")
 
-        # Complete load balancer tracking if LB instance present in metadata
-        if metadata and hasattr(metadata, "lb_instance") and metadata.lb_instance:
-            success = response_data.get("status_code", 200) < 400
-            _complete_lb_request(metadata.lb_instance, start_time, success)
+        _complete_lb_request_from_metadata(metadata, start_time, status_code)
     except Exception as e:
         logger.error(f"Failed to complete request log: {e}")
 
 
-async def proxy_request(path: str, request: Request):
-    start_time = time.time()
-    original_model = None
-    mapped_model = None
-    request_body_bytes = None
+def _get_request_source_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
-    # Get source IP for routing
-    source_ip = request.client.host if request.client else "unknown"
 
-    # Get auth payload for enhanced logging (don't enforce here, middleware handles that)
-    auth_payload = None
+def _get_request_auth_payload(request: Request) -> Optional[Dict[str, Any]]:
     try:
-        auth_payload = verify_request_auth(request)
+        return verify_request_auth(request)
     except Exception:
-        # Auth verification failed or not configured, continue without auth info
-        pass
+        return None
 
-    # Read and mutate JSON body
+
+async def _parse_openai_request_payload(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[bytes], Optional[JSONResponse]]:
     try:
         payload = await request.json()
-        request_body_bytes = json.dumps(payload).encode("utf-8")
+        return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
         logger.error(f"Failed to parse request JSON: {e}")
-        # Use default upstream for error logging
-        log_entry = await start_request_log(
-            request, "openai", DEFAULT_UPSTREAM, original_model, mapped_model, auth_payload, None
-        )
-        complete_request_log(
-            log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"}
-        )
-        return JSONResponse(content={"error": "Invalid JSON in request body"}, status_code=400)
+        log_entry = await start_request_log(request, "openai", DEFAULT_UPSTREAM, None, None, auth_payload, None)
+        complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
+        return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
-    # Extract model for routing
-    if "model" in payload:
-        original_model = payload["model"]
-        mapped_model = rewrite_model(original_model)
-        if mapped_model != original_model:
-            logger.debug(f"Rewriting model '{original_model}' -> '{mapped_model}'")
-        payload["model"] = mapped_model
 
-    # For logging purposes, we'll determine the upstream after routing
+def _apply_openai_model_mapping(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    original_model: Optional[str] = payload.get("model")
+    if original_model is None:
+        return None, None
+
+    mapped_model = rewrite_model(original_model)
+    if mapped_model != original_model:
+        logger.debug(f"Rewriting model '{original_model}' -> '{mapped_model}'")
+    payload["model"] = mapped_model
+    return original_model, mapped_model
+
+
+def _update_log_entry_models(log_entry: Any, original_model: Optional[str], mapped_model: Optional[str]) -> None:
+    if not log_entry:
+        return
+
+    try:
+        log_entry.original_model = original_model
+        log_entry.mapped_model = mapped_model
+        log_entry.save()
+    except Exception as e:
+        logger.error(f"Failed to update log entry: {e}")
+
+
+async def _start_openai_request_log(
+    request: Request,
+    original_model: Optional[str],
+    mapped_model: Optional[str],
+    auth_payload: Optional[Dict[str, Any]],
+    request_body_bytes: Optional[bytes],
+):
     log_entry = await start_request_log(
-        request, "openai", "pending", original_model, mapped_model, auth_payload, request_body_bytes
+        request,
+        "openai",
+        "pending",
+        original_model,
+        mapped_model,
+        auth_payload,
+        request_body_bytes,
     )
+    _update_log_entry_models(log_entry, original_model, mapped_model)
+    return log_entry
 
-    # Update log entry with model info
-    if log_entry:
-        try:
-            log_entry.original_model = original_model
-            log_entry.mapped_model = mapped_model
-            log_entry.save()
-        except Exception as e:
-            logger.error(f"Failed to update log entry: {e}")
 
-    # If disabling thinking, append suffix to request content rather than model name
-    if DISABLE_THINKING:
-        logger.debug("Disabling thinking by appending '/no_think' marker to content")
-        if "messages" in payload and isinstance(payload["messages"], list):
-            payload["messages"].append({"role": "system", "content": "/no_think"})
-        elif "prompt" in payload and isinstance(payload["prompt"], str):
-            payload["prompt"] = payload["prompt"].rstrip() + " /no_think"
+def _apply_disable_thinking_request_marker(payload: Dict[str, Any]) -> None:
+    if not DISABLE_THINKING:
+        return
 
-    # Forward headers (keep Authorization)
-    headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
+    logger.debug("Disabling thinking by appending '/no_think' marker to content")
+    if "messages" in payload and isinstance(payload["messages"], list):
+        payload["messages"].append({"role": "system", "content": "/no_think"})
+    elif "prompt" in payload and isinstance(payload["prompt"], str):
+        payload["prompt"] = payload["prompt"].rstrip() + " /no_think"
 
-    # Check if streaming is requested
-    is_streaming = payload.get("stream", False)
 
-    # Determine legacy proxy mode for tests or explicit override
-    legacy_proxy = (
+def _build_openai_forward_headers(request: Request) -> Dict[str, str]:
+    return {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
+
+
+def _is_legacy_proxy_mode() -> bool:
+    return (
         os.getenv("USE_LEGACY_PROXY", "false").lower() in ("1", "true", "yes")
         or os.getenv("APP_ENV", "dev").lower() == "test"
     )
 
-    # Initialize container if not already done (skip when using legacy proxy)
+
+async def _get_active_container(legacy_proxy: bool):
     global container
-    if container is None and not legacy_proxy:
+    if legacy_proxy:
+        return None
+
+    if container is None:
         await init_new_architecture()
 
-    # Route all models (streaming and non-streaming) through the unified provider architecture
-    model_name = mapped_model or original_model or "unknown"
+    return container
+
+
+async def _execute_legacy_proxy_request(
+    path: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+) -> RoutedRequestResult:
+    url = f"{DEFAULT_UPSTREAM}{path}"
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        return RoutedRequestResult(resp.json(), resp.status_code, DEFAULT_UPSTREAM)
+
+
+async def _execute_container_proxy_request(
+    active_container: Any,
+    source_ip: str,
+    actual_model: str,
+    payload: Dict[str, Any],
+    path: str,
+    headers: Dict[str, str],
+    is_streaming: bool,
+) -> RoutedRequestResult:
+    if is_streaming:
+        data, status_code, upstream_used, metadata = await active_container.route_streaming_request(
+            source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+        )
+        return RoutedRequestResult(data, status_code, upstream_used, metadata, is_streaming=True)
+
+    data, status_code, upstream_used, metadata = await active_container.route_request(
+        source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+    )
+    return RoutedRequestResult(data, status_code, upstream_used, metadata)
+
+
+async def _route_openai_request(
+    source_ip: str,
+    model_name: str,
+    payload: Dict[str, Any],
+    path: str,
+    headers: Dict[str, str],
+    is_streaming: bool,
+    legacy_proxy: bool,
+) -> RoutedRequestResult:
+    if legacy_proxy:
+        return await _execute_legacy_proxy_request(path, payload, headers)
+
+    active_container = await _get_active_container(False)
+    if active_container is None:
+        raise RuntimeError("Provider architecture not available")
+
+    actual_model = _extract_model_from_provider_url(model_name)
+    payload["model"] = actual_model
+
+    if not is_streaming:
+        return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, False)
 
     try:
-        if legacy_proxy:
-            # Direct upstream call (non-streaming) for tests or explicit override
-            url = f"{DEFAULT_UPSTREAM}{path}"
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                data = resp.json()
-                status_code = resp.status_code
-                upstream_used = DEFAULT_UPSTREAM
-                metadata = None
-        elif container is not None:
-            # Use the unified provider architecture for all models
-            actual_model = _extract_model_from_provider_url(model_name)
-            # Update payload with actual model name for provider API
-            payload["model"] = actual_model
-
-            # The container architecture handles both streaming and non-streaming automatically
-            if is_streaming:
-                # For streaming, use the container's streaming capabilities
-                data, status_code, upstream_used, metadata = await container.route_streaming_request(
-                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
-                )
-
-                # Update log entry with metadata
-                if log_entry:
-                    try:
-                        log_entry.upstream_url = upstream_used
-                        if metadata:
-                            log_entry.api_key_suffix = metadata.api_key_suffix
-                            log_entry.proxy_used = metadata.proxy_used
-                            log_entry.provider_id = metadata.provider_id
-                            log_entry.api_key_index = metadata.api_key_index
-                            log_entry.api_key_total = metadata.api_key_total
-                    except Exception as e:
-                        logger.error(f"Failed to update log entry with upstream: {e}")
-
-                # Complete logging for streaming request
-                complete_request_log(
-                    log_entry,
-                    start_time,
-                    {"status_code": status_code},
-                    request_body=request_body_bytes,
-                    metadata=metadata,
-                )
-
-                return data  # data should be a StreamingResponse for streaming requests
-            else:
-                # For non-streaming requests
-                data, status_code, upstream_used, metadata = await container.route_request(
-                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
-                )
-        else:
-            # Fallback error if container not initialized
-            raise Exception("Provider architecture not available")
+        return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, True)
     except Exception as e:
-        # Handle case where container doesn't support streaming yet - fallback to non-streaming
-        if is_streaming:
-            logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
-            # Try non-streaming instead
-            try:
-                data, status_code, upstream_used, metadata = await container.route_request(
-                    source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
-                )
-            except Exception as fallback_e:
-                logger.error(f"Both streaming and non-streaming failed: {fallback_e}")
-                complete_request_log(
-                    log_entry,
-                    start_time,
-                    {"status_code": 503, "error_message": str(fallback_e)},
-                    request_body=request_body_bytes,
-                )
-                return JSONResponse(
-                    content={"error": "provider_architecture_failed", "message": str(fallback_e)}, status_code=503
-                )
-        else:
-            logger.error(f"Provider architecture failed: {e}")
-            complete_request_log(
-                log_entry, start_time, {"status_code": 503, "error_message": str(e)}, request_body=request_body_bytes
-            )
-            return JSONResponse(content={"error": "provider_architecture_failed", "message": str(e)}, status_code=503)
-
-    # Update log entry with actual upstream used and metadata
-    if log_entry:
+        logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
         try:
-            log_entry.upstream_url = upstream_used
-            if metadata:
-                log_entry.api_key_suffix = metadata.api_key_suffix
-                log_entry.proxy_used = metadata.proxy_used
-                log_entry.provider_id = metadata.provider_id
-                log_entry.api_key_index = metadata.api_key_index
-                log_entry.api_key_total = metadata.api_key_total
-        except Exception as e:
-            logger.error(f"Failed to update log entry with metadata: {e}")
+            return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, False)
+        except Exception as fallback_error:
+            logger.error(f"Both streaming and non-streaming failed: {fallback_error}")
+            raise fallback_error
 
-    # Check if this was an error response
-    if status_code >= 400:
-        response_body_bytes = json.dumps(data).encode("utf-8") if data else None
-        complete_request_log(
-            log_entry,
-            start_time,
-            {"status_code": status_code, "error_message": str(data)},
-            request_body=request_body_bytes,
-            response_body=response_body_bytes,
-            metadata=metadata,
-        )
-        return JSONResponse(content=data, status_code=status_code)
 
-    logger.debug(f"Provider architecture response data: {json.dumps(data) if data else 'None'}")
+def _update_log_entry_provider_metadata(log_entry: Any, upstream_used: str, metadata: Any) -> None:
+    if not log_entry:
+        return
 
-    # Strip thinking chains and JSON markdown if enabled
-    if STRIP_THINKING or STRIP_JSON_MARKDOWN:
-        for choice in data.get("choices", []):
-            if "message" in choice and isinstance(choice["message"].get("content"), str):
-                content = choice["message"]["content"]
-                if STRIP_THINKING:
-                    content = strip_think_chain_from_text(content)
-                    # Normalize excessive spaces for nicer output
-                    content = re.sub(r"\s{2,}", " ", content)
-                if STRIP_JSON_MARKDOWN:
-                    content = strip_json_markdown_from_text(content)
-                choice["message"]["content"] = content
-            elif isinstance(choice.get("text"), str):
-                text = choice["text"]
-                if STRIP_THINKING:
-                    text = strip_think_chain_from_text(text)
-                    text = re.sub(r"\s{2,}", " ", text)
-                if STRIP_JSON_MARKDOWN:
-                    text = strip_json_markdown_from_text(text)
-                choice["text"] = text
+    try:
+        log_entry.upstream_url = upstream_used
+        if metadata:
+            log_entry.api_key_suffix = metadata.api_key_suffix
+            log_entry.proxy_used = metadata.proxy_used
+            log_entry.provider_id = metadata.provider_id
+            log_entry.api_key_index = metadata.api_key_index
+            log_entry.api_key_total = metadata.api_key_total
+    except Exception as e:
+        logger.error(f"Failed to update log entry with metadata: {e}")
 
-    # Complete logging
-    response_body_bytes = json.dumps(data).encode("utf-8") if data else None
+
+def _serialize_json_bytes(data: Any) -> Optional[bytes]:
+    return json.dumps(data).encode("utf-8") if data is not None else None
+
+
+def _error_response(
+    log_entry: Any,
+    start_time: float,
+    status_code: int,
+    error_message: str,
+    request_body_bytes: Optional[bytes],
+    response_payload: Optional[Dict[str, Any]] = None,
+    metadata: Any = None,
+) -> JSONResponse:
+    payload = response_payload or {"error": "provider_architecture_failed", "message": error_message}
     complete_request_log(
         log_entry,
         start_time,
-        {"status_code": status_code},
+        {"status_code": status_code, "error_message": error_message},
         request_body=request_body_bytes,
-        response_body=response_body_bytes,
+        response_body=_serialize_json_bytes(payload) if response_payload is not None else None,
         metadata=metadata,
     )
+    return JSONResponse(content=payload, status_code=status_code)
 
-    # Add custom header with our internal request ID for easier tracking
-    headers = {}
+
+def _normalize_response_text(text: str) -> str:
+    if STRIP_THINKING:
+        text = strip_think_chain_from_text(text)
+        text = re.sub(EXCESSIVE_WHITESPACE_PATTERN, " ", text)
+    if STRIP_JSON_MARKDOWN:
+        text = strip_json_markdown_from_text(text)
+    return text
+
+
+def _normalize_openai_choice(choice: Dict[str, Any]) -> None:
+    if "message" in choice and isinstance(choice["message"].get("content"), str):
+        choice["message"]["content"] = _normalize_response_text(choice["message"]["content"])
+    elif isinstance(choice.get("text"), str):
+        choice["text"] = _normalize_response_text(choice["text"])
+
+
+def _normalize_openai_response_content(data: Dict[str, Any]) -> None:
+    if not (STRIP_THINKING or STRIP_JSON_MARKDOWN):
+        return
+
+    for choice in data.get("choices", []):
+        _normalize_openai_choice(choice)
+
+
+def _build_request_tracking_headers(log_entry: Any) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
     if log_entry and hasattr(log_entry, "request_id"):
         headers["x-smolrouter-uuid"] = log_entry.request_id
+    return headers
 
-    return JSONResponse(content=data, status_code=status_code, headers=headers)
 
-
-async def proxy_ollama_request(path: str, request: Request) -> StreamingResponse:
+async def proxy_request(path: str, request: Request):
     start_time = time.time()
-    original_model = None
-    mapped_model = None
-    request_body_bytes = None
+    source_ip = _get_request_source_ip(request)
+    auth_payload = _get_request_auth_payload(request)
+    payload, request_body_bytes, error_response = await _parse_openai_request_payload(request, start_time, auth_payload)
+    if error_response is not None:
+        return error_response
+    if payload is None:
+        return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
-    # Get source IP for routing
-    source_ip = request.client.host if request.client else "unknown"
+    original_model, mapped_model = _apply_openai_model_mapping(payload)
+    log_entry = await _start_openai_request_log(request, original_model, mapped_model, auth_payload, request_body_bytes)
+    _apply_disable_thinking_request_marker(payload)
 
-    # Read and mutate JSON body
+    headers = _build_openai_forward_headers(request)
+    is_streaming = bool(payload.get("stream", False))
+    legacy_proxy = _is_legacy_proxy_mode()
+    model_name = mapped_model or original_model or "unknown"
+
     try:
-        ollama_payload = await request.json()
-        request_body_bytes = json.dumps(ollama_payload).encode("utf-8")
+        route_result = await _route_openai_request(source_ip, model_name, payload, path, headers, is_streaming, legacy_proxy)
+    except Exception as e:
+        logger.error(f"Provider architecture failed: {e}")
+        return _error_response(log_entry, start_time, 503, str(e), request_body_bytes)
+
+    _update_log_entry_provider_metadata(log_entry, route_result.upstream_used, route_result.metadata)
+
+    if route_result.is_streaming:
+        complete_request_log(
+            log_entry,
+            start_time,
+            {"status_code": route_result.status_code},
+            request_body=request_body_bytes,
+            metadata=route_result.metadata,
+        )
+        return route_result.data
+
+    if route_result.status_code >= 400:
+        return _error_response(
+            log_entry,
+            start_time,
+            route_result.status_code,
+            str(route_result.data),
+            request_body_bytes,
+            response_payload=route_result.data,
+            metadata=route_result.metadata,
+        )
+
+    logger.debug(f"Provider architecture response data: {json.dumps(route_result.data) if route_result.data else 'None'}")
+    _normalize_openai_response_content(route_result.data)
+
+    response_body_bytes = _serialize_json_bytes(route_result.data)
+    complete_request_log(
+        log_entry,
+        start_time,
+        {"status_code": route_result.status_code},
+        request_body=request_body_bytes,
+        response_body=response_body_bytes,
+        metadata=route_result.metadata,
+    )
+
+    return JSONResponse(
+        content=route_result.data,
+        status_code=route_result.status_code,
+        headers=_build_request_tracking_headers(log_entry),
+    )
+
+
+async def _parse_ollama_request_payload(
+    request: Request,
+    start_time: float,
+) -> Tuple[Optional[Dict[str, Any]], Optional[bytes], Optional[JSONResponse]]:
+    try:
+        payload = await request.json()
+        return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
         logger.error(f"Failed to parse Ollama request JSON: {e}")
-        # Use default upstream for error logging
-        log_entry = await start_request_log(
-            request, "ollama", DEFAULT_UPSTREAM, original_model, mapped_model, None, None
-        )
-        complete_request_log(
-            log_entry, start_time, {"status_code": 400, "error_message": "Invalid JSON in request body"}
-        )
-        return JSONResponse(content={"error": "Invalid JSON in request body"}, status_code=400)
+        log_entry = await start_request_log(request, "ollama", DEFAULT_UPSTREAM, None, None, None, None)
+        complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
+        return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
-    logger.debug(f"Received Ollama request to {path}: {ollama_payload}")
 
-    # Determine if it's a chat or generate endpoint
+def _build_ollama_openai_payload(
+    path: str,
+    source_ip: str,
+    ollama_payload: Dict[str, Any],
+) -> Tuple[Dict[str, Any], str, str, str]:
     is_chat_endpoint = "/chat" in path
-
-    # Transform Ollama request to OpenAI format
     original_model = ollama_payload["model"]
     mapped_model = rewrite_model(original_model)
-
-    # Find the best route for this request
     upstream_url, route_model_override = find_route(source_ip, original_model)
-
-    # Apply route-specific model override if specified
     final_model = route_model_override or mapped_model
+
     if route_model_override and route_model_override != mapped_model:
         logger.debug(f"Route override: model '{mapped_model}' -> '{route_model_override}'")
 
-    openai_payload = {}
-    openai_payload["model"] = final_model
-    openai_payload["stream"] = ollama_payload.get("stream", False)
+    openai_payload = {
+        "model": final_model,
+        "stream": ollama_payload.get("stream", False),
+        "messages": ollama_payload["messages"] if is_chat_endpoint else [{"role": "user", "content": ollama_payload["prompt"]}],
+    }
 
-    # Start logging with the determined upstream URL
-    log_entry = await start_request_log(
-        request, "ollama", upstream_url, original_model, final_model, None, request_body_bytes
-    )
-
-    # Update log entry with model info
-    if log_entry:
-        try:
-            log_entry.original_model = original_model
-            log_entry.mapped_model = final_model
-            log_entry.save()
-        except Exception as e:
-            logger.error(f"Failed to update Ollama log entry: {e}")
-
-    if is_chat_endpoint:
-        openai_payload["messages"] = ollama_payload["messages"]
-    else:  # /api/generate
-        openai_payload["messages"] = [{"role": "user", "content": ollama_payload["prompt"]}]
-
-    # If disabling thinking, append suffix to request content rather than model name
     if DISABLE_THINKING:
         logger.debug("Disabling thinking by appending '/no_think' marker to content")
         openai_payload["messages"].append({"role": "system", "content": "/no_think"})
 
-    # Forward headers (keep Authorization)
-    headers = {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
+    return openai_payload, upstream_url, original_model, final_model
 
+
+def _extract_openai_choice_content(choice: Dict[str, Any], streaming: bool = False) -> str:
+    if streaming and "delta" in choice and isinstance(choice["delta"].get("content"), str):
+        return choice["delta"]["content"]
+    if "message" in choice and isinstance(choice["message"].get("content"), str):
+        return choice["message"]["content"]
+    if isinstance(choice.get("text"), str):
+        return choice["text"]
+    return ""
+
+
+def _process_ollama_response_content(content: str, normalize_whitespace: bool, log_prefix: str = "") -> str:
+    if STRIP_THINKING:
+        content = strip_think_chain_from_text(content)
+        if normalize_whitespace:
+            content = re.sub(EXCESSIVE_WHITESPACE_PATTERN, " ", content)
+
+    if STRIP_JSON_MARKDOWN:
+        prefix = f"{log_prefix}: " if log_prefix else ""
+        logger.debug(f"{prefix}Original content before JSON markdown stripping: {repr(content)}")
+        content = strip_json_markdown_from_text(content)
+        logger.debug(f"{prefix}Content after JSON markdown stripping: {repr(content)}")
+
+    return content
+
+
+def _build_ollama_response(ollama_model: str, openai_data: Dict[str, Any]) -> Dict[str, Any]:
+    choice = openai_data.get("choices", [{}])[0] if openai_data.get("choices") else {}
+    ollama_response_content = _process_ollama_response_content(
+        _extract_openai_choice_content(choice),
+        normalize_whitespace=True,
+    )
+    ollama_response = {
+        "model": ollama_model,
+        "created_at": openai_data.get("created", ""),
+        "response": ollama_response_content,
+        "done": True,
+        "done_reason": "stop",
+    }
+    logger.debug(f"Transformed non-stream Ollama response: {json.dumps(ollama_response)}")
+    logger.debug(f"Final Ollama response content: {repr(ollama_response.get('response', ''))}")
+    return ollama_response
+
+
+def _ollama_done_chunk(ollama_model: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "model": ollama_model,
+                "created_at": datetime.now().isoformat(),
+                "response": "",
+                "done": True,
+                "done_reason": "stop",
+            }
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _convert_openai_stream_message(ollama_model: str, json_data: str) -> Tuple[Optional[bytes], bool]:
+    if json_data == "[DONE]":
+        return _ollama_done_chunk(ollama_model), True
+
+    try:
+        data = json.loads(json_data)
+    except json.JSONDecodeError:
+        logger.warning(f"Could not decode JSON from SSE: {json_data!r}")
+        return None, False
+
+    choice = data.get("choices", [{}])[0] if data.get("choices") else {}
+    content = _process_ollama_response_content(
+        _extract_openai_choice_content(choice, streaming=True),
+        normalize_whitespace=False,
+        log_prefix="Streaming",
+    )
+
+    ollama_chunk = {
+        "model": ollama_model,
+        "created_at": data.get("created", ""),
+        "response": content,
+        "done": False,
+    }
+    if choice.get("finish_reason"):
+        ollama_chunk["done_reason"] = choice["finish_reason"]
+
+    return json.dumps(ollama_chunk).encode("utf-8") + b"\n", False
+
+
+def _split_next_sse_message(buffer: str) -> Tuple[Optional[str], str]:
+    eol = buffer.find("\n\n")
+    if eol == -1:
+        return None, buffer
+
+    return buffer[:eol].strip(), buffer[eol + 4 :]
+
+
+def _extract_sse_data_payload(message: str) -> Optional[str]:
+    if not message.startswith("data:"):
+        return None
+
+    return message[len("data:") :].strip()
+
+
+def _consume_ollama_sse_buffer(buffer: str, ollama_model: str) -> Tuple[list[bytes], str, bool]:
+    emitted_chunks: list[bytes] = []
+
+    while True:
+        message, buffer = _split_next_sse_message(buffer)
+        if message is None:
+            return emitted_chunks, buffer, False
+
+        json_data = _extract_sse_data_payload(message)
+        if json_data is None:
+            continue
+
+        chunk_bytes, is_done = _convert_openai_stream_message(ollama_model, json_data)
+        if chunk_bytes is not None:
+            emitted_chunks.append(chunk_bytes)
+        if is_done:
+            return emitted_chunks, buffer, True
+
+
+async def _ollama_streaming_response_generator(upstream: Any, ollama_model: str) -> AsyncIterator[bytes]:
+    buffer = ""
+    async for chunk in upstream.aiter_bytes():
+        buffer += chunk.decode("utf-8")
+        try:
+            emitted_chunks, buffer, is_done = _consume_ollama_sse_buffer(buffer, ollama_model)
+            for emitted_chunk in emitted_chunks:
+                yield emitted_chunk
+            if is_done:
+                return
+        except Exception as e:
+            logger.error(f"Error processing stream: {e}")
+            break
+
+
+async def _proxy_ollama_non_streaming(
+    client: Any,
+    url: str,
+    openai_payload: Dict[str, Any],
+    headers: Dict[str, str],
+    ollama_payload: Dict[str, Any],
+    log_entry: Any,
+    start_time: float,
+    request_body_bytes: Optional[bytes],
+) -> JSONResponse:
+    resp = await client.post(url, json=openai_payload, headers=headers)
+    response_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ["content-length", "transfer-encoding"]}
+    openai_data = resp.json()
+    logger.debug(f"Downstream non-stream OpenAI response data: {json.dumps(openai_data)}")
+
+    ollama_response = _build_ollama_response(ollama_payload["model"], openai_data)
+    complete_request_log(
+        log_entry,
+        start_time,
+        {"status_code": resp.status_code, "usage": openai_data.get("usage")},
+        request_body=request_body_bytes,
+        response_body=_serialize_json_bytes(ollama_response),
+    )
+
+    return JSONResponse(content=ollama_response, status_code=resp.status_code, headers=response_headers)
+
+
+async def _proxy_ollama_streaming(
+    client: Any,
+    url: str,
+    openai_payload: Dict[str, Any],
+    headers: Dict[str, str],
+    ollama_payload: Dict[str, Any],
+    log_entry: Any,
+    start_time: float,
+    request_body_bytes: Optional[bytes],
+) -> StreamingResponse:
+    async with client.stream("POST", url, json=openai_payload, headers=headers) as upstream:
+        response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
+        complete_request_log(log_entry, start_time, {"status_code": upstream.status_code}, request_body=request_body_bytes)
+        return StreamingResponse(
+            _ollama_streaming_response_generator(upstream, ollama_payload["model"]),
+            status_code=upstream.status_code,
+            headers=response_headers,
+            media_type="application/x-ndjson",
+        )
+
+
+async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | StreamingResponse:
+    start_time = time.time()
+    source_ip = _get_request_source_ip(request)
+    ollama_payload, request_body_bytes, error_response = await _parse_ollama_request_payload(request, start_time)
+    if error_response is not None:
+        return error_response
+    if ollama_payload is None:
+        return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
+
+    logger.debug(f"Received Ollama request to {path}: {ollama_payload}")
+    openai_payload, upstream_url, original_model, final_model = _build_ollama_openai_payload(path, source_ip, ollama_payload)
+
+    log_entry = await start_request_log(
+        request,
+        "ollama",
+        upstream_url,
+        original_model,
+        final_model,
+        None,
+        request_body_bytes,
+    )
+    _update_log_entry_models(log_entry, original_model, final_model)
+
+    headers = _build_openai_forward_headers(request)
     url = f"{upstream_url}/v1/chat/completions"
     logger.debug(f"Proxying Ollama request to OpenAI endpoint: {url}")
 
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            if not openai_payload.get("stream"):
-                resp = await client.post(url, json=openai_payload, headers=headers)
-                response_headers = {
-                    k: v for k, v in resp.headers.items() if k.lower() not in ["content-length", "transfer-encoding"]
-                }
-                openai_data = resp.json()
-                logger.debug(f"Downstream non-stream OpenAI response data: {json.dumps(openai_data)}")
-
-                # Extract content from OpenAI response
-                ollama_response_content = ""
-                if openai_data.get("choices"):
-                    choice = openai_data["choices"][0]
-                    if "message" in choice and isinstance(choice["message"].get("content"), str):
-                        ollama_response_content = choice["message"]["content"]
-                    elif isinstance(choice.get("text"), str):
-                        ollama_response_content = choice["text"]
-
-                # Strip thinking chains and JSON markdown if enabled
-                if STRIP_THINKING:
-                    ollama_response_content = strip_think_chain_from_text(ollama_response_content)
-                    ollama_response_content = re.sub(r"\s{2,}", " ", ollama_response_content)
-                if STRIP_JSON_MARKDOWN:
-                    logger.debug(f"Original content before JSON markdown stripping: {repr(ollama_response_content)}")
-                    ollama_response_content = strip_json_markdown_from_text(ollama_response_content)
-                    logger.debug(f"Content after JSON markdown stripping: {repr(ollama_response_content)}")
-
-                # Transform to Ollama response format
-                ollama_response = {
-                    "model": ollama_payload["model"],
-                    "created_at": openai_data.get("created", ""),
-                    "response": ollama_response_content,
-                    "done": True,
-                    "done_reason": "stop",
-                }
-                logger.debug(f"Transformed non-stream Ollama response: {json.dumps(ollama_response)}")
-                logger.debug(f"Final Ollama response content: {repr(ollama_response.get('response', ''))}")
-
-                # Complete logging for successful response
-                request_body_bytes = json.dumps(ollama_payload).encode("utf-8")
-                response_body_bytes = json.dumps(ollama_response).encode("utf-8")
-                # Include OpenAI usage data for accurate token counting
-                response_data = {"status_code": resp.status_code, "usage": openai_data.get("usage")}
-                complete_request_log(
+            if openai_payload.get("stream"):
+                return await _proxy_ollama_streaming(
+                    client,
+                    url,
+                    openai_payload,
+                    headers,
+                    ollama_payload,
                     log_entry,
                     start_time,
-                    response_data,
-                    request_body=request_body_bytes,
-                    response_body=response_body_bytes,
+                    request_body_bytes,
                 )
 
-                return JSONResponse(
-                    content=ollama_response,
-                    status_code=resp.status_code,
-                    headers=response_headers,
-                )
-            else:
-                async with client.stream("POST", url, json=openai_payload, headers=headers) as upstream:
-
-                    async def ollama_streaming_response_generator() -> AsyncIterator[bytes]:
-                        buffer = ""
-                        async for chunk in upstream.aiter_bytes():
-                            buffer += chunk.decode("utf-8")
-                            try:
-                                while True:
-                                    # Find the end of an SSE message
-                                    eol = buffer.find("\n\n")
-                                    if eol == -1:
-                                        break
-
-                                    message = buffer[:eol].strip()
-                                    buffer = buffer[eol + 4 :]  # +4 for \n\n
-
-                                    if message.startswith("data:"):
-                                        json_data = message[len("data:") :].strip()
-                                        if json_data == "[DONE]":
-                                            # Send final done message in Ollama format
-                                            final_ollama_chunk = {
-                                                "model": ollama_payload["model"],
-                                                "created_at": datetime.now().isoformat(),
-                                                "response": "",
-                                                "done": True,
-                                                "done_reason": "stop",
-                                            }
-                                            yield json.dumps(final_ollama_chunk).encode("utf-8") + b"\n"
-                                            return
-
-                                        try:
-                                            data = json.loads(json_data)
-                                            content = ""
-                                            if data.get("choices"):
-                                                if "delta" in data["choices"][0] and isinstance(
-                                                    data["choices"][0]["delta"].get("content"), str
-                                                ):
-                                                    content = data["choices"][0]["delta"]["content"]
-                                                elif isinstance(data["choices"][0].get("text"), str):
-                                                    content = data["choices"][0]["text"]
-
-                                            if STRIP_THINKING:
-                                                content = strip_think_chain_from_text(content)
-                                            if STRIP_JSON_MARKDOWN:
-                                                logger.debug(
-                                                    f"Streaming: Original content before JSON markdown stripping: {repr(content)}"
-                                                )
-                                                content = strip_json_markdown_from_text(content)
-                                                logger.debug(
-                                                    f"Streaming: Content after JSON markdown stripping: {repr(content)}"
-                                                )
-
-                                            # Transform to Ollama streaming format
-                                            ollama_chunk = {
-                                                "model": ollama_payload["model"],
-                                                "created_at": data.get("created", ""),
-                                                "response": content,
-                                                "done": False,
-                                            }
-
-                                            # Add finish reason if present
-                                            if data.get("choices") and data["choices"][0].get("finish_reason"):
-                                                ollama_chunk["done_reason"] = data["choices"][0]["finish_reason"]
-
-                                            yield json.dumps(ollama_chunk).encode("utf-8") + b"\n"
-                                        except json.JSONDecodeError:
-                                            logger.warning(f"Could not decode JSON from SSE: {json_data!r}")
-                                            continue
-                            except Exception as e:
-                                logger.error(f"Error processing stream: {e}")
-                                # Yield an error message or re-raise
-                                break
-
-                    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() != "content-length"}
-                    # Complete logging for streaming response
-                    complete_request_log(
-                        log_entry, start_time, {"status_code": upstream.status_code}, request_body=request_body_bytes
-                    )
-
-                    return StreamingResponse(
-                        ollama_streaming_response_generator(),
-                        status_code=upstream.status_code,
-                        headers=response_headers,
-                        media_type="application/x-ndjson",
-                    )
+            return await _proxy_ollama_non_streaming(
+                client,
+                url,
+                openai_payload,
+                headers,
+                ollama_payload,
+                log_entry,
+                start_time,
+                request_body_bytes,
+            )
     except httpx.ConnectError as e:
         logger.error(f"Connection error to upstream {url}: {e}")
-        complete_request_log(
-            log_entry, start_time, {"status_code": 502, "error_message": str(e)}, request_body=request_body_bytes
-        )
-        return JSONResponse(
-            content={
+        return _error_response(
+            log_entry,
+            start_time,
+            502,
+            str(e),
+            request_body_bytes,
+            response_payload={
                 "error": "upstream_connection_failed",
                 "message": f"Could not connect to upstream server at {upstream_url}",
                 "details": str(e),
             },
-            status_code=502,
         )
     except httpx.TimeoutException as e:
         logger.error(f"Timeout error to upstream {url}: {e}")
-        complete_request_log(
-            log_entry, start_time, {"status_code": 504, "error_message": str(e)}, request_body=request_body_bytes
-        )
-        return JSONResponse(
-            content={
+        return _error_response(
+            log_entry,
+            start_time,
+            504,
+            str(e),
+            request_body_bytes,
+            response_payload={
                 "error": "upstream_timeout",
                 "message": f"Upstream server at {upstream_url} did not respond in time",
                 "details": str(e),
             },
-            status_code=504,
         )
     except Exception as e:
         logger.error(f"Unexpected error proxying Ollama request to {url}: {e}")
-        complete_request_log(
-            log_entry, start_time, {"status_code": 500, "error_message": str(e)}, request_body=request_body_bytes
-        )
-        return JSONResponse(
-            content={
+        return _error_response(
+            log_entry,
+            start_time,
+            500,
+            str(e),
+            request_body_bytes,
+            response_payload={
                 "error": "proxy_error",
                 "message": "An unexpected error occurred while proxying the request",
                 "details": str(e),
             },
-            status_code=500,
         )
 
 

@@ -1,8 +1,13 @@
 import pytest
 import httpx
+import asyncio
+from types import SimpleNamespace
 from httpx import AsyncClient
+import smolrouter.app as app_module
 from smolrouter.app import (
     app,
+    complete_request_log,
+    find_route,
     rewrite_model,
     strip_think_chain_from_text,
     strip_json_markdown_from_text,
@@ -11,7 +16,7 @@ from smolrouter.app import (
 )
 import json
 import respx
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
@@ -78,6 +83,42 @@ async def test_openai_completions_non_streaming(mock_openai_upstream, disable_lo
 
 
 @pytest.mark.asyncio
+async def test_openai_invalid_json_returns_400(disable_logging):
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            content="{invalid json",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid JSON in request body"}
+
+
+@pytest.mark.asyncio
+async def test_openai_streaming_falls_back_to_non_streaming_provider_architecture(disable_logging, monkeypatch):
+    fake_container = Mock()
+    fake_container.route_streaming_request = AsyncMock(side_effect=RuntimeError("streaming unsupported"))
+    fake_container.route_request = AsyncMock(
+        return_value=({"choices": [{"message": {"content": "fallback response"}}]}, 200, "provider:test", None)
+    )
+
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "fallback response"
+    fake_container.route_streaming_request.assert_awaited_once()
+    fake_container.route_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ollama_generate_non_streaming(mock_openai_upstream, disable_logging):
     async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -103,6 +144,61 @@ async def test_ollama_chat_non_streaming(mock_openai_upstream, disable_logging):
     assert "<think>" not in data["response"]
     assert data["done"] is True
     assert data["model"] == "mistral"
+
+
+@pytest.mark.asyncio
+async def test_ollama_invalid_json_returns_400(disable_logging):
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/chat",
+            content="{invalid json",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": "Invalid JSON in request body"}
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_ollama_chat_streaming_transforms_openai_sse(mock_client, disable_logging):
+    class FakeStreamResponse:
+        def __init__(self, chunks):
+            self.status_code = 200
+            self.headers = {"content-type": "text/event-stream"}
+            self._chunks = chunks
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_bytes(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    async_client = mock_client.return_value.__aenter__.return_value
+    async_client.stream = Mock(
+        return_value=FakeStreamResponse(
+            [
+                b'data: {"choices": [{"delta": {"content": "Hello"}}], "created": "now"}\n\n',
+                b'data: [DONE]\n\n',
+            ]
+        )
+    )
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/chat",
+            json={"model": "mistral", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert lines[0]["response"] == "Hello"
+    assert lines[0]["done"] is False
+    assert lines[-1]["done"] is True
 
 
 @pytest.mark.asyncio
@@ -138,6 +234,51 @@ async def test_system_dashboard_shows_google_proxy_pool(disable_logging):
     assert "http://127.0.0.1:8888" in content
     assert "http://127.0.0.1:8899" in content
     assert "No proxy configurations in use - all requests go direct" not in content
+
+
+@pytest.mark.asyncio
+async def test_google_genai_stats_returns_frontend_compatible_shape(disable_logging, monkeypatch):
+    fake_provider = Mock()
+    fake_provider.get_provider_type.return_value = "google-genai"
+    fake_provider.get_provider_id.return_value = "google-main"
+    fake_provider.get_api_key_stats = AsyncMock(
+        return_value={
+            "_rate_limiter": {"tokens": 1},
+            "key-1": {
+                "total_requests_today": 3,
+                "daily_limit_per_model": 5,
+                "models": {
+                    "gemini-2.5-pro": {
+                        "requests_today": 3,
+                        "tokens_today": 120,
+                        "status": "available",
+                        "quota_exhausted": False,
+                        "daily_limit_per_model": 5,
+                    }
+                },
+            },
+            "key-2": {
+                "total_requests_today": 0,
+                "daily_limit_per_model": 5,
+                "models": {},
+            },
+        }
+    )
+    fake_container = Mock()
+    fake_container.get_providers.return_value = [fake_provider]
+
+    monkeypatch.setattr(app_module, "container", fake_container)
+
+    async with AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/google-genai/stats")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["total_providers"] == 1
+    assert payload["summary"]["total_keys"] == 2
+    assert payload["providers"]["google-main"]["summary"]["total_keys"] == 2
+    assert "_rate_limiter" not in payload["providers"]["google-main"]["api_keys"]
+    assert payload["providers"]["google-main"]["api_keys"]["key-1"]["models"]["gemini-2.5-pro"]["requests_today"] == 3
 
 
 def test_rewrite_model_exact_match():
@@ -251,12 +392,12 @@ def test_timeout_configuration():
         from smolrouter import app
 
         importlib.reload(app)
-        assert app.REQUEST_TIMEOUT == 3000.0
+        assert app.REQUEST_TIMEOUT == pytest.approx(3000.0)
 
     # Test custom timeout
     with patch.dict(os.environ, {"REQUEST_TIMEOUT": "45.5"}, clear=True):
         importlib.reload(app)
-        assert app.REQUEST_TIMEOUT == 45.5
+        assert app.REQUEST_TIMEOUT == pytest.approx(45.5)
         assert isinstance(app.REQUEST_TIMEOUT, float)
 
 
@@ -319,6 +460,143 @@ Finished."""
 Finished."""
 
     assert strip_json_markdown_from_text(complex_json) == expected_complex
+
+
+def test_strip_json_markdown_preserves_unclosed_code_blocks():
+    text_with_unclosed_block = 'Before ```json\n{\n  "status": "pending"\n}'
+
+    assert strip_json_markdown_from_text(text_with_unclosed_block) == text_with_unclosed_block
+
+
+@pytest.mark.parametrize(
+    ("routes", "source_host", "model", "expected"),
+    [
+        (
+            [
+                {
+                    "match": {"source_host": "127.0.0.1", "model": "gpt-4"},
+                    "route": {"upstream": "http://primary-upstream", "model": "gpt-4o"},
+                }
+            ],
+            "127.0.0.1",
+            "gpt-4",
+            ("http://primary-upstream", "gpt-4o"),
+        ),
+        (
+            [{"match": {"model": "/^gpt-4/"}, "route": {"upstream": "http://regex-upstream"}}],
+            "10.0.0.8",
+            "gpt-4.1-mini",
+            ("http://regex-upstream", None),
+        ),
+        (
+            [{"match": {"source_host": "127.0.0.1"}, "route": {"upstream": "http://other-upstream"}}],
+            "10.0.0.8",
+            "gpt-4",
+            ("http://fallback-upstream", None),
+        ),
+    ],
+)
+def test_find_route(monkeypatch, routes, source_host, model, expected):
+    monkeypatch.setattr(app_module, "ROUTES_CONFIG_DATA", {"routes": routes})
+    monkeypatch.setattr(app_module, "DEFAULT_UPSTREAM", "http://fallback-upstream")
+
+    assert find_route(source_host, model) == expected
+
+
+class DummyLogEntry:
+    def __init__(self):
+        self.request_id = "req-123"
+        self.upstream_url = "http://upstream"
+        self.request_body = None
+        self.response_body = None
+        self.saved = False
+
+    def set_request_body(self, request_body):
+        self.request_body = request_body
+
+    def set_response_body(self, response_body):
+        self.response_body = response_body
+
+    def save(self):
+        self.saved = True
+
+
+def test_complete_request_log_uses_usage_metrics(monkeypatch):
+    log_entry = DummyLogEntry()
+    scheduled_coroutines = []
+    completed_lb_calls = []
+
+    def fake_create_task(coro):
+        scheduled_coroutines.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    monkeypatch.setattr(app_module.time, "time", lambda: 102.5)
+    monkeypatch.setattr(app_module, "extract_tokens_from_openai_response", lambda response_data: (11, 5, 16))
+    monkeypatch.setattr(app_module, "broadcast_request_event", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_complete_lb_request", lambda lb_instance, start_time, success: completed_lb_calls.append((lb_instance, success)))
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+
+    complete_request_log(
+        log_entry,
+        100.0,
+        {"status_code": 200, "usage": {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}},
+        request_body=b'{"messages": [{"role": "user", "content": "hello"}]}',
+        response_body=b'{"choices": [{"message": {"content": "hi"}}]}',
+        metadata=SimpleNamespace(lb_instance="lb-a"),
+    )
+
+    assert log_entry.saved is True
+    assert log_entry.duration_ms == 2500
+    assert log_entry.status_code == 200
+    assert log_entry.prompt_tokens == 11
+    assert log_entry.completion_tokens == 5
+    assert log_entry.total_tokens == 16
+    assert log_entry.request_body is not None
+    assert log_entry.response_body is not None
+    assert log_entry.completed_at is not None
+    assert len(scheduled_coroutines) == 1
+    assert completed_lb_calls == [("lb-a", True)]
+
+
+def test_complete_request_log_estimates_tokens_without_usage(monkeypatch):
+    log_entry = DummyLogEntry()
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    monkeypatch.setattr(app_module.time, "time", lambda: 201.0)
+    monkeypatch.setattr(app_module, "estimate_tokens_from_request", lambda request_data: 7)
+    monkeypatch.setattr(app_module, "estimate_token_count", lambda text: 3 if text == "hello world" else 0)
+    monkeypatch.setattr(app_module, "broadcast_request_event", AsyncMock(return_value=None))
+    monkeypatch.setattr(asyncio, "create_task", lambda coro: coro.close())
+
+    complete_request_log(
+        log_entry,
+        200.0,
+        {"status_code": 201},
+        request_body=b'{"prompt": "hello"}',
+        response_body=b'{"choices": [{"message": {"content": "hello world"}}]}',
+    )
+
+    assert log_entry.saved is True
+    assert log_entry.prompt_tokens == 7
+    assert log_entry.completion_tokens == 3
+    assert log_entry.total_tokens == 10
+
+
+def test_complete_request_log_without_logging_still_completes_lb_request(monkeypatch):
+    completed_lb_calls = []
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    monkeypatch.setattr(app_module, "_complete_lb_request", lambda lb_instance, start_time, success: completed_lb_calls.append((lb_instance, success)))
+
+    complete_request_log(
+        None,
+        50.0,
+        {"status_code": 503},
+        metadata=SimpleNamespace(lb_instance="lb-disabled"),
+    )
+
+    assert completed_lb_calls == [("lb-disabled", False)]
 
 
 def test_json_markdown_environment_variable():

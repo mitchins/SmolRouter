@@ -204,6 +204,34 @@ async def test_openai_static_model_provider_tolerates_missing_models_endpoint(mo
     assert await provider.health_check() is True
 
 
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_openai_provider_forwards_client_auth_for_passthrough_provider(mock_client):
+    provider = OpenAIProvider(
+        ProviderConfig(
+            name="test-openai-passthrough",
+            type="openai",
+            enabled=True,
+            url="https://example.com/openai/v1",
+        )
+    )
+
+    mock_response = Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {"id": "chatcmpl-test", "choices": []}
+    mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+
+    _, status_code = await provider.generate_completion(
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
+        {"authorization": b"Bearer client-token", "openai-organization": "org-123"},
+    )
+
+    assert status_code == 200
+    called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
+    assert called_headers["Authorization"] == "Bearer client-token"
+    assert called_headers["openai-organization"] == "org-123"
+
+
 def test_zai_coding_config_loads_api_key_file(tmp_path):
     """Test Z.AI config loads a key from an env-style file."""
     key_file = tmp_path / "glm.env"
@@ -218,6 +246,23 @@ def test_zai_coding_config_loads_api_key_file(tmp_path):
     )
 
     assert getattr(config, "api" + "_key") == "dummy-zai-token"
+
+
+def test_provider_factory_converts_proxy_configuration_shapes():
+    processed = ProviderFactory._convert_proxy_configs(
+        {
+            "name": "test-google",
+            "type": "google-genai",
+            "proxy_config": {"https_proxy": "http://127.0.0.1:8888"},
+            "per_model_proxy": {"gemma-3-4b-it": {"https_proxy": "http://127.0.0.1:8899"}},
+            "proxy_pool": [None, {"https_proxy": "http://127.0.0.1:8890"}],
+        }
+    )
+
+    assert isinstance(processed["proxy_config"], ProxyConfig)
+    assert isinstance(processed["per_model_proxy"]["gemma-3-4b-it"], ProxyConfig)
+    assert processed["proxy_pool"][0] is None
+    assert isinstance(processed["proxy_pool"][1], ProxyConfig)
 
 
 @pytest.mark.asyncio

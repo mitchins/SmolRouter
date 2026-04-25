@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - guarded by explicit test
     _fakeredis_module = None
 
 logger = logging.getLogger("smolrouter.redis")
+REDIS_STARTUP_CHECK_KEY = "smolrouter:startup_check"
 
 def _env() -> str:
     return os.getenv("APP_ENV", "dev").lower()
@@ -62,6 +63,68 @@ class RedisLike(Protocol):
     async def delete(self, *_names: str) -> int: ...
 
 
+def _resolved_allow_fake_in_prod(allow_fake_in_prod: Optional[bool]) -> bool:
+    return allow_fake_in_prod if allow_fake_in_prod is not None else _allow_fake_in_prod()
+
+
+def _should_use_real_redis(redis_url: Optional[str]) -> bool:
+    return bool(redis_url and redis_url.lower() != "fake")
+
+
+def _create_real_redis_client(redis_url: str) -> Any:
+    client = redis.from_url(
+        redis_url,
+        decode_responses=True,
+        max_connections=_max_conns(),
+        socket_timeout=_socket_timeout(),
+        socket_connect_timeout=_connect_timeout(),
+        health_check_interval=_health_check_interval(),
+        retry_on_timeout=True,
+        socket_keepalive=True,
+        socket_keepalive_options={},
+    )
+    logger.info(f"Redis: using REAL redis at {_redact_url(redis_url)}")
+    return client
+
+
+def _enforce_fake_redis_policy(env: str, allow_fake_in_prod: bool, fakeredis_module: Any) -> None:
+    if env == "prod" and not allow_fake_in_prod:
+        logger.error(
+            "🚨 Redis: REDIS_URL is required in production environment. "
+            "Set REDIS_URL or ALLOW_FAKE_REDIS_IN_PROD=1 to override (unsafe)."
+        )
+        sys.exit(1)
+
+    if fakeredis_module is None:
+        logger.error(
+            "🚨 Redis: fakeredis not available and no REDIS_URL provided. "
+            "Install fakeredis package for development/testing: pip install fakeredis"
+        )
+        sys.exit(1)
+
+
+def _log_fake_redis_usage(env: str) -> None:
+    if env == "prod":
+        logger.warning(
+            "🚨 Redis: using FAKE redis in PRODUCTION! "
+            "This is unsafe and not supported for performance/reliability. "
+            "Set REDIS_URL to use real Redis."
+        )
+        return
+
+    if env in ("staging", "uat"):
+        logger.warning(
+            "⚠️  Redis: using FAKE redis in staging environment. "
+            "Consider using real Redis for staging to match production."
+        )
+        return
+
+    logger.warning(
+        "💛 Redis: using FAKE redis (fakeredis) for development. "
+        "Set REDIS_URL to use real Redis for performance testing."
+    )
+
+
 def create_redis_client(
     *,
     redis_url: Optional[str] = None,
@@ -78,28 +141,12 @@ def create_redis_client(
 
     env = (env or _env()).lower()
     redis_url = redis_url if redis_url is not None else _redis_url()
-    allow_fake_in_prod = (
-        allow_fake_in_prod
-        if allow_fake_in_prod is not None
-        else _allow_fake_in_prod()
-    )
+    allow_fake_in_prod = _resolved_allow_fake_in_prod(allow_fake_in_prod)
 
-    if redis_url and redis_url.lower() != "fake":
+    if _should_use_real_redis(redis_url):
         # Real Redis configuration
         try:
-            client = redis.from_url(
-                redis_url,
-                decode_responses=True,
-                max_connections=_max_conns(),
-                socket_timeout=_socket_timeout(),
-                socket_connect_timeout=_connect_timeout(),
-                health_check_interval=_health_check_interval(),
-                retry_on_timeout=True,
-                socket_keepalive=True,
-                socket_keepalive_options={},
-            )
-            logger.info(f"Redis: using REAL redis at {_redact_url(redis_url)}")
-            return client, False
+            return _create_real_redis_client(redis_url), False
 
         except Exception as e:
             logger.error(f"Failed to create real Redis client: {e}")
@@ -109,39 +156,10 @@ def create_redis_client(
             # Fall through to fake Redis in dev/ci
 
     # No REDIS_URL or failed to create real client
-    if env == "prod" and not allow_fake_in_prod:
-        logger.error(
-            "🚨 Redis: REDIS_URL is required in production environment. "
-            "Set REDIS_URL or ALLOW_FAKE_REDIS_IN_PROD=1 to override (unsafe)."
-        )
-        sys.exit(1)
-
-    # Use FakeRedis for dev/ci (or prod override)
-    if fakeredis_module is None:
-        logger.error(
-            "🚨 Redis: fakeredis not available and no REDIS_URL provided. "
-            "Install fakeredis package for development/testing: pip install fakeredis"
-        )
-        sys.exit(1)
+    _enforce_fake_redis_policy(env, allow_fake_in_prod, fakeredis_module)
 
     client = fakeredis_module.FakeRedis(decode_responses=True)
-
-    if env == "prod":
-        logger.warning(
-            "🚨 Redis: using FAKE redis in PRODUCTION! "
-            "This is unsafe and not supported for performance/reliability. "
-            "Set REDIS_URL to use real Redis."
-        )
-    elif env in ("staging", "uat"):
-        logger.warning(
-            "⚠️  Redis: using FAKE redis in staging environment. "
-            "Consider using real Redis for staging to match production."
-        )
-    else:
-        logger.warning(
-            "💛 Redis: using FAKE redis (fakeredis) for development. "
-            "Set REDIS_URL to use real Redis for performance testing."
-        )
+    _log_fake_redis_usage(env)
 
     return client, True
 
@@ -167,20 +185,20 @@ async def redis_startup_check(client: Any, is_fake: bool):
             return redis.call('HGET', KEYS[1], 'startup_check')
             """
 
-            result = await client.eval(lua_script, 1, "smolrouter:startup_check")
+            result = await client.eval(lua_script, 1, REDIS_STARTUP_CHECK_KEY)
             logger.debug(f"Redis: Lua script execution successful, result: {result}")
 
             # Clean up test key
-            await client.delete("smolrouter:startup_check")
+            await client.delete(REDIS_STARTUP_CHECK_KEY)
 
         except Exception as e:
             if is_fake and "unknown command" in str(e).lower():
                 # FakeRedis doesn't support all Lua features - use alternative test
                 logger.debug("FakeRedis: Lua scripts not supported, testing basic operations")
-                await client.hset("smolrouter:startup_check", "test", 1)
-                await client.expire("smolrouter:startup_check", 10)
-                result = await client.hget("smolrouter:startup_check", "test")
-                await client.delete("smolrouter:startup_check")
+                await client.hset(REDIS_STARTUP_CHECK_KEY, "test", 1)
+                await client.expire(REDIS_STARTUP_CHECK_KEY, 10)
+                result = await client.hget(REDIS_STARTUP_CHECK_KEY, "test")
+                await client.delete(REDIS_STARTUP_CHECK_KEY)
                 logger.debug(f"FakeRedis: Basic operations successful, result: {result}")
             else:
                 raise
