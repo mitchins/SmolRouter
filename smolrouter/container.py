@@ -534,8 +534,10 @@ class SmolRouterContainer:
             "stats": stats,
         }
 
-    def close(self):
+    async def close(self):
         """Clean shutdown of container"""
+        await asyncio.sleep(0)
+
         if self._mediator:
             self._mediator.close()
 
