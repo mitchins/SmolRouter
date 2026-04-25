@@ -6,7 +6,12 @@ import pytest
 import os
 import asyncio
 import threading
-from unittest.mock import patch
+from typing import Any, cast
+from unittest.mock import Mock, patch
+
+import httpx
+import pytest_asyncio
+from fastapi.testclient import TestClient
 
 # Use Redis backend for tests - FakeRedis will handle the testing automatically
 
@@ -18,7 +23,7 @@ def _run_async_fixture_step(coro):
     except RuntimeError:
         return asyncio.run(coro)
 
-    result = {"value": None, "error": None}
+    result: dict[str, Any] = {"value": None, "error": None}
 
     def _runner():
         loop = asyncio.new_event_loop()
@@ -103,7 +108,7 @@ def isolated_db():
         await redis_client.flushall()  # Clear any existing data
         return redis_client
 
-    client = _run_async_fixture_step(init_redis())
+    client = cast(Any, _run_async_fixture_step(init_redis()))
 
     yield client
 
@@ -127,6 +132,44 @@ def disable_logging():
         patch.dict(os.environ, {"USE_LEGACY_PROXY": "true"}, clear=False),
     ):
         yield
+
+
+@pytest_asyncio.fixture
+async def async_client():
+    from smolrouter.app import app
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def client():
+    from smolrouter.app import app
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def webui_env(monkeypatch):
+    for key in tuple(os.environ):
+        if key.startswith("WEBUI_"):
+            monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    return monkeypatch
+
+
+@pytest.fixture
+def mock_request_factory():
+    def _factory(headers=None, client_ip="127.0.0.1"):
+        request = Mock()
+        request.client = Mock()
+        request.client.host = client_ip  # NOSONAR S1313
+        request.headers = headers or {}
+        return request
+
+    return _factory
 
 
 @pytest.fixture(scope="session", autouse=True)

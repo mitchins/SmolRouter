@@ -14,6 +14,7 @@ Tests cover all major components:
 import pytest
 import asyncio
 import time
+import httpx
 from unittest.mock import Mock, AsyncMock, patch
 
 from smolrouter.interfaces import ModelInfo, ClientContext, ProviderConfig
@@ -110,7 +111,6 @@ class TestProviders:
         config2 = ProviderConfig(name="test2", type="openai", url="http://localhost:8000")
         assert config2.metadata == {}
 
-    @pytest.mark.asyncio
     @patch("httpx.AsyncClient")
     @pytest.mark.asyncio
     async def test_ollama_provider_health_check(self, mock_client):
@@ -130,6 +130,21 @@ class TestProviders:
         mock_client.return_value.__aenter__.return_value.get.side_effect = Exception("Connection failed")
         is_healthy = await provider.health_check()
         assert is_healthy is False
+
+    @pytest.mark.parametrize(
+        ("config", "message"),
+        [
+            (ProviderConfig(name="", type="openai", url="https://example.com"), "Provider name is required"),
+            (ProviderConfig(name="test-openai", type="openai", url=""), "Provider URL is required"),
+            (
+                ProviderConfig(name="test-openai", type="openai", url="example.com"),
+                "Provider URL must include protocol",
+            ),
+        ],
+    )
+    def test_provider_config_validation_rejects_invalid_values(self, config, message):
+        with pytest.raises(ValueError, match=message):
+            OpenAIProvider(config)
 
     @patch("httpx.AsyncClient")
     @pytest.mark.asyncio
@@ -167,6 +182,26 @@ class TestProviders:
         assert models[0].provider_type == "ollama"
         assert "llama3-8b" in models[0].aliases  # Test normalization
         assert models[0].metadata["size"] == 4000000000
+
+    @patch("httpx.AsyncClient")
+    @pytest.mark.asyncio
+    async def test_ollama_provider_discover_models_handles_upstream_errors(self, mock_client):
+        config = ProviderConfig(name="test-ollama", type="ollama", url="http://localhost:11434")
+        provider = OllamaProvider(config)
+
+        request = httpx.Request("GET", "http://localhost:11434/api/tags")
+        response = Mock()
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "Upstream failure",
+            request=request,
+            response=httpx.Response(502, request=request),
+        )
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=response)
+
+        assert await provider.discover_models() == []
+
+        mock_client.return_value.__aenter__.return_value.get = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await provider.discover_models() == []
 
     def test_provider_factory(self):
         """Test provider factory"""
@@ -312,6 +347,114 @@ class TestCaching:
         provider1_models = await aggregator.get_models_by_provider("provider1")
         assert len(provider1_models) == 1
         assert provider1_models[0].id == "model1@provider1"
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_inmemory_cache_stats_and_cleanup(self):
+        cache = InMemoryModelCache(default_ttl=10, cleanup_interval=60)
+        models = [ModelInfo("test@provider", "test", "provider", "ollama", "http://localhost:11434")]
+
+        await cache.cache_models("provider", models, ttl_seconds=5)
+        cache._cache["models:provider"].cached_at = time.time() - 10
+
+        stats = await cache.get_cache_stats()
+
+        assert stats["total_entries"] == 1
+        assert stats["expired_entries"] == 1
+        assert stats["entries_by_provider"]["provider"]["model_count"] == 1
+
+        await cache._cleanup_expired()
+        assert await cache.get_cached_models("provider") is None
+
+        cache.close()
+
+    @pytest.mark.asyncio
+    async def test_background_loops_propagate_cancellation(self):
+        cache = InMemoryModelCache(cleanup_interval=3600)
+        cleanup_task = asyncio.create_task(cache._cleanup_loop())
+        await asyncio.sleep(0)
+        cleanup_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup_task
+
+        provider = Mock()
+        provider.get_provider_id.return_value = "provider-1"
+        provider.health_check = AsyncMock(return_value=True)
+        provider.discover_models = AsyncMock(return_value=[])
+
+        aggregator = ModelAggregator([provider], cache=NoOpModelCache(), health_check_interval=3600)
+        health_task = asyncio.create_task(aggregator._health_monitoring_loop())
+        await asyncio.sleep(0)
+        health_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await health_task
+
+        aggregator.close()
+        cache.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_reports_health_and_filters_unhealthy_providers(self):
+        healthy_provider = Mock()
+        healthy_provider.get_provider_id.return_value = "healthy"
+        healthy_provider.health_check = AsyncMock(return_value=True)
+        healthy_provider.discover_models = AsyncMock(
+            return_value=[ModelInfo("model@healthy", "model", "healthy", "openai", "https://healthy.example")]
+        )
+
+        unhealthy_provider = Mock()
+        unhealthy_provider.get_provider_id.return_value = "unhealthy"
+        unhealthy_provider.health_check = AsyncMock(side_effect=RuntimeError("unreachable"))
+        unhealthy_provider.discover_models = AsyncMock(
+            return_value=[
+                ModelInfo("model@unhealthy", "model", "unhealthy", "openai", "https://unhealthy.example")
+            ]
+        )
+
+        aggregator = ModelAggregator(
+            [healthy_provider, unhealthy_provider],
+            cache=InMemoryModelCache(default_ttl=30, cleanup_interval=3600),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+        )
+
+        await aggregator._update_provider_health()
+
+        health = await aggregator.get_provider_health()
+        detailed = await aggregator.get_provider_health_detailed()
+        visible_models = await aggregator.get_all_models(force_refresh=True)
+        all_models = await aggregator.get_all_models(force_refresh=True, include_unhealthy=True)
+        missing_provider_models = await aggregator.get_models_by_provider("missing")
+        await aggregator.refresh_provider_cache("healthy")
+        stats = await aggregator.get_aggregation_stats()
+
+        assert health == {"healthy": True, "unhealthy": False}
+        assert detailed["healthy"]["status"] == "healthy"
+        assert detailed["unhealthy"]["status"] == "unhealthy"
+        assert detailed["unhealthy"]["last_checked"] is not None
+        assert [model.provider_id for model in visible_models] == ["healthy"]
+        assert {model.provider_id for model in all_models} == {"healthy", "unhealthy"}
+        assert missing_provider_models == []
+        assert stats["provider_count"] == 2
+        assert stats["healthy_providers"] == 1
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_marks_provider_unhealthy_after_discovery_failure(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "broken"
+        provider.health_check = AsyncMock(return_value=True)
+        provider.discover_models = AsyncMock(side_effect=RuntimeError("boom"))
+
+        aggregator = ModelAggregator([provider], cache=NoOpModelCache(), default_cache_ttl=30, health_check_interval=3600)
+
+        assert await aggregator.get_all_models(force_refresh=True) == []
+        assert await aggregator.get_provider_health() == {"broken": False}
+
+        aggregator.close()
 
 
 class TestStrategies:
