@@ -1820,8 +1820,18 @@ REQUEST_LOG_PROVIDER_METADATA_FIELDS = (
 )
 
 
+def _normalize_request_log_provider_metadata_value(field_name: str, value: Any) -> Any:
+    if field_name == "provider_id" and value == "":
+        return None
+
+    return value
+
+
 def _serialize_request_log_provider_metadata(log_entry: Any) -> dict[str, Any]:
-    return {field_name: getattr(log_entry, field_name, None) for field_name in REQUEST_LOG_PROVIDER_METADATA_FIELDS}
+    return {
+        field_name: _normalize_request_log_provider_metadata_value(field_name, getattr(log_entry, field_name, None))
+        for field_name in REQUEST_LOG_PROVIDER_METADATA_FIELDS
+    }
 
 
 def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
