@@ -18,6 +18,7 @@ from .anthropic_provider import AnthropicProvider, AnthropicConfig
 from .dummy_provider import DummyProvider, DummyConfig
 
 logger = logging.getLogger(__name__)
+OPENAI_PASSTHROUGH_HEADERS = frozenset({"openai-organization", "openai-project", "user-agent"})
 
 
 class BaseModelProvider(IModelProvider):
@@ -359,7 +360,6 @@ class OpenAIProvider(BaseModelProvider):
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
     def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
-        passthrough_headers = {"openai-organization", "openai-project", "user-agent"}
         if not client_headers:
             return headers
 
@@ -372,7 +372,7 @@ class OpenAIProvider(BaseModelProvider):
                     headers["Authorization"] = normalized_value
                 continue
 
-            if normalized_key in passthrough_headers:
+            if normalized_key in OPENAI_PASSTHROUGH_HEADERS:
                 headers[key] = normalized_value
 
         return headers
@@ -539,7 +539,7 @@ class ZaiCodingProvider(OpenAIProvider):
                 if isinstance(value, bytes):
                     value = value.decode("utf-8")
 
-                if key.lower() in ["openai-organization", "openai-project", "user-agent"]:
+                if key.lower() in OPENAI_PASSTHROUGH_HEADERS:
                     passthrough_headers[key] = value
 
         return await super().generate_completion(openai_request, passthrough_headers, endpoint)
