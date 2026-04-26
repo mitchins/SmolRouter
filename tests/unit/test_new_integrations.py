@@ -407,6 +407,34 @@ async def test_google_genai_proxy_health_and_transport_helpers():
     assert provider._proxy_health_task is None
 
 
+@patch("smolrouter.google_genai_provider.genai.Client")
+def test_google_genai_create_client_disables_trust_env_without_proxy(mock_client):
+    provider = _make_google_provider()
+
+    with patch("smolrouter.google_genai_provider.types.HttpOptions") as http_options_cls:
+        no_proxy_client = provider._create_genai_client("test-key", None, None)
+        sync_transport = object()
+        async_transport = object()
+        proxy_client = provider._create_genai_client("test-key", sync_transport, async_transport)
+
+    assert no_proxy_client == mock_client.return_value
+    assert proxy_client == mock_client.return_value
+
+    assert http_options_cls.call_count == 2
+    assert http_options_cls.call_args_list[0].kwargs == {
+        "client_args": {"trust_env": False},
+        "async_client_args": {"trust_env": False},
+    }
+    assert http_options_cls.call_args_list[1].kwargs == {
+        "client_args": {"trust_env": False, "transport": sync_transport},
+        "async_client_args": {"trust_env": False, "transport": async_transport},
+    }
+
+    assert mock_client.call_count == 2
+    assert mock_client.call_args_list[0].kwargs["http_options"] == http_options_cls.return_value
+    assert mock_client.call_args_list[1].kwargs["http_options"] == http_options_cls.return_value
+
+
 @pytest.mark.asyncio
 async def test_google_genai_proxy_health_monitor_loop_handles_errors():
     provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
