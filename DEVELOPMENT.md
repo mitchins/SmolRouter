@@ -15,8 +15,12 @@ This installs runtime dependencies (FastAPI, redis, google-genai, aiohttp) plus 
 ```bash
 make dev-install   # optional helper that runs pip install -e .[dev]
 make test          # run the full pytest suite
+make test-unit-cov # run unit tests with coverage.xml output
+make test-provider-contract-cov # focused coverage for provider/config/metadata seams
+make test-cov      # full-suite coverage with coverage.xml output
 make lint          # ruff + vulture checks
 make check         # lint + tests in one go
+make smoke-local   # localhost end-to-end smoke request via SmolRouter
 make pre-commit    # execute the configured pre-commit hooks
 ```
 
@@ -27,6 +31,38 @@ make pre-commit    # execute the configured pre-commit hooks
 - **Load tests** (`test_load.py`) provide a harness for stress-testing and require `aiohttp` when executed.
 
 The official release build runs the entire suite; keep your branch green by mirroring the same `pytest` command locally or in CI.
+
+## Phase Execution Protocol
+
+For cleanup epics that change provider contracts or shared routing behavior, use this delivery order for every phase:
+
+1. Add or tighten characterization coverage for the phase boundary.
+2. Run focused coverage first with `make test-provider-contract-cov` or the narrower target for the touched module.
+3. Implement the phase.
+4. Rerun focused coverage, then `pytest` or `make test-cov`.
+5. Run `make smoke-local` against the local OpenAI-compatible upstream before creating the implementation commit.
+
+Keep the smoke run fast and explicit: one successful `/v1/chat/completions` request through SmolRouter plus one check that the request is visible in the log surface.
+
+## Local Smoke Harness
+
+`make smoke-local` starts SmolRouter with a temporary local-only routes config, sends one OpenAI-compatible chat completion request through the router, and verifies the request appears in `/api/logs`.
+
+Defaults:
+
+- Upstream URL: `http://localhost:11434`
+- Requested model: `gemma3:1b`
+- Router bind: `127.0.0.1:18081`
+
+Override them when your local model name differs:
+
+```bash
+LOCAL_SMOKE_MODEL=gemma-3-1b-it make smoke-local
+LOCAL_SMOKE_UPSTREAM_URL=http://localhost:8000 make smoke-local
+LOCAL_SMOKE_PORT=19090 make smoke-local
+```
+
+The canonical checked-in smoke config lives at `config/routes.local-smoke.yaml`. The harness renders the same shape into a temporary config so per-run overrides do not modify tracked files.
 
 ## Coding standards
 

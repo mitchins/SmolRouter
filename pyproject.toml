@@ -110,6 +110,23 @@ python_functions = "test_*"
 python_classes = "Test*"
 addopts = "-v --tb=short"
 
+[tool.coverage.run]
+branch = true
+source = ["smolrouter"]
+omit = ["smolrouter/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
 [dependency-groups]
 dev = [
     "detect-secrets>=1.5.0",

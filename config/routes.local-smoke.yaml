@@ -1,0 +1,23 @@
+routes: []
+
+providers:
+  - name: "local-openai-smoke"
+    type: "openai"
+    enabled: true
+    priority: 0
+    url: "http://localhost:11434"
+    api_key: null
+    timeout: 30.0
+    static_models:
+      - "gemma3:1b"
+    metadata:
+      description: "Local OpenAI-compatible smoke upstream"
+
+strategy:
+  type: "simple"
+  config:
+    model_map: {}
+
+access_control:
+  type: "none"
+  config: {}
