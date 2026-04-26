@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from google import genai
+from google.genai import types
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 
 from .config_loading import load_config_entries
@@ -1193,29 +1194,102 @@ class GoogleGenAIProvider(IModelProvider):
         """Normalize model name to Google GenAI format"""
         return self.MODEL_MAPPINGS.get(model_name, model_name)
 
+    def _build_google_model_info(self, model_name: str, metadata: Dict[str, Any]) -> ModelInfo:
+        return ModelInfo(
+            id=f"{model_name}@{self.get_provider_id()}",
+            name=model_name,
+            provider_id=self.get_provider_id(),
+            provider_type=self.get_provider_type(),
+            endpoint=self.get_endpoint(),
+            aliases=[model_name],
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _extract_google_model_name(full_name: str) -> str:
+        return full_name.split("/")[-1] if "/" in full_name else full_name
+
+    def _build_live_google_model_metadata(self, model: Any, supported_actions: List[str]) -> Dict[str, Any]:
+        return {
+            "full_name": getattr(model, "name", ""),
+            "display_name": getattr(model, "display_name", self._extract_google_model_name(getattr(model, "name", "") or "")),
+            "description": getattr(model, "description", ""),
+            "supported_methods": supported_actions,
+            "input_token_limit": getattr(model, "input_token_limit", None),
+            "output_token_limit": getattr(model, "output_token_limit", None),
+        }
+
+    def _build_static_google_model_metadata(self, model_data: Dict[str, Any], supported_methods: List[str]) -> Dict[str, Any]:
+        model_name = self._extract_google_model_name(model_data.get("name", ""))
+        return {
+            "full_name": model_data.get("name", ""),
+            "display_name": model_data.get("displayName", model_name),
+            "description": model_data.get("description", ""),
+            "supported_methods": supported_methods,
+            "input_token_limit": model_data.get("inputTokenLimit"),
+            "output_token_limit": model_data.get("outputTokenLimit"),
+            "version": model_data.get("version"),
+            "temperature": model_data.get("temperature"),
+            "top_p": model_data.get("topP"),
+            "top_k": model_data.get("topK"),
+            "max_temperature": model_data.get("maxTemperature"),
+            "thinking": model_data.get("thinking", False),
+        }
+
+    def _create_genai_client(self, api_key: str, sync_transport: Any, async_transport: Any) -> Any:
+        http_options_kwargs = {
+            "client_args": {"trust_env": False},
+            "async_client_args": {"trust_env": False},
+        }
+
+        if sync_transport and async_transport:
+            http_options_kwargs["client_args"]["transport"] = sync_transport
+            http_options_kwargs["async_client_args"]["transport"] = async_transport
+            logger.debug("httpx transports active: True (proxy attached)")
+        else:
+            logger.debug("httpx transports active: False (no proxy)")
+
+        logger.debug("httpx trust_env disabled via HttpOptions: True")
+        http_options = types.HttpOptions(**http_options_kwargs)
+        return genai.Client(api_key=api_key, http_options=http_options)
+
+    async def _health_check_api_key(self, api_key: str) -> bool:
+        proxy_config = self.config.get_proxy_for_model("health-check")
+        sync_transport, async_transport = self._create_proxy_transport(proxy_config)
+        client = self._create_genai_client(api_key, sync_transport, async_transport)
+
+        models = await asyncio.to_thread(client.models.list)
+        list(models)
+        return True
+
+    async def _discover_models_with_api_key(self, api_key: str) -> List[ModelInfo]:
+        proxy_config = self.config.get_proxy_for_model("model-discovery")
+        sync_transport, async_transport = self._create_proxy_transport(proxy_config)
+        client = self._create_genai_client(api_key, sync_transport, async_transport)
+
+        models = []
+        model_list = await asyncio.to_thread(client.models.list)
+        for model in model_list:
+            # New API uses 'supported_actions' instead of 'supported_generation_methods'
+            supported_actions = getattr(model, "supported_actions", [])
+            if "generateContent" in supported_actions:
+                model_name = self._extract_google_model_name(getattr(model, "name", "") or "")
+
+                model_info = self._build_google_model_info(
+                    model_name,
+                    self._build_live_google_model_metadata(model, supported_actions),
+                )
+                models.append(model_info)
+                logger.debug(f"Discovered Google GenAI model: {model_info.id}")
+
+        return models
+
     async def health_check(self) -> bool:
         """Check if at least one API key is working"""
         for api_key in self.config.api_keys:
             try:
-                # Create client with proxy transport
-                proxy_config = self.config.get_proxy_for_model("health-check")
-                sync_transport, async_transport = self._create_proxy_transport(proxy_config)
-
-                from google.genai import types
-
-                if sync_transport and async_transport:
-                    http_options = types.HttpOptions(
-                        client_args={"transport": sync_transport, "trust_env": False},
-                        async_client_args={"transport": async_transport, "trust_env": False},
-                    )
-                    client = genai.Client(api_key=api_key, http_options=http_options)
-                else:
-                    client = genai.Client(api_key=api_key)
-
-                # Try to list models as a health check
-                models = await asyncio.to_thread(client.models.list)
-                list(models)  # Force evaluation
-                return True
+                if await self._health_check_api_key(api_key):
+                    return True
             except Exception as e:
                 logger.debug(f"Health check failed for key {api_key[:8]}...: {e}")
                 continue
@@ -1230,50 +1304,7 @@ class GoogleGenAIProvider(IModelProvider):
         # Try to discover models using available API keys (live discovery)
         for api_key in self.config.api_keys:
             try:
-                # Create client with proxy transport
-                proxy_config = self.config.get_proxy_for_model("model-discovery")
-                sync_transport, async_transport = self._create_proxy_transport(proxy_config)
-
-                from google.genai import types
-
-                if sync_transport and async_transport:
-                    http_options = types.HttpOptions(
-                        client_args={"transport": sync_transport, "trust_env": False},
-                        async_client_args={"transport": async_transport, "trust_env": False},
-                    )
-                    client = genai.Client(api_key=api_key, http_options=http_options)
-                else:
-                    client = genai.Client(api_key=api_key)
-
-                models = []
-
-                # List available models
-                model_list = await asyncio.to_thread(client.models.list)
-                for model in model_list:
-                    # New API uses 'supported_actions' instead of 'supported_generation_methods'
-                    supported_actions = getattr(model, "supported_actions", [])
-                    if "generateContent" in supported_actions:
-                        model_name = (getattr(model, "name", "") or "").split("/")[-1]  # Extract model name from full path
-
-                        # Create model info
-                        model_info = ModelInfo(
-                            id=f"{model_name}@{self.get_provider_id()}",
-                            name=model_name,
-                            provider_id=self.get_provider_id(),
-                            provider_type=self.get_provider_type(),
-                            endpoint=self.get_endpoint(),
-                            aliases=[model_name],
-                            metadata={
-                                "full_name": getattr(model, "name", ""),
-                                "display_name": getattr(model, "display_name", model_name),
-                                "description": getattr(model, "description", ""),
-                                "supported_methods": supported_actions,
-                                "input_token_limit": getattr(model, "input_token_limit", None),
-                                "output_token_limit": getattr(model, "output_token_limit", None),
-                            },
-                        )
-                        models.append(model_info)
-                        logger.debug(f"Discovered Google GenAI model: {model_info.id}")
+                models = await self._discover_models_with_api_key(api_key)
 
                 # Cache the results
                 self._cached_models = models
@@ -1312,32 +1343,10 @@ class GoogleGenAIProvider(IModelProvider):
                 if "generateContent" not in supported_methods:
                     continue  # Skip embedding and other non-text generation models
 
-                # Extract model name from full path (models/model-name -> model-name)
-                full_name = model_data.get("name", "")
-                model_name = full_name.split("/")[-1] if "/" in full_name else full_name
-
-                # Create model info
-                model_info = ModelInfo(
-                    id=f"{model_name}@{self.get_provider_id()}",
-                    name=model_name,
-                    provider_id=self.get_provider_id(),
-                    provider_type=self.get_provider_type(),
-                    endpoint=self.get_endpoint(),
-                    aliases=[model_name],
-                    metadata={
-                        "full_name": full_name,
-                        "display_name": model_data.get("displayName", model_name),
-                        "description": model_data.get("description", ""),
-                        "supported_methods": supported_methods,
-                        "input_token_limit": model_data.get("inputTokenLimit"),
-                        "output_token_limit": model_data.get("outputTokenLimit"),
-                        "version": model_data.get("version"),
-                        "temperature": model_data.get("temperature"),
-                        "top_p": model_data.get("topP"),
-                        "top_k": model_data.get("topK"),
-                        "max_temperature": model_data.get("maxTemperature"),
-                        "thinking": model_data.get("thinking", False),
-                    },
+                model_name = self._extract_google_model_name(model_data.get("name", ""))
+                model_info = self._build_google_model_info(
+                    model_name,
+                    self._build_static_google_model_metadata(model_data, supported_methods),
                 )
                 models.append(model_info)
                 logger.debug(f"Static Google GenAI model: {model_info.id}")
@@ -1569,20 +1578,7 @@ class GoogleGenAIProvider(IModelProvider):
         sync_transport: Any,
         async_transport: Any,
     ) -> Any:
-        from google.genai import types
-
-        if sync_transport and async_transport:
-            http_options = types.HttpOptions(
-                client_args={"transport": sync_transport, "trust_env": False},
-                async_client_args={"transport": async_transport, "trust_env": False},
-            )
-            logger.debug("httpx transports active: True (proxy attached)")
-            logger.debug("httpx trust_env disabled via HttpOptions: True")
-            return genai.Client(api_key=api_key, http_options=http_options)
-
-        logger.debug("httpx transports active: False (no proxy)")
-        logger.debug("httpx trust_env disabled via HttpOptions: True")
-        return genai.Client(api_key=api_key)
+        return self._create_genai_client(api_key, sync_transport, async_transport)
 
     async def _run_completion_request(self, context: GoogleGenAICompletionContext) -> Any:
         await self._rate_limiter.acquire_slot()
