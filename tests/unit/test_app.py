@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
-from smolrouter.request_metadata import RequestMetadata
+from smolrouter.request_metadata import RequestMetadata, apply_request_metadata
 
 
 def load_mock_json(filename):
@@ -635,6 +635,28 @@ def test_request_metadata_to_dict_exposes_contract_fields():
         "proxy_verified": True,
         "observation_id": "obs-123",
     }
+
+
+def test_apply_request_metadata_populates_target_and_handles_missing_inputs():
+    target = SimpleNamespace()
+    metadata = RequestMetadata(
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        provider_id="google-main",
+        api_key_index=2,
+        api_key_total=5,
+    )
+
+    apply_request_metadata(target, metadata)
+
+    assert target.api_key_suffix == "abcd1234"
+    assert target.proxy_used == "http://127.0.0.1:8888"
+    assert target.provider_id == "google-main"
+    assert target.api_key_index == 2
+    assert target.api_key_total == 5
+
+    apply_request_metadata(None, metadata)
+    apply_request_metadata(target, None)
 
 
 def test_update_log_entry_provider_metadata_applies_metadata_fields():

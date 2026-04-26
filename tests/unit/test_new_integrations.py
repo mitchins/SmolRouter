@@ -125,6 +125,55 @@ def test_google_genai_proxy_pool_skips_unhealthy_entries():
     assert selected_proxy.to_httpx_proxy() == "http://127.0.0.1:8889"
 
 
+def test_proxy_config_applies_credentials_to_httpx_formats():
+    username = "user"
+    password = "".join(["p", "a", "s", "s"])
+    proxy = ProxyConfig(
+        http_proxy="http://127.0.0.1:8888",
+        https_proxy="https://127.0.0.1:8889",
+        username=username,
+        password=password,
+    )
+
+    assert proxy.to_httpx_proxy() == f"https://{username}:{password}@127.0.0.1:8889"
+    assert proxy.to_httpx_proxies() == {
+        "http://": f"http://{username}:{password}@127.0.0.1:8888",
+        "https://": f"https://{username}:{password}@127.0.0.1:8889",
+    }
+
+
+def test_provider_config_get_proxy_for_model_prefers_model_specific_override():
+    default_proxy = ProxyConfig(https_proxy="http://127.0.0.1:8888")
+    override_proxy = ProxyConfig(https_proxy="http://127.0.0.1:8899")
+    config = ProviderConfig(
+        name="test-provider",
+        type="openai",
+        url="https://example.com/openai/v1",
+        proxy_config=default_proxy,
+        per_model_proxy={"gemma-3-4b-it": override_proxy},
+    )
+
+    assert config.get_proxy_for_model("gemma-3-4b-it") is override_proxy
+    assert config.get_proxy_for_model("other-model") is default_proxy
+
+
+def test_model_info_matches_request_accepts_id_name_alias_and_display_name():
+    model = ModelInfo(
+        id="gemma-3-4b-it@test-google",
+        name="gemma-3-4b-it",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+        aliases=["gemma-3-4b"],
+    )
+
+    assert model.matches_request("gemma-3-4b-it@test-google")
+    assert model.matches_request("gemma-3-4b-it")
+    assert model.matches_request("gemma-3-4b")
+    assert model.matches_request(model.display_name)
+    assert not model.matches_request("other-model")
+
+
 @pytest.mark.parametrize(
     "model_name, expected_limit",
     [

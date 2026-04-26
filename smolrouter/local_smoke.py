@@ -27,6 +27,7 @@ DEFAULT_LOCAL_SMOKE_TIMEOUT_SECONDS = 30.0
 LOCAL_SMOKE_CHAT_PATH = "/v1/chat/completions"
 LOCAL_SMOKE_LOGS_PATH = "/api/logs"
 LOCAL_SMOKE_STATS_PATH = "/api/stats"
+LOCAL_SMOKE_STATS_REQUIRED_KEYS = ("total_requests", "completed_requests", "pending_requests", "service_types")
 DEFAULT_LOCAL_SMOKE_CONFIG_PATH = PROJECT_ROOT / "config" / "routes.local-smoke.yaml"
 
 
@@ -109,9 +110,9 @@ def build_local_smoke_env(
     host: str = DEFAULT_LOCAL_SMOKE_HOST,
     port: int = DEFAULT_LOCAL_SMOKE_PORT,
 ) -> dict[str, str]:
-    env = dict(base_env or os.environ)
-    env.setdefault("APP_ENV", "dev")
-    env.setdefault("ENABLE_LOGGING", "true")
+    env = dict(base_env or {})
+    env["APP_ENV"] = "dev"
+    env["ENABLE_LOGGING"] = "true"
     env["ROUTES_CONFIG"] = str(routes_config)
     env["BLOB_STORAGE_PATH"] = str(blob_storage_path)
     env["LISTEN_HOST"] = host
@@ -143,18 +144,23 @@ def _render_local_smoke_config(
     output_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
 
-def _stop_process(process: subprocess.Popen[str], timeout_seconds: float = 5.0) -> str:
+def _stop_process(process: Any, output_path: Path, timeout_seconds: float = 5.0) -> str:
     if process.poll() is None:
         process.terminate()
         try:
-            stdout, _ = process.communicate(timeout=timeout_seconds)
+            process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
             process.kill()
-            stdout, _ = process.communicate(timeout=timeout_seconds)
-        return stdout or ""
+            process.wait(timeout=timeout_seconds)
 
-    stdout, _ = process.communicate(timeout=timeout_seconds)
-    return stdout or ""
+    if not output_path.exists():
+        return ""
+
+    return output_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _is_ready_stats_payload(payload: Any) -> bool:
+    return isinstance(payload, Mapping) and all(key in payload for key in LOCAL_SMOKE_STATS_REQUIRED_KEYS)
 
 
 def _tail_lines(output: str, max_lines: int = 20) -> str:
@@ -173,10 +179,18 @@ def _wait_for_app_ready(base_url: str, timeout_seconds: float) -> None:
         while time.monotonic() < deadline:
             try:
                 response = client.get(f"{base_url}{LOCAL_SMOKE_STATS_PATH}")
-                if response.status_code < 500:
+                if response.status_code != 200:
+                    last_error = RuntimeError(f"Unexpected readiness status: {response.status_code}")
+                    time.sleep(0.25)
+                    continue
+
+                stats_payload = response.json()
+                if _is_ready_stats_payload(stats_payload):
                     return
-                last_error = RuntimeError(f"Unexpected readiness status: {response.status_code}")
+                last_error = RuntimeError(f"Unexpected readiness payload: {stats_payload!r}")
             except httpx.HTTPError as exc:
+                last_error = exc
+            except ValueError as exc:
                 last_error = exc
             time.sleep(0.25)
 
@@ -216,45 +230,49 @@ def run_local_smoke(
         temp_root = Path(temp_dir)
         config_path = temp_root / DEFAULT_LOCAL_SMOKE_CONFIG_PATH.name
         blob_storage_path = temp_root / "blob_storage"
+        output_path = temp_root / "smoke.log"
         blob_storage_path.mkdir(parents=True, exist_ok=True)
 
         _render_local_smoke_config(config_path, upstream_url=upstream_url, model_name=model_name)
         env = build_local_smoke_env(
-            os.environ,
+            None,
             routes_config=config_path,
             blob_storage_path=blob_storage_path,
             host=host,
             port=port,
         )
         command = build_local_smoke_command(config_path, host=host, port=port)
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        with output_path.open("w", encoding="utf-8") as process_output:
+            process: Optional[subprocess.Popen[str]] = None
 
-        try:
-            _wait_for_app_ready(base_url, timeout_seconds)
+            try:
+                process = subprocess.Popen(command, stdout=process_output, stderr=subprocess.STDOUT, text=True, env=env)
+                _wait_for_app_ready(base_url, timeout_seconds)
 
-            with httpx.Client(timeout=timeout_seconds) as client:
-                response = client.post(
-                    f"{base_url}{LOCAL_SMOKE_CHAT_PATH}",
-                    json=build_local_smoke_request(model_name=model_name, prompt=prompt),
-                    headers={"Content-Type": "application/json", "Authorization": "Bearer local-smoke-key"},
-                )
-
-                if response.status_code != 200:
-                    raise RuntimeError(
-                        f"Smoke request failed with status {response.status_code}: {response.text.strip()}"
+                with httpx.Client(timeout=timeout_seconds) as client:
+                    response = client.post(
+                        f"{base_url}{LOCAL_SMOKE_CHAT_PATH}",
+                        json=build_local_smoke_request(model_name=model_name, prompt=prompt),
+                        headers={"Content-Type": "application/json", "Authorization": "Bearer local-smoke-key"},
                     )
 
-                assistant_text = extract_assistant_text(response.json())
+                    if response.status_code != 200:
+                        raise RuntimeError(
+                            f"Smoke request failed with status {response.status_code}: {response.text.strip()}"
+                        )
 
-            log_entry = _wait_for_log_entry(base_url, model_name, timeout_seconds)
-            if log_entry.get("status_code") != 200:
-                raise RuntimeError(f"Smoke log entry did not complete successfully: {log_entry!r}")
+                    assistant_text = extract_assistant_text(response.json())
 
-            _stop_process(process)
-            return assistant_text
-        except Exception as exc:
-            output_tail = _tail_lines(_stop_process(process))
-            raise RuntimeError(f"Local smoke failed: {exc}\n\nServer output tail:\n{output_tail}") from exc
+                log_entry = _wait_for_log_entry(base_url, model_name, timeout_seconds)
+                if log_entry.get("status_code") != 200:
+                    raise RuntimeError(f"Smoke log entry did not complete successfully: {log_entry!r}")
+
+                _stop_process(process, output_path)
+                return assistant_text
+            except Exception as exc:
+                output_text = _stop_process(process, output_path) if process is not None else ""
+                output_tail = _tail_lines(output_text)
+                raise RuntimeError(f"Local smoke failed: {exc}\n\nServer output tail:\n{output_tail}") from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -48,6 +48,8 @@ Keep the smoke run fast and explicit: one successful `/v1/chat/completions` requ
 
 `make smoke-local` starts SmolRouter with a temporary local-only routes config, sends one OpenAI-compatible chat completion request through the router, and verifies the request appears in `/api/logs`.
 
+The harness forces `APP_ENV=dev` and `ENABLE_LOGGING=true` so the smoke path does not inherit shell state from the caller.
+
 Defaults:
 
 - Upstream URL: `http://localhost:11434`
