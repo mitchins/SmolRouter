@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import socket
 import httpx
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, mock_open, patch
 
 import smolrouter.providers as providers_module
+import smolrouter.interfaces as interfaces_module
 from google.api_core.exceptions import InvalidArgument, PermissionDenied, ResourceExhausted
 
 from smolrouter.access_control import NoAccessControl
@@ -140,6 +142,35 @@ def test_proxy_config_applies_credentials_to_httpx_formats():
         "http://": f"http://{username}:{password}@127.0.0.1:8888",
         "https://": f"https://{username}:{password}@127.0.0.1:8889",
     }
+
+
+def test_proxy_config_allows_localhost_http_proxy_url():
+    proxy = ProxyConfig(http_proxy="http://localhost:8888")
+
+    assert proxy.to_httpx_proxy() == "http://localhost:8888"
+
+
+def test_proxy_config_rejects_public_http_proxy_ip_address():
+    with pytest.raises(ValueError, match="LAN/private proxy"):
+        ProxyConfig(http_proxy="http://8.8.8.8:8080")
+
+
+def test_proxy_config_rejects_hostname_that_resolves_publicly(monkeypatch):
+    def fake_getaddrinfo(hostname, port, family=0, type=0, proto=0, flags=0):
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("93.184.216.34", 8080),
+            )
+        ]
+
+    monkeypatch.setattr(interfaces_module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="LAN/private proxy"):
+        ProxyConfig(http_proxy="http://proxy.example.com:8080")
 
 
 def test_provider_config_get_proxy_for_model_prefers_model_specific_override():

@@ -6,8 +6,11 @@ following SOLID principles for clean, extensible architecture.
 """
 
 from abc import ABC, abstractmethod
+import ipaddress
+import socket
 from typing import List, Dict, Any, Optional, Mapping
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 @dataclass
@@ -170,6 +173,80 @@ class IModelCache(ABC):
         pass
 
 
+_LAN_PROXY_HOSTNAMES = {"localhost", "localhost.localdomain"}
+_LAN_PROXY_HOST_SUFFIXES = (".localhost", ".local", ".lan", ".internal", ".intranet", ".home.arpa")
+
+
+def _is_lan_proxy_hostname(hostname: str) -> bool:
+    return hostname in _LAN_PROXY_HOSTNAMES or hostname.endswith(_LAN_PROXY_HOST_SUFFIXES)
+
+
+def _classify_proxy_ip_address(hostname: str) -> Optional[bool]:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return None
+
+    if address.is_private or address.is_loopback or address.is_link_local:
+        return True
+    if address.is_global:
+        return False
+    return None
+
+
+def _classify_resolved_proxy_hosts(hostname: str) -> Optional[bool]:
+    try:
+        resolved_addresses = {
+            record[4][0].split("%", 1)[0]
+            for record in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            if record and record[4]
+        }
+    except socket.gaierror:
+        return None
+
+    if not resolved_addresses:
+        return None
+
+    resolved_classifications = {_classify_proxy_ip_address(resolved_address) for resolved_address in resolved_addresses}
+    if False in resolved_classifications:
+        return False
+    if resolved_classifications == {True}:
+        return True
+    return None
+
+
+def _classify_proxy_host(hostname: str) -> Optional[bool]:
+    normalized_hostname = hostname.strip().strip("[]").split("%", 1)[0].casefold()
+    if not normalized_hostname:
+        return None
+
+    if _is_lan_proxy_hostname(normalized_hostname):
+        return True
+
+    ip_classification = _classify_proxy_ip_address(normalized_hostname)
+    if ip_classification is not None:
+        return ip_classification
+
+    return _classify_resolved_proxy_hosts(normalized_hostname)
+
+
+def _validate_http_proxy_url(proxy_url: Optional[str]) -> None:
+    if not proxy_url:
+        return
+
+    parsed_url = urlsplit(proxy_url)
+    if parsed_url.scheme != "http":
+        return
+
+    if not parsed_url.hostname:
+        raise ValueError(f"HTTP proxy URL {proxy_url!r} must include a hostname")
+
+    if _classify_proxy_host(parsed_url.hostname) is False:
+        raise ValueError(
+            f"HTTP proxy URL {proxy_url!r} points to a public address; use HTTPS or a LAN/private proxy instead"
+        )
+
+
 @dataclass
 class ProxyConfig:
     """Configuration for HTTP proxy settings"""
@@ -178,6 +255,10 @@ class ProxyConfig:
     https_proxy: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+
+    def __post_init__(self):
+        _validate_http_proxy_url(self.http_proxy)
+        _validate_http_proxy_url(self.https_proxy)
 
     def _apply_proxy_auth(self, proxy_url: str) -> str:
         if self.username and self.password and "://" in proxy_url:
@@ -198,6 +279,7 @@ class ProxyConfig:
         """Convert to httpx proxy format (for backward compatibility)"""
         proxies = {}
         if self.http_proxy:
+            # httpx requires scheme keys here; the proxy endpoint itself is validated above.
             proxies["http://"] = self._apply_proxy_auth(self.http_proxy)
 
         if self.https_proxy:
