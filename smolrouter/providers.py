@@ -594,19 +594,13 @@ class ProviderFactory:
         return provider_class(config)
 
     @classmethod
-    def _convert_proxy_configs(cls, provider_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert dictionary proxy configurations to ProxyConfig objects."""
-        return coerce_provider_proxy_settings(provider_config)
-
-    @classmethod
     def create_providers_from_config(cls, providers_config: List[Dict[str, Any]]) -> List[IModelProvider]:
         """Create multiple providers from configuration list"""
         providers = []
 
         for provider_config in providers_config:
             try:
-                # Convert proxy configurations from dicts to ProxyConfig objects
-                processed_config = cls._convert_proxy_configs(provider_config)
+                processed_config = coerce_provider_proxy_settings(provider_config)
 
                 config_type = str(processed_config.get("type", "")).lower()
                 config_class = cls._config_classes.get(config_type, ProviderConfig)

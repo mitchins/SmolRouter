@@ -1305,21 +1305,26 @@ def test_coerce_provider_proxy_settings_converts_proxy_configuration_shapes():
     assert isinstance(processed["proxy_pool"][1], ProxyConfig)
 
 
-def test_provider_factory_converts_proxy_configuration_shapes():
-    processed = ProviderFactory._convert_proxy_configs(
-        {
-            "name": "test-google",
-            "type": "google-genai",
-            "proxy_config": {"https_proxy": "http://127.0.0.1:8888"},
-            "per_model_proxy": {"gemma-3-4b-it": {"https_proxy": "http://127.0.0.1:8899"}},
-            "proxy_pool": [None, {"https_proxy": "http://127.0.0.1:8890"}],
-        }
+def test_provider_factory_create_providers_from_config_coerces_proxy_configuration_shapes():
+    providers = ProviderFactory.create_providers_from_config(
+        [
+            {
+                "name": "test-google",
+                "type": "google-genai",
+                "enabled": True,
+                "api_keys": ["dummy-google-key"],
+                "proxy_config": {"https_proxy": "http://127.0.0.1:8888"},
+                "per_model_proxy": {"gemma-3-4b-it": {"https_proxy": "http://127.0.0.1:8899"}},
+                "proxy_pool": [None, {"https_proxy": "http://127.0.0.1:8890"}],
+            }
+        ]
     )
 
-    assert isinstance(processed["proxy_config"], ProxyConfig)
-    assert isinstance(processed["per_model_proxy"]["gemma-3-4b-it"], ProxyConfig)
-    assert processed["proxy_pool"][0] is None
-    assert isinstance(processed["proxy_pool"][1], ProxyConfig)
+    assert len(providers) == 1
+    assert isinstance(providers[0].config.proxy_config, ProxyConfig)
+    assert isinstance(providers[0].config.per_model_proxy["gemma-3-4b-it"], ProxyConfig)
+    assert providers[0].config.proxy_pool[0] is None
+    assert isinstance(providers[0].config.proxy_pool[1], ProxyConfig)
 
 @pytest.mark.asyncio
 async def test_container_streaming_route_returns_sse_when_mediator_is_non_streaming():

@@ -64,6 +64,25 @@ LOCAL_SMOKE_PORT=19090 make smoke-local
 
 The canonical checked-in smoke config lives at `config/routes.local-smoke.yaml`. The harness renders the same shape into a temporary config so per-run overrides do not modify tracked files.
 
+## Provider Contract Conventions
+
+The provider contract cleanup is complete only when these seams have one obvious owner:
+
+- Credential file parsing: `smolrouter.config_loading` is the authoritative loader for env-style key files and inline-comment stripping.
+- Proxy coercion: `smolrouter.interfaces.coerce_provider_proxy_settings()` is the single entry point for `proxy_config`, `per_model_proxy`, and `proxy_pool` normalization.
+- OpenAI-compatible request helpers: `smolrouter.providers.OpenAIProvider` owns request URL joining, passthrough header filtering, static model discovery, and shared OpenAI-compatible response/error handling. Provider-specific subclasses should keep only endpoint-specific behavior.
+- Provider metadata handoff: `smolrouter.request_metadata.RequestMetadata` is the exchange object from providers to the app layer. Use `serialize_request_metadata()` and `apply_request_metadata()` rather than maintaining app-local field lists or ad hoc attribute copies.
+
+For new shared helpers, keep names aligned with intent:
+
+- `load_*` for reading external config or files.
+- `coerce_*` for type normalization of config inputs.
+- `build_*` for payloads, URLs, env maps, and command construction.
+- `serialize_*` for API or storage response shapes.
+- `normalize_*` for lossless value cleanup where representation changes but meaning does not.
+
+Avoid introducing new wrapper shims when a shared helper already exists. Prefer calling the authoritative helper directly from factory and app integration points.
+
 ## Coding standards
 
 - Keep imports free of side-effect catching (no try/except around imports).

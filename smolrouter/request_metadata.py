@@ -6,7 +6,7 @@ This module provides a dataclass for passing metadata about requests
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict, cast
 
 
 REQUEST_METADATA_FIELDS = (
@@ -33,6 +33,18 @@ REQUEST_METADATA_INT_FIELDS = (
     "api_key_index",
     "api_key_total",
 )
+
+
+class RequestMetadataDict(TypedDict):
+    api_key_suffix: Optional[str]
+    proxy_used: Optional[str]
+    provider_id: Optional[str]
+    model_name: Optional[str]
+    api_key_index: Optional[int]
+    api_key_total: Optional[int]
+    api_key_verified: bool
+    proxy_verified: bool
+    observation_id: Optional[str]
 
 
 def normalize_request_metadata_value(field_name: str, value: Any) -> Any:
@@ -90,6 +102,6 @@ class RequestMetadata:
     # Load balancer instance tracking (for decrementing active_requests on completion)
     lb_instance: Optional[object] = None  # ModelInstance from load_balancer
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> RequestMetadataDict:
         """Convert to dictionary for logging"""
-        return serialize_request_metadata(self)
+        return cast(RequestMetadataDict, serialize_request_metadata(self))
