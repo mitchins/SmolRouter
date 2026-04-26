@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from google import genai
+from google.genai import types
 from google.api_core.exceptions import ResourceExhausted, PermissionDenied, InvalidArgument
 
 from .config_loading import load_config_entries
@@ -1236,20 +1237,21 @@ class GoogleGenAIProvider(IModelProvider):
         }
 
     def _create_genai_client(self, api_key: str, sync_transport: Any, async_transport: Any) -> Any:
-        from google.genai import types
+        http_options_kwargs = {
+            "client_args": {"trust_env": False},
+            "async_client_args": {"trust_env": False},
+        }
 
         if sync_transport and async_transport:
-            http_options = types.HttpOptions(
-                client_args={"transport": sync_transport, "trust_env": False},
-                async_client_args={"transport": async_transport, "trust_env": False},
-            )
+            http_options_kwargs["client_args"]["transport"] = sync_transport
+            http_options_kwargs["async_client_args"]["transport"] = async_transport
             logger.debug("httpx transports active: True (proxy attached)")
-            logger.debug("httpx trust_env disabled via HttpOptions: True")
-            return genai.Client(api_key=api_key, http_options=http_options)
+        else:
+            logger.debug("httpx transports active: False (no proxy)")
 
-        logger.debug("httpx transports active: False (no proxy)")
         logger.debug("httpx trust_env disabled via HttpOptions: True")
-        return genai.Client(api_key=api_key)
+        http_options = types.HttpOptions(**http_options_kwargs)
+        return genai.Client(api_key=api_key, http_options=http_options)
 
     async def _health_check_api_key(self, api_key: str) -> bool:
         proxy_config = self.config.get_proxy_for_model("health-check")
