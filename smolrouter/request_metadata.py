@@ -6,7 +6,64 @@ This module provides a dataclass for passing metadata about requests
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
+
+
+REQUEST_METADATA_FIELDS = (
+    "api_key_suffix",
+    "proxy_used",
+    "provider_id",
+    "model_name",
+    "api_key_index",
+    "api_key_total",
+    "api_key_verified",
+    "proxy_verified",
+    "observation_id",
+)
+
+REQUEST_LOG_METADATA_FIELDS = (
+    "api_key_suffix",
+    "proxy_used",
+    "provider_id",
+    "api_key_index",
+    "api_key_total",
+)
+
+REQUEST_METADATA_INT_FIELDS = (
+    "api_key_index",
+    "api_key_total",
+)
+
+
+def normalize_request_metadata_value(field_name: str, value: Any) -> Any:
+    if field_name == "provider_id" and value == "":
+        return None
+
+    if field_name in REQUEST_METADATA_INT_FIELDS:
+        if value in (None, ""):
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+
+    return value
+
+
+def serialize_request_metadata(source: Any, *, fields: tuple[str, ...] = REQUEST_METADATA_FIELDS) -> dict[str, Any]:
+    return {
+        field_name: normalize_request_metadata_value(field_name, getattr(source, field_name, None))
+        for field_name in fields
+    }
+
+
+def apply_request_metadata(target: Any, metadata: Any, *, fields: tuple[str, ...] = REQUEST_LOG_METADATA_FIELDS) -> None:
+    if target is None or metadata is None:
+        return
+
+    for field_name, value in serialize_request_metadata(metadata, fields=fields).items():
+        setattr(target, field_name, value)
 
 
 @dataclass
@@ -33,16 +90,6 @@ class RequestMetadata:
     # Load balancer instance tracking (for decrementing active_requests on completion)
     lb_instance: Optional[object] = None  # ModelInstance from load_balancer
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging"""
-        return {
-            "api_key_suffix": self.api_key_suffix,
-            "proxy_used": self.proxy_used,
-            "provider_id": self.provider_id,
-            "model_name": self.model_name,
-            "api_key_index": self.api_key_index,
-            "api_key_total": self.api_key_total,
-            "api_key_verified": self.api_key_verified,
-            "proxy_verified": self.proxy_verified,
-            "observation_id": self.observation_id,
-        }
+        return serialize_request_metadata(self)

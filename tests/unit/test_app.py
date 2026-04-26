@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
+from smolrouter.request_metadata import RequestMetadata
 
 
 def load_mock_json(filename):
@@ -610,6 +611,70 @@ def test_complete_request_log_without_logging_still_completes_lb_request(monkeyp
     assert completed_lb_calls == [("lb-disabled", False)]
 
 
+def test_request_metadata_to_dict_exposes_contract_fields():
+    metadata = RequestMetadata(
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        provider_id="google-main",
+        model_name="gemini-2.5-pro",
+        api_key_index=2,
+        api_key_total=5,
+        api_key_verified=True,
+        proxy_verified=True,
+        observation_id="obs-123",
+    )
+
+    assert metadata.to_dict() == {
+        "api_key_suffix": "abcd1234",
+        "proxy_used": "http://127.0.0.1:8888",
+        "provider_id": "google-main",
+        "model_name": "gemini-2.5-pro",
+        "api_key_index": 2,
+        "api_key_total": 5,
+        "api_key_verified": True,
+        "proxy_verified": True,
+        "observation_id": "obs-123",
+    }
+
+
+def test_update_log_entry_provider_metadata_applies_metadata_fields():
+    log_entry = SimpleNamespace(upstream_url=None)
+    metadata = RequestMetadata(
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        provider_id="google-main",
+        api_key_index=2,
+        api_key_total=5,
+    )
+
+    app_module._update_log_entry_provider_metadata(log_entry, "provider:google-main", metadata)
+
+    assert log_entry.upstream_url == "provider:google-main"
+    assert log_entry.api_key_suffix == "abcd1234"
+    assert log_entry.proxy_used == "http://127.0.0.1:8888"
+    assert log_entry.provider_id == "google-main"
+    assert log_entry.api_key_index == 2
+    assert log_entry.api_key_total == 5
+
+
+def test_serialize_request_log_provider_metadata_normalizes_contract_values():
+    log_entry = SimpleNamespace(
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        provider_id="",
+        api_key_index="2",
+        api_key_total="5",
+    )
+
+    assert app_module._serialize_request_log_provider_metadata(log_entry) == {
+        "api_key_suffix": "abcd1234",
+        "proxy_used": "http://127.0.0.1:8888",
+        "provider_id": None,
+        "api_key_index": 2,
+        "api_key_total": 5,
+    }
+
+
 def test_serialize_request_log_reuses_summary_metadata():
     timestamp = app_module.datetime.now()
     log_entry = SimpleNamespace(
@@ -666,6 +731,45 @@ def test_serialize_request_log_normalizes_empty_provider_id():
     payload = app_module._serialize_request_log(log_entry)
 
     assert payload["provider_id"] is None
+
+
+def test_serialize_request_detail_response_reuses_summary_and_provider_metadata():
+    timestamp = app_module.datetime.now()
+    log_entry = SimpleNamespace(
+        id="req-789",
+        timestamp=timestamp,
+        source_ip="127.0.0.1",
+        path="/v1/chat/completions",
+        service_type="openai",
+        original_model="gpt-4o",
+        mapped_model="gemini-2.5-pro",
+        duration_ms=321,
+        request_size=12,
+        response_size=24,
+        upstream_url="provider:google-main",
+        status_code=200,
+        error_message=None,
+        api_key_suffix="abcd1234",
+        proxy_used="http://127.0.0.1:8888",
+        provider_id="google-main",
+        api_key_index=2,
+        api_key_total=5,
+        request_body=b'{"model": "gpt-4o"}',
+        response_body=b'{"choices": []}',
+    )
+
+    payload = app_module._serialize_request_detail_response(
+        log_entry,
+        {"is_duplicate": False, "duplicate_count": 0, "request_body_hash": None, "duplicates": []},
+    )
+
+    assert payload["upstream_url"] == "provider:google-main"
+    assert payload["provider_id"] == "google-main"
+    assert payload["api_key_suffix"] == "abcd1234"
+    assert payload["api_key_index"] == 2
+    assert payload["api_key_total"] == 5
+    assert payload["request_body"] == '{"model": "gpt-4o"}'
+    assert payload["response_body"] == '{"choices": []}'
 
 
 def test_serialize_performance_point_uses_summary_fields():

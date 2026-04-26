@@ -510,6 +510,43 @@ async def test_request_detail_api_serializes_bodies_and_duplicates(async_client,
 
 
 @pytest.mark.asyncio
+async def test_request_detail_api_includes_provider_metadata(async_client, isolated_db, disable_logging):
+    timestamp = datetime.now()
+    log_entry = await RequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="provider:google-main",
+        original_model="gpt-4",
+        mapped_model="gemini-2.5-pro",
+        duration_ms=1500,
+        request_size=64,
+        response_size=128,
+        status_code=200,
+        completed_at=timestamp,
+        timestamp=timestamp,
+    )
+    log_entry.provider_id = "google-main"
+    log_entry.api_key_suffix = "abcd1234"
+    log_entry.proxy_used = "http://127.0.0.1:8888"
+    log_entry.api_key_index = 2
+    log_entry.api_key_total = 5
+    await log_entry.save_async()
+
+    response = await async_client.get(f"/api/requests/{log_entry.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["upstream_url"] == "provider:google-main"
+    assert payload["provider_id"] == "google-main"
+    assert payload["api_key_suffix"] == "abcd1234"
+    assert payload["proxy_used"] == "http://127.0.0.1:8888"
+    assert payload["api_key_index"] == 2
+    assert payload["api_key_total"] == 5
+
+
+@pytest.mark.asyncio
 async def test_request_log_model_fields(isolated_db):
     """Test that the RequestLog model has all required fields"""
     # Create a comprehensive log entry

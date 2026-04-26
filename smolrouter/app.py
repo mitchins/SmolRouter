@@ -34,6 +34,7 @@ from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_
 from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
+from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
@@ -1098,12 +1099,7 @@ def _update_log_entry_provider_metadata(log_entry: Any, upstream_used: str, meta
 
     try:
         log_entry.upstream_url = upstream_used
-        if metadata:
-            log_entry.api_key_suffix = metadata.api_key_suffix
-            log_entry.proxy_used = metadata.proxy_used
-            log_entry.provider_id = metadata.provider_id
-            log_entry.api_key_index = metadata.api_key_index
-            log_entry.api_key_total = metadata.api_key_total
+        apply_request_metadata(log_entry, metadata, fields=REQUEST_LOG_METADATA_FIELDS)
     except Exception as e:
         logger.error(f"Failed to update log entry with metadata: {e}")
 
@@ -1811,27 +1807,26 @@ def _timestamp_now_for_log(timestamp: Optional[datetime]) -> datetime:
     return datetime.now()
 
 
-REQUEST_LOG_PROVIDER_METADATA_FIELDS = (
-    "api_key_suffix",
-    "proxy_used",
-    "provider_id",
-    "api_key_index",
-    "api_key_total",
+REQUEST_DETAIL_RESPONSE_FIELDS = (
+    "id",
+    "timestamp",
+    "source_ip",
+    "path",
+    "original_model",
+    "mapped_model",
+    "service_type",
+    "status_code",
+    "duration_ms",
+    "request_size",
+    "response_size",
+    "upstream_url",
+    "error_message",
+    *REQUEST_LOG_METADATA_FIELDS,
 )
 
 
-def _normalize_request_log_provider_metadata_value(field_name: str, value: Any) -> Any:
-    if field_name == "provider_id" and value == "":
-        return None
-
-    return value
-
-
 def _serialize_request_log_provider_metadata(log_entry: Any) -> dict[str, Any]:
-    return {
-        field_name: _normalize_request_log_provider_metadata_value(field_name, getattr(log_entry, field_name, None))
-        for field_name in REQUEST_LOG_PROVIDER_METADATA_FIELDS
-    }
+    return serialize_request_metadata(log_entry, fields=REQUEST_LOG_METADATA_FIELDS)
 
 
 def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
@@ -1927,24 +1922,7 @@ async def _build_duplicate_request_info(log_entry: Any) -> dict[str, Any]:
 def _serialize_request_detail_response(log_entry: Any, duplicate_info: dict[str, Any]) -> dict[str, Any]:
     summary = _serialize_request_log(log_entry)
     return {
-        "id": summary["id"],
-        "timestamp": summary["timestamp"],
-        "source_ip": summary["source_ip"],
-        "path": summary["path"],
-        "original_model": summary["original_model"],
-        "mapped_model": summary["mapped_model"],
-        "service_type": summary["service_type"],
-        "status_code": summary["status_code"],
-        "duration_ms": summary["duration_ms"],
-        "request_size": summary["request_size"],
-        "response_size": summary["response_size"],
-        "upstream_url": summary["upstream_url"],
-        "error_message": summary["error_message"],
-        "api_key_suffix": summary["api_key_suffix"],
-        "proxy_used": summary["proxy_used"],
-        "provider_id": summary["provider_id"],
-        "api_key_index": summary["api_key_index"],
-        "api_key_total": summary["api_key_total"],
+        **{field_name: summary[field_name] for field_name in REQUEST_DETAIL_RESPONSE_FIELDS},
         "request_body": _decode_log_body(getattr(log_entry, "request_body", None)),
         "response_body": _decode_log_body(getattr(log_entry, "response_body", None)),
         "duplicate": duplicate_info,
