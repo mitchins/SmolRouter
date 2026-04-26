@@ -12,7 +12,7 @@ import smolrouter.providers as providers_module
 from google.api_core.exceptions import InvalidArgument, PermissionDenied, ResourceExhausted
 
 from smolrouter.access_control import NoAccessControl
-from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
+from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig, coerce_provider_proxy_settings
 from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import (
     GoogleGenAICompletionContext,
@@ -1282,6 +1282,29 @@ def test_zai_coding_config_loads_api_key_file(tmp_path):
     assert getattr(config, "api" + "_key") == "dummy-zai-token"
 
 
+def test_zai_coding_config_defaults_coding_url_when_omitted():
+    config = ZaiCodingConfig(name="test-zai", type="zai-coding", enabled=True, api_key="dummy-zai-token")
+
+    assert config.url == "https://api.z.ai/api/coding/paas/v4"
+
+
+def test_coerce_provider_proxy_settings_converts_proxy_configuration_shapes():
+    processed = coerce_provider_proxy_settings(
+        {
+            "name": "test-google",
+            "type": "google-genai",
+            "proxy_config": {"https_proxy": "http://127.0.0.1:8888"},
+            "per_model_proxy": {"gemma-3-4b-it": {"https_proxy": "http://127.0.0.1:8899"}},
+            "proxy_pool": [None, {"https_proxy": "http://127.0.0.1:8890"}],
+        }
+    )
+
+    assert isinstance(processed["proxy_config"], ProxyConfig)
+    assert isinstance(processed["per_model_proxy"]["gemma-3-4b-it"], ProxyConfig)
+    assert processed["proxy_pool"][0] is None
+    assert isinstance(processed["proxy_pool"][1], ProxyConfig)
+
+
 def test_provider_factory_converts_proxy_configuration_shapes():
     processed = ProviderFactory._convert_proxy_configs(
         {
@@ -1535,6 +1558,7 @@ def test_google_genai_config_initialization():
     # With API keys list
     config1 = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys=["key1", "key2"])
     assert len(config1.api_keys) == 2
+    assert config1.url == "https://generativelanguage.googleapis.com"
 
 
 def test_google_genai_config_loads_api_keys_file_with_comments(tmp_path):
@@ -1544,6 +1568,23 @@ def test_google_genai_config_loads_api_keys_file_with_comments(tmp_path):
     config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
 
     assert config.api_keys == ["key-one", "key-two"]
+
+
+def test_google_genai_config_loads_env_style_api_keys_file(tmp_path):
+    key_file = tmp_path / "google_keys.env"
+    key_file.write_text('export GOOGLE_API_KEY="key-one" # primary\nGOOGLE_API_KEY_2=key-two\n')
+
+    config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
+
+    assert config.api_keys == ["key-one", "key-two"]
+
+
+def test_google_genai_config_rejects_empty_api_key_file(tmp_path):
+    key_file = tmp_path / "google_keys.txt"
+    key_file.write_text("# still empty\n\n")
+
+    with pytest.raises(ValueError, match="No valid API keys found"):
+        GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
 
 
 def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
@@ -1562,6 +1603,34 @@ def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
 
     provider = AnthropicProvider(config)
     assert provider.config.api_keys == ["sk-ant-one", "sk-ant-two"]
+
+
+def test_anthropic_config_loads_env_style_api_keys_file(tmp_path):
+    key_file = tmp_path / "anthropic_keys.env"
+    key_file.write_text('export ANTHROPIC_API_KEY="sk-ant-one" # active\nANTHROPIC_API_KEY_2=sk-ant-two\n')
+
+    config = AnthropicConfig(
+        name="test",
+        type="anthropic",
+        enabled=True,
+        url="https://api.anthropic.com",
+        api_keys_file=str(key_file),
+    )
+
+    assert config.api_keys == ["sk-ant-one", "sk-ant-two"]
+
+
+def test_anthropic_config_raises_when_api_keys_file_is_missing(tmp_path):
+    missing_file = tmp_path / "missing.txt"
+
+    with pytest.raises(ValueError, match="API key file not found"):
+        AnthropicConfig(
+            name="test",
+            type="anthropic",
+            enabled=True,
+            url="https://api.anthropic.com",
+            api_keys_file=str(missing_file),
+        )
 
 
 def test_anthropic_request_format_conversion():

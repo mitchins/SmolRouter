@@ -6,7 +6,7 @@ following SOLID principles for clean, extensible architecture.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Mapping
 from dataclasses import dataclass
 
 
@@ -179,49 +179,57 @@ class ProxyConfig:
     username: Optional[str] = None
     password: Optional[str] = None
 
+    def _apply_proxy_auth(self, proxy_url: str) -> str:
+        if self.username and self.password and "://" in proxy_url:
+            scheme, rest = proxy_url.split("://", 1)
+            return f"{scheme}://{self.username}:{self.password}@{rest}"
+        return proxy_url
+
     def to_httpx_proxy(self) -> Optional[str]:
         """Convert to httpx proxy format (single URL)"""
         # httpx expects a single proxy URL, prioritize HTTPS proxy
         if self.https_proxy:
-            proxy_url = self.https_proxy
-            if self.username and self.password:
-                # Insert auth into URL
-                if "://" in proxy_url:
-                    scheme, rest = proxy_url.split("://", 1)
-                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
-            return proxy_url
-        elif self.http_proxy:
-            proxy_url = self.http_proxy
-            if self.username and self.password:
-                # Insert auth into URL
-                if "://" in proxy_url:
-                    scheme, rest = proxy_url.split("://", 1)
-                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
-            return proxy_url
+            return self._apply_proxy_auth(self.https_proxy)
+        if self.http_proxy:
+            return self._apply_proxy_auth(self.http_proxy)
         return None
 
     def to_httpx_proxies(self) -> Dict[str, str]:
         """Convert to httpx proxy format (for backward compatibility)"""
         proxies = {}
         if self.http_proxy:
-            proxy_url = self.http_proxy
-            if self.username and self.password:
-                # Insert auth into URL
-                if "://" in proxy_url:
-                    scheme, rest = proxy_url.split("://", 1)
-                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
-            proxies["http://"] = proxy_url
+            proxies["http://"] = self._apply_proxy_auth(self.http_proxy)
 
         if self.https_proxy:
-            proxy_url = self.https_proxy
-            if self.username and self.password:
-                # Insert auth into URL
-                if "://" in proxy_url:
-                    scheme, rest = proxy_url.split("://", 1)
-                    proxy_url = f"{scheme}://{self.username}:{self.password}@{rest}"
-            proxies["https://"] = proxy_url
+            proxies["https://"] = self._apply_proxy_auth(self.https_proxy)
 
         return proxies
+
+
+def coerce_proxy_config(proxy_config: Any) -> Any:
+    if isinstance(proxy_config, dict):
+        return ProxyConfig(**proxy_config)
+    return proxy_config
+
+
+def coerce_provider_proxy_settings(provider_config: Mapping[str, Any]) -> Dict[str, Any]:
+    config = dict(provider_config)
+
+    if "proxy_config" in config:
+        config["proxy_config"] = coerce_proxy_config(config["proxy_config"])
+
+    per_model_proxy = config.get("per_model_proxy")
+    if isinstance(per_model_proxy, dict):
+        config["per_model_proxy"] = {
+            model_name: coerce_proxy_config(proxy_value)
+            for model_name, proxy_value in per_model_proxy.items()
+        }
+
+    proxy_pool = config.get("proxy_pool")
+    if isinstance(proxy_pool, list):
+        config["proxy_pool"] = [None if entry is None else coerce_proxy_config(entry) for entry in proxy_pool]
+
+    return config
 
 
 @dataclass

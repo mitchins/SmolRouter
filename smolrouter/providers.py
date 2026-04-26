@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .config_loading import load_first_config_entry
-from .interfaces import IModelProvider, ModelInfo, ProviderConfig
+from .interfaces import IModelProvider, ModelInfo, ProviderConfig, coerce_provider_proxy_settings
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from .anthropic_provider import AnthropicProvider, AnthropicConfig
 from .dummy_provider import DummyProvider, DummyConfig
@@ -458,20 +458,13 @@ class OpenAIProvider(BaseModelProvider):
 class ZaiCodingConfig(ProviderConfig):
     """Configuration for Z.AI GLM Coding Plan provider"""
 
+    url: str = "https://api.z.ai/api/coding/paas/v4"
     api_key_file: Optional[str] = None
 
-    def __init__(self, **kwargs):
-        self.api_key_file = kwargs.pop("api_key_file", None)
-
-        # Use the dedicated coding endpoint by default.
-        if "url" not in kwargs:
-            kwargs["url"] = "https://api.z.ai/api/coding/paas/v4"
-
-        if not kwargs.get("api_key") and self.api_key_file:
-            kwargs["api_key"] = self._load_api_key_from_file(self.api_key_file)
-
-        super().__init__(**kwargs)
-
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.api_key and self.api_key_file:
+            self.api_key = self._load_api_key_from_file(self.api_key_file)
         if not self.api_key:
             raise ValueError("Z.AI Coding provider requires api_key or api_key_file")
 
@@ -591,46 +584,10 @@ class ProviderFactory:
 
         return provider_class(config)
 
-    @staticmethod
-    def _convert_proxy_entry(proxy_entry: Any, proxy_config_cls: Any) -> Any:
-        return proxy_config_cls(**proxy_entry) if isinstance(proxy_entry, dict) else proxy_entry
-
-    @classmethod
-    def _convert_per_model_proxy(cls, per_model_proxy: Any, proxy_config_cls: Any) -> Any:
-        if not isinstance(per_model_proxy, dict):
-            return per_model_proxy
-
-        return {
-            model_name: cls._convert_proxy_entry(proxy_value, proxy_config_cls)
-            for model_name, proxy_value in per_model_proxy.items()
-        }
-
-    @classmethod
-    def _convert_proxy_pool(cls, proxy_pool: Any, proxy_config_cls: Any) -> Any:
-        if not isinstance(proxy_pool, list):
-            return proxy_pool
-
-        return [None if entry is None else cls._convert_proxy_entry(entry, proxy_config_cls) for entry in proxy_pool]
-
     @classmethod
     def _convert_proxy_configs(cls, provider_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert dictionary proxy configurations to ProxyConfig objects"""
-        from .interfaces import ProxyConfig
-
-        # Create a copy to avoid modifying the original
-        config = provider_config.copy()
-
-        # Convert proxy_config dict to ProxyConfig object
-        if "proxy_config" in config and isinstance(config["proxy_config"], dict):
-            config["proxy_config"] = ProxyConfig(**config["proxy_config"])
-
-        if "per_model_proxy" in config:
-            config["per_model_proxy"] = cls._convert_per_model_proxy(config["per_model_proxy"], ProxyConfig)
-
-        if "proxy_pool" in config:
-            config["proxy_pool"] = cls._convert_proxy_pool(config["proxy_pool"], ProxyConfig)
-
-        return config
+        """Convert dictionary proxy configurations to ProxyConfig objects."""
+        return coerce_provider_proxy_settings(provider_config)
 
     @classmethod
     def create_providers_from_config(cls, providers_config: List[Dict[str, Any]]) -> List[IModelProvider]:

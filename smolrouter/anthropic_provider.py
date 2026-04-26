@@ -10,7 +10,7 @@ Provides OpenAI-compatible access to Anthropic Claude models with:
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class AnthropicConfig(ProviderConfig):
     """Configuration for Anthropic provider"""
 
-    api_keys: Optional[List[str]] = None  # Will be initialized in __post_init__ if None
+    api_keys: List[str] = field(default_factory=list)
     api_keys_file: Optional[str] = None
     max_requests_per_day: Optional[int] = None  # Not used for rotation, just monitoring
     timeout: float = 30.0
@@ -37,11 +37,16 @@ class AnthropicConfig(ProviderConfig):
 
         if self.api_keys_file:
             try:
-                file_keys = load_config_entries(self.api_keys_file)
+                file_keys = load_config_entries(
+                    self.api_keys_file,
+                    allow_assignments=True,
+                    strip_inline_comments=True,
+                )
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
                 logger.error(f"Failed to load API keys from {self.api_keys_file}: {e}")
+                raise
 
 
 @dataclass
