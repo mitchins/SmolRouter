@@ -1414,6 +1414,46 @@ async def test_zai_coding_provider_uses_configured_key(mock_client, tmp_path):
 
 
 @pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_zai_coding_provider_forwards_supported_passthrough_headers(mock_client, tmp_path):
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    provider = ZaiCodingProvider(
+        ZaiCodingConfig(
+            name="test-zai",
+            type="zai-coding",
+            enabled=True,
+            url="https://api.z.ai/api/coding/paas/v4",
+            api_key_file=str(key_file),
+        )
+    )
+
+    mock_response = Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {"id": "chatcmpl-test", "choices": []}
+    mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+
+    await provider.generate_completion(
+        {"model": "glm-4.5-air", "messages": [{"role": "user", "content": "Hello"}]},
+        {
+            "authorization": "Bearer client-token",
+            "openai-organization": "org-123",
+            "openai-project": b"project-123",
+            "user-agent": b"test-client/1.0",
+            "x-ignore": "ignored",
+        },
+    )
+
+    called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
+    assert called_headers["Authorization"] == "Bearer dummy-zai-token"
+    assert called_headers["openai-organization"] == "org-123"
+    assert called_headers["openai-project"] == "project-123"
+    assert called_headers["user-agent"] == "test-client/1.0"
+    assert "x-ignore" not in called_headers
+
+
+@pytest.mark.asyncio
 async def test_zai_coding_provider_health_check_requires_api_key(tmp_path):
     key_file = tmp_path / "glm.env"
     key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")

@@ -244,8 +244,6 @@ class OpenAIProvider(BaseModelProvider):
 
                 for model_data in data.get("data", []):
                     model_id = model_data.get("id", "unknown")
-
-                    # Extract metadata
                     metadata = {
                         "object": model_data.get("object"),
                         "created": model_data.get("created"),
@@ -255,12 +253,7 @@ class OpenAIProvider(BaseModelProvider):
                         "parent": model_data.get("parent"),
                     }
 
-                    # Create aliases (original ID and common variations)
-                    aliases = [model_id]
-
-                    model_info = self._create_model_info(
-                        model_id=model_id, model_name=model_id, aliases=aliases, metadata=metadata
-                    )
+                    model_info = self._create_openai_model_info(model_id, metadata=metadata)
 
                     models.append(model_info)
                     logger.debug(f"Discovered OpenAI model: {model_info.id}")
@@ -282,11 +275,14 @@ class OpenAIProvider(BaseModelProvider):
         models = []
 
         for model_name in self.config.static_models or []:
-            model_info = self._create_model_info(
-                model_id=model_name,
-                model_name=model_name,
-                aliases=[model_name],
-                metadata={"object": "model", "owned_by": self.get_provider_id(), "static": True, "configured": True},
+            model_info = self._create_openai_model_info(
+                model_name,
+                metadata={
+                    "object": "model",
+                    "owned_by": self.get_provider_id(),
+                    "static": True,
+                    "configured": True,
+                },
             )
             models.append(model_info)
 
@@ -315,8 +311,6 @@ class OpenAIProvider(BaseModelProvider):
             models = []
             for model_data in data.get("data", []):
                 model_id = model_data.get("id", "unknown")
-
-                # Extract metadata
                 metadata = {
                     "object": model_data.get("object"),
                     "created": model_data.get("created"),
@@ -324,9 +318,7 @@ class OpenAIProvider(BaseModelProvider):
                     "static": True,  # Mark as static definition
                 }
 
-                model_info = self._create_model_info(
-                    model_id=model_id, model_name=model_id, aliases=[model_id], metadata=metadata
-                )
+                model_info = self._create_openai_model_info(model_id, metadata=metadata)
                 models.append(model_info)
 
             logger.info(
@@ -344,10 +336,8 @@ class OpenAIProvider(BaseModelProvider):
 
         models = []
         for model_name in fallback_models:
-            model_info = self._create_model_info(
-                model_id=model_name,
-                model_name=model_name,
-                aliases=[model_name],
+            model_info = self._create_openai_model_info(
+                model_name,
                 metadata={"object": "model", "owned_by": "openai", "static": True, "fallback": True},
             )
             models.append(model_info)
@@ -359,23 +349,47 @@ class OpenAIProvider(BaseModelProvider):
     def _normalize_client_header_value(value: Any) -> Any:
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
-    def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+    def _create_openai_model_info(self, model_id: str, *, metadata: Dict[str, Any]) -> ModelInfo:
+        return self._create_model_info(
+            model_id=model_id,
+            model_name=model_id,
+            aliases=[model_id],
+            metadata=metadata,
+        )
+
+    def _passthrough_client_headers(
+        self,
+        client_headers: Optional[Dict[str, str]],
+        *,
+        allow_client_authorization: bool,
+    ) -> Dict[str, str]:
+        passthrough_headers: Dict[str, str] = {}
         if not client_headers:
-            return headers
+            return passthrough_headers
 
         for key, value in client_headers.items():
             normalized_value = self._normalize_client_header_value(value)
             normalized_key = key.lower()
 
             if normalized_key == "authorization":
-                if not self.config.api_key:
-                    headers["Authorization"] = normalized_value
+                if allow_client_authorization:
+                    passthrough_headers["Authorization"] = normalized_value
                 continue
 
             if normalized_key in OPENAI_PASSTHROUGH_HEADERS:
-                headers[key] = normalized_value
+                passthrough_headers[key] = normalized_value
 
-        return headers
+        return passthrough_headers
+
+    def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+        merged_headers = dict(headers)
+        merged_headers.update(
+            self._passthrough_client_headers(
+                client_headers,
+                allow_client_authorization=not self.config.api_key,
+            )
+        )
+        return merged_headers
 
     async def _post_completion_request(
         self,
@@ -525,15 +539,10 @@ class ZaiCodingProvider(OpenAIProvider):
         endpoint: str = "/v1/chat/completions",
     ) -> Tuple[Dict[str, Any], int]:
         """Generate a completion using the configured Z.AI coding key."""
-        passthrough_headers: Dict[str, str] = {}
-
-        if client_headers:
-            for key, value in client_headers.items():
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8")
-
-                if key.lower() in OPENAI_PASSTHROUGH_HEADERS:
-                    passthrough_headers[key] = value
+        passthrough_headers = self._passthrough_client_headers(
+            client_headers,
+            allow_client_authorization=False,
+        )
 
         return await super().generate_completion(openai_request, passthrough_headers, endpoint)
 
