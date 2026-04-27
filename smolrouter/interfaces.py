@@ -279,7 +279,7 @@ class ProxyConfig:
         """Convert to httpx proxy format (for backward compatibility)"""
         proxies = {}
         if self.http_proxy:
-            # httpx requires scheme keys here; the proxy endpoint itself is validated above.
+            # `http://` is the httpx scheme key only; clear-text proxy endpoints are rejected in __post_init__.
             proxies["http://"] = self._apply_proxy_auth(self.http_proxy)
 
         if self.https_proxy:
