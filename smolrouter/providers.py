@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .config_loading import load_first_config_entry
-from .interfaces import IModelProvider, ModelInfo, ProviderConfig
+from .interfaces import IModelProvider, ModelInfo, ProviderConfig, coerce_provider_proxy_settings
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from .anthropic_provider import AnthropicProvider, AnthropicConfig
 from .dummy_provider import DummyProvider, DummyConfig
@@ -244,8 +244,6 @@ class OpenAIProvider(BaseModelProvider):
 
                 for model_data in data.get("data", []):
                     model_id = model_data.get("id", "unknown")
-
-                    # Extract metadata
                     metadata = {
                         "object": model_data.get("object"),
                         "created": model_data.get("created"),
@@ -255,12 +253,7 @@ class OpenAIProvider(BaseModelProvider):
                         "parent": model_data.get("parent"),
                     }
 
-                    # Create aliases (original ID and common variations)
-                    aliases = [model_id]
-
-                    model_info = self._create_model_info(
-                        model_id=model_id, model_name=model_id, aliases=aliases, metadata=metadata
-                    )
+                    model_info = self._create_openai_model_info(model_id, metadata=metadata)
 
                     models.append(model_info)
                     logger.debug(f"Discovered OpenAI model: {model_info.id}")
@@ -282,11 +275,14 @@ class OpenAIProvider(BaseModelProvider):
         models = []
 
         for model_name in self.config.static_models or []:
-            model_info = self._create_model_info(
-                model_id=model_name,
-                model_name=model_name,
-                aliases=[model_name],
-                metadata={"object": "model", "owned_by": self.get_provider_id(), "static": True, "configured": True},
+            model_info = self._create_openai_model_info(
+                model_name,
+                metadata={
+                    "object": "model",
+                    "owned_by": self.get_provider_id(),
+                    "static": True,
+                    "configured": True,
+                },
             )
             models.append(model_info)
 
@@ -315,8 +311,6 @@ class OpenAIProvider(BaseModelProvider):
             models = []
             for model_data in data.get("data", []):
                 model_id = model_data.get("id", "unknown")
-
-                # Extract metadata
                 metadata = {
                     "object": model_data.get("object"),
                     "created": model_data.get("created"),
@@ -324,9 +318,7 @@ class OpenAIProvider(BaseModelProvider):
                     "static": True,  # Mark as static definition
                 }
 
-                model_info = self._create_model_info(
-                    model_id=model_id, model_name=model_id, aliases=[model_id], metadata=metadata
-                )
+                model_info = self._create_openai_model_info(model_id, metadata=metadata)
                 models.append(model_info)
 
             logger.info(
@@ -344,10 +336,8 @@ class OpenAIProvider(BaseModelProvider):
 
         models = []
         for model_name in fallback_models:
-            model_info = self._create_model_info(
-                model_id=model_name,
-                model_name=model_name,
-                aliases=[model_name],
+            model_info = self._create_openai_model_info(
+                model_name,
                 metadata={"object": "model", "owned_by": "openai", "static": True, "fallback": True},
             )
             models.append(model_info)
@@ -359,23 +349,47 @@ class OpenAIProvider(BaseModelProvider):
     def _normalize_client_header_value(value: Any) -> Any:
         return value.decode("utf-8") if isinstance(value, bytes) else value
 
-    def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+    def _create_openai_model_info(self, model_id: str, *, metadata: Dict[str, Any]) -> ModelInfo:
+        return self._create_model_info(
+            model_id=model_id,
+            model_name=model_id,
+            aliases=[model_id],
+            metadata=metadata,
+        )
+
+    def _passthrough_client_headers(
+        self,
+        client_headers: Optional[Dict[str, str]],
+        *,
+        allow_client_authorization: bool,
+    ) -> Dict[str, str]:
+        passthrough_headers: Dict[str, str] = {}
         if not client_headers:
-            return headers
+            return passthrough_headers
 
         for key, value in client_headers.items():
             normalized_value = self._normalize_client_header_value(value)
             normalized_key = key.lower()
 
             if normalized_key == "authorization":
-                if not self.config.api_key:
-                    headers["Authorization"] = normalized_value
+                if allow_client_authorization:
+                    passthrough_headers["Authorization"] = normalized_value
                 continue
 
             if normalized_key in OPENAI_PASSTHROUGH_HEADERS:
-                headers[key] = normalized_value
+                passthrough_headers[key] = normalized_value
 
-        return headers
+        return passthrough_headers
+
+    def _merge_client_headers(self, headers: Dict[str, str], client_headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+        merged_headers = dict(headers)
+        merged_headers.update(
+            self._passthrough_client_headers(
+                client_headers,
+                allow_client_authorization=not self.config.api_key,
+            )
+        )
+        return merged_headers
 
     async def _post_completion_request(
         self,
@@ -458,20 +472,13 @@ class OpenAIProvider(BaseModelProvider):
 class ZaiCodingConfig(ProviderConfig):
     """Configuration for Z.AI GLM Coding Plan provider"""
 
+    url: str = "https://api.z.ai/api/coding/paas/v4"
     api_key_file: Optional[str] = None
 
-    def __init__(self, **kwargs):
-        self.api_key_file = kwargs.pop("api_key_file", None)
-
-        # Use the dedicated coding endpoint by default.
-        if "url" not in kwargs:
-            kwargs["url"] = "https://api.z.ai/api/coding/paas/v4"
-
-        if not kwargs.get("api_key") and self.api_key_file:
-            kwargs["api_key"] = self._load_api_key_from_file(self.api_key_file)
-
-        super().__init__(**kwargs)
-
+    def __post_init__(self):
+        super().__post_init__()
+        if not self.api_key and self.api_key_file:
+            self.api_key = self._load_api_key_from_file(self.api_key_file)
         if not self.api_key:
             raise ValueError("Z.AI Coding provider requires api_key or api_key_file")
 
@@ -532,15 +539,10 @@ class ZaiCodingProvider(OpenAIProvider):
         endpoint: str = "/v1/chat/completions",
     ) -> Tuple[Dict[str, Any], int]:
         """Generate a completion using the configured Z.AI coding key."""
-        passthrough_headers: Dict[str, str] = {}
-
-        if client_headers:
-            for key, value in client_headers.items():
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8")
-
-                if key.lower() in OPENAI_PASSTHROUGH_HEADERS:
-                    passthrough_headers[key] = value
+        passthrough_headers = self._passthrough_client_headers(
+            client_headers,
+            allow_client_authorization=False,
+        )
 
         return await super().generate_completion(openai_request, passthrough_headers, endpoint)
 
@@ -591,47 +593,6 @@ class ProviderFactory:
 
         return provider_class(config)
 
-    @staticmethod
-    def _convert_proxy_entry(proxy_entry: Any, proxy_config_cls: Any) -> Any:
-        return proxy_config_cls(**proxy_entry) if isinstance(proxy_entry, dict) else proxy_entry
-
-    @classmethod
-    def _convert_per_model_proxy(cls, per_model_proxy: Any, proxy_config_cls: Any) -> Any:
-        if not isinstance(per_model_proxy, dict):
-            return per_model_proxy
-
-        return {
-            model_name: cls._convert_proxy_entry(proxy_value, proxy_config_cls)
-            for model_name, proxy_value in per_model_proxy.items()
-        }
-
-    @classmethod
-    def _convert_proxy_pool(cls, proxy_pool: Any, proxy_config_cls: Any) -> Any:
-        if not isinstance(proxy_pool, list):
-            return proxy_pool
-
-        return [None if entry is None else cls._convert_proxy_entry(entry, proxy_config_cls) for entry in proxy_pool]
-
-    @classmethod
-    def _convert_proxy_configs(cls, provider_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert dictionary proxy configurations to ProxyConfig objects"""
-        from .interfaces import ProxyConfig
-
-        # Create a copy to avoid modifying the original
-        config = provider_config.copy()
-
-        # Convert proxy_config dict to ProxyConfig object
-        if "proxy_config" in config and isinstance(config["proxy_config"], dict):
-            config["proxy_config"] = ProxyConfig(**config["proxy_config"])
-
-        if "per_model_proxy" in config:
-            config["per_model_proxy"] = cls._convert_per_model_proxy(config["per_model_proxy"], ProxyConfig)
-
-        if "proxy_pool" in config:
-            config["proxy_pool"] = cls._convert_proxy_pool(config["proxy_pool"], ProxyConfig)
-
-        return config
-
     @classmethod
     def create_providers_from_config(cls, providers_config: List[Dict[str, Any]]) -> List[IModelProvider]:
         """Create multiple providers from configuration list"""
@@ -639,8 +600,7 @@ class ProviderFactory:
 
         for provider_config in providers_config:
             try:
-                # Convert proxy configurations from dicts to ProxyConfig objects
-                processed_config = cls._convert_proxy_configs(provider_config)
+                processed_config = coerce_provider_proxy_settings(provider_config)
 
                 config_type = str(processed_config.get("type", "")).lower()
                 config_class = cls._config_classes.get(config_type, ProviderConfig)

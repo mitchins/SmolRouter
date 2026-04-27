@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import socket
 import httpx
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -9,10 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, mock_open, patch
 
 import smolrouter.providers as providers_module
+import smolrouter.interfaces as interfaces_module
 from google.api_core.exceptions import InvalidArgument, PermissionDenied, ResourceExhausted
 
 from smolrouter.access_control import NoAccessControl
-from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig
+from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig, coerce_provider_proxy_settings
 from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import (
     GoogleGenAICompletionContext,
@@ -123,6 +125,84 @@ def test_google_genai_proxy_pool_skips_unhealthy_entries():
     assert selected_index == 1
     assert selected_proxy is not None
     assert selected_proxy.to_httpx_proxy() == "http://127.0.0.1:8889"
+
+
+def test_proxy_config_applies_credentials_to_httpx_formats():
+    username = "user"
+    password = "".join(["p", "a", "s", "s"])
+    proxy = ProxyConfig(
+        http_proxy="http://127.0.0.1:8888",
+        https_proxy="https://127.0.0.1:8889",
+        username=username,
+        password=password,
+    )
+
+    assert proxy.to_httpx_proxy() == f"https://{username}:{password}@127.0.0.1:8889"
+    assert proxy.to_httpx_proxies() == {
+        "http://": f"http://{username}:{password}@127.0.0.1:8888",
+        "https://": f"https://{username}:{password}@127.0.0.1:8889",
+    }
+
+
+def test_proxy_config_allows_localhost_http_proxy_url():
+    proxy = ProxyConfig(http_proxy="http://localhost:8888")
+
+    assert proxy.to_httpx_proxy() == "http://localhost:8888"
+
+
+def test_proxy_config_rejects_public_http_proxy_ip_address():
+    with pytest.raises(ValueError, match="LAN/private proxy"):
+        ProxyConfig(http_proxy="http://8.8.8.8:8080")
+
+
+def test_proxy_config_rejects_hostname_that_resolves_publicly(monkeypatch):
+    def fake_getaddrinfo(hostname, port, family=0, type=0, proto=0, flags=0):
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("93.184.216.34", 8080),
+            )
+        ]
+
+    monkeypatch.setattr(interfaces_module.socket, "getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="LAN/private proxy"):
+        ProxyConfig(http_proxy="http://proxy.example.com:8080")
+
+
+def test_provider_config_get_proxy_for_model_prefers_model_specific_override():
+    default_proxy = ProxyConfig(https_proxy="http://127.0.0.1:8888")
+    override_proxy = ProxyConfig(https_proxy="http://127.0.0.1:8899")
+    config = ProviderConfig(
+        name="test-provider",
+        type="openai",
+        url="https://example.com/openai/v1",
+        proxy_config=default_proxy,
+        per_model_proxy={"gemma-3-4b-it": override_proxy},
+    )
+
+    assert config.get_proxy_for_model("gemma-3-4b-it") is override_proxy
+    assert config.get_proxy_for_model("other-model") is default_proxy
+
+
+def test_model_info_matches_request_accepts_id_name_alias_and_display_name():
+    model = ModelInfo(
+        id="gemma-3-4b-it@test-google",
+        name="gemma-3-4b-it",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+        aliases=["gemma-3-4b"],
+    )
+
+    assert model.matches_request("gemma-3-4b-it@test-google")
+    assert model.matches_request("gemma-3-4b-it")
+    assert model.matches_request("gemma-3-4b")
+    assert model.matches_request(model.display_name)
+    assert not model.matches_request("other-model")
 
 
 @pytest.mark.parametrize(
@@ -1282,8 +1362,14 @@ def test_zai_coding_config_loads_api_key_file(tmp_path):
     assert getattr(config, "api" + "_key") == "dummy-zai-token"
 
 
-def test_provider_factory_converts_proxy_configuration_shapes():
-    processed = ProviderFactory._convert_proxy_configs(
+def test_zai_coding_config_defaults_coding_url_when_omitted():
+    config = ZaiCodingConfig(name="test-zai", type="zai-coding", enabled=True, api_key="dummy-zai-token")
+
+    assert config.url == "https://api.z.ai/api/coding/paas/v4"
+
+
+def test_coerce_provider_proxy_settings_converts_proxy_configuration_shapes():
+    processed = coerce_provider_proxy_settings(
         {
             "name": "test-google",
             "type": "google-genai",
@@ -1297,6 +1383,28 @@ def test_provider_factory_converts_proxy_configuration_shapes():
     assert isinstance(processed["per_model_proxy"]["gemma-3-4b-it"], ProxyConfig)
     assert processed["proxy_pool"][0] is None
     assert isinstance(processed["proxy_pool"][1], ProxyConfig)
+
+
+def test_provider_factory_create_providers_from_config_coerces_proxy_configuration_shapes():
+    providers = ProviderFactory.create_providers_from_config(
+        [
+            {
+                "name": "test-google",
+                "type": "google-genai",
+                "enabled": True,
+                "api_keys": ["dummy-google-key"],
+                "proxy_config": {"https_proxy": "http://127.0.0.1:8888"},
+                "per_model_proxy": {"gemma-3-4b-it": {"https_proxy": "http://127.0.0.1:8899"}},
+                "proxy_pool": [None, {"https_proxy": "http://127.0.0.1:8890"}],
+            }
+        ]
+    )
+
+    assert len(providers) == 1
+    assert isinstance(providers[0].config.proxy_config, ProxyConfig)
+    assert isinstance(providers[0].config.per_model_proxy["gemma-3-4b-it"], ProxyConfig)
+    assert providers[0].config.proxy_pool[0] is None
+    assert isinstance(providers[0].config.proxy_pool[1], ProxyConfig)
 
 @pytest.mark.asyncio
 async def test_container_streaming_route_returns_sse_when_mediator_is_non_streaming():
@@ -1388,6 +1496,46 @@ async def test_zai_coding_provider_uses_configured_key(mock_client, tmp_path):
     called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
     assert called_headers["Authorization"] == "Bearer dummy-zai-token"
     assert "client-token" not in called_headers["Authorization"]
+
+
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient")
+async def test_zai_coding_provider_forwards_supported_passthrough_headers(mock_client, tmp_path):
+    key_file = tmp_path / "glm.env"
+    key_file.write_text("ZAI_API_KEY=dummy-zai-token\n")
+
+    provider = ZaiCodingProvider(
+        ZaiCodingConfig(
+            name="test-zai",
+            type="zai-coding",
+            enabled=True,
+            url="https://api.z.ai/api/coding/paas/v4",
+            api_key_file=str(key_file),
+        )
+    )
+
+    mock_response = Mock()
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {"id": "chatcmpl-test", "choices": []}
+    mock_client.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_response)
+
+    await provider.generate_completion(
+        {"model": "glm-4.5-air", "messages": [{"role": "user", "content": "Hello"}]},
+        {
+            "authorization": "Bearer client-token",
+            "openai-organization": "org-123",
+            "openai-project": b"project-123",
+            "user-agent": b"test-client/1.0",
+            "x-ignore": "ignored",
+        },
+    )
+
+    called_headers = mock_client.return_value.__aenter__.return_value.post.call_args.kwargs["headers"]
+    assert called_headers["Authorization"] == "Bearer dummy-zai-token"
+    assert called_headers["openai-organization"] == "org-123"
+    assert called_headers["openai-project"] == "project-123"
+    assert called_headers["user-agent"] == "test-client/1.0"
+    assert "x-ignore" not in called_headers
 
 
 @pytest.mark.asyncio
@@ -1535,6 +1683,7 @@ def test_google_genai_config_initialization():
     # With API keys list
     config1 = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys=["key1", "key2"])
     assert len(config1.api_keys) == 2
+    assert config1.url == "https://generativelanguage.googleapis.com"
 
 
 def test_google_genai_config_loads_api_keys_file_with_comments(tmp_path):
@@ -1544,6 +1693,23 @@ def test_google_genai_config_loads_api_keys_file_with_comments(tmp_path):
     config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
 
     assert config.api_keys == ["key-one", "key-two"]
+
+
+def test_google_genai_config_loads_env_style_api_keys_file(tmp_path):
+    key_file = tmp_path / "google_keys.env"
+    key_file.write_text('export GOOGLE_API_KEY="key-one" # primary\nGOOGLE_API_KEY_2=key-two\n')
+
+    config = GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
+
+    assert config.api_keys == ["key-one", "key-two"]
+
+
+def test_google_genai_config_rejects_empty_api_key_file(tmp_path):
+    key_file = tmp_path / "google_keys.txt"
+    key_file.write_text("# still empty\n\n")
+
+    with pytest.raises(ValueError, match="No valid API keys found"):
+        GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
 
 
 def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
@@ -1562,6 +1728,34 @@ def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
 
     provider = AnthropicProvider(config)
     assert provider.config.api_keys == ["sk-ant-one", "sk-ant-two"]
+
+
+def test_anthropic_config_loads_env_style_api_keys_file(tmp_path):
+    key_file = tmp_path / "anthropic_keys.env"
+    key_file.write_text('export ANTHROPIC_API_KEY="sk-ant-one" # active\nANTHROPIC_API_KEY_2=sk-ant-two\n')
+
+    config = AnthropicConfig(
+        name="test",
+        type="anthropic",
+        enabled=True,
+        url="https://api.anthropic.com",
+        api_keys_file=str(key_file),
+    )
+
+    assert config.api_keys == ["sk-ant-one", "sk-ant-two"]
+
+
+def test_anthropic_config_raises_when_api_keys_file_is_missing(tmp_path):
+    missing_file = tmp_path / "missing.txt"
+
+    with pytest.raises(ValueError, match="API key file not found"):
+        AnthropicConfig(
+            name="test",
+            type="anthropic",
+            enabled=True,
+            url="https://api.anthropic.com",
+            api_keys_file=str(missing_file),
+        )
 
 
 def test_anthropic_request_format_conversion():
