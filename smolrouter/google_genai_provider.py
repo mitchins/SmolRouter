@@ -154,6 +154,7 @@ class GoogleGenAIRequestError(RuntimeError):
 class GoogleGenAIConfig(ProviderConfig):
     """Extended configuration for Google GenAI provider"""
 
+    url: str = "https://generativelanguage.googleapis.com"
     api_keys: List[str] = field(default_factory=list)
     api_keys_file: Optional[str] = None  # Path to file containing API keys
     max_requests_per_day: int = 1500  # Free tier limit
@@ -174,42 +175,20 @@ class GoogleGenAIConfig(ProviderConfig):
     # Predictive 429 configuration (defaults to disabled)
     predictive_429_enabled: bool = False
 
-    def __init__(self, **kwargs):
-        # Extract Google-specific fields before calling parent
-        self.api_keys = list(kwargs.pop("api_keys", []) or [])
-        self.api_keys_file = kwargs.pop("api_keys_file", None)
-        self.max_requests_per_day = kwargs.pop("max_requests_per_day", 1500)
-        self.max_tokens_per_minute = kwargs.pop("max_tokens_per_minute", 32000)
+    def __post_init__(self):
+        super().__post_init__()
+        self.api_keys = list(self.api_keys or [])
 
-        # Rate limiting configuration (defaults to disabled)
-        self.rate_limiting_enabled = kwargs.pop("rate_limiting_enabled", False)
-        self.max_concurrent_requests = kwargs.pop("max_concurrent_requests", 3)
-        self.max_requests_per_window = kwargs.pop("max_requests_per_window", 12)
-        self.window_minutes = kwargs.pop("window_minutes", 4)
-
-        # Predictive 429 configuration (defaults to disabled)
-        self.predictive_429_enabled = kwargs.pop("predictive_429_enabled", False)
-
-        # Proxy pool configuration
-        self.proxy_pool = kwargs.pop("proxy_pool", None)
-        self.proxy_pool_enabled = kwargs.pop("proxy_pool_enabled", False)
-
-        # Set required fields for base class
-        if "url" not in kwargs:
-            kwargs["url"] = "https://generativelanguage.googleapis.com"
-
-        # Call parent constructor
-        super().__init__(**kwargs)
-        self._post_init_google()
-
-    def _post_init_google(self):
         if not self.api_keys and not self.api_keys_file:
             raise ValueError("Either api_keys or api_keys_file must be provided")
 
-        # Load API keys from file if specified
         if self.api_keys_file:
             try:
-                file_keys = load_config_entries(self.api_keys_file)
+                file_keys = load_config_entries(
+                    self.api_keys_file,
+                    allow_assignments=True,
+                    strip_inline_comments=True,
+                )
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
