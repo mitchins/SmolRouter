@@ -151,12 +151,9 @@ if jwt_secret:
     app.add_middleware(create_auth_middleware())
     logger.info("JWT authentication middleware enabled")
 
-# Templates for web UI
+# Templates for web UI (packaged inside smolrouter/templates for all install types)
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Prefer package-internal templates; fall back to repo-root templates for editable/dev checkouts
-pkg_templates_dir = os.path.join(script_dir, "templates")
-fallback_templates_dir = os.path.join(script_dir, "..", "templates")
-templates_dir = pkg_templates_dir if os.path.isdir(pkg_templates_dir) else fallback_templates_dir
+templates_dir = os.path.join(script_dir, "templates")
 templates = Jinja2Templates(directory=templates_dir)
 
 # Configuration via environment variables
