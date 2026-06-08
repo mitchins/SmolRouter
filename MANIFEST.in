@@ -1,1 +1,1 @@
-recursive-include templates *.html
+recursive-include smolrouter/templates *.html

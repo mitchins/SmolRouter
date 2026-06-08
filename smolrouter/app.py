@@ -153,7 +153,7 @@ if jwt_secret:
 
 # Templates for web UI
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Prefer package-internal templates; fallback to top-level (included via MANIFEST)
+# Prefer package-internal templates; fall back to repo-root templates for editable/dev checkouts
 pkg_templates_dir = os.path.join(script_dir, "templates")
 fallback_templates_dir = os.path.join(script_dir, "..", "templates")
 templates_dir = pkg_templates_dir if os.path.isdir(pkg_templates_dir) else fallback_templates_dir
