@@ -37,7 +37,11 @@ jobs:
       if: matrix.python-version == '3.12'
       with:
         files: ./coverage.xml
-        fail_ci_if_error: true
+        token: ${{ secrets.CODECOV_TOKEN }}
+        # Coverage reporting must not gate the build: the uploader is an
+        # external dependency that intermittently fails (e.g. GPG signature
+        # verification of the CLI download), which is unrelated to test health.
+        fail_ci_if_error: false
 
   lint:
     name: Code Quality
