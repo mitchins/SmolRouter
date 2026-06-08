@@ -1,1 +1,2 @@
 recursive-include smolrouter/templates *.html
+recursive-include smolrouter/static *.css *.woff2

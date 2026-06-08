@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 import httpx
 from contextlib import asynccontextmanager
 
@@ -155,6 +156,11 @@ if jwt_secret:
 script_dir = os.path.dirname(os.path.abspath(__file__))
 templates_dir = os.path.join(script_dir, "templates")
 templates = Jinja2Templates(directory=templates_dir)
+
+# Static assets (self-hosted fonts/icons) served locally so the Web UI makes
+# no external browser requests and works fully offline / on isolated LANs.
+static_dir = os.path.join(script_dir, "static")
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 # Configuration via environment variables
 DEFAULT_UPSTREAM = os.getenv("DEFAULT_UPSTREAM", "http://localhost:8000")
