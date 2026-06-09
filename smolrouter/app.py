@@ -60,7 +60,7 @@ async def _initialize_request_logging_system() -> None:
         await init_database()
         start_background_cleanup()
     except Exception as e:
-        logger.error(f"Failed to initialize logging database: {e}")
+        logger.exception(f"Failed to initialize logging database: {e}")
         logger.warning("Request logging will be disabled")
         ENABLE_LOGGING = False
 
@@ -135,7 +135,7 @@ async def disable_cache_for_html_and_json(request: Request, call_next):
 
     content_type = response.headers.get("content-type", "")
     if request.method == "GET" and (
-        content_type.startswith("text/html") or content_type.startswith("application/json")
+        content_type.startswith(("text/html", "application/json"))
     ):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -189,7 +189,7 @@ def validate_url(url: str, name: str) -> str:
         raise ValueError(f"{name} cannot be empty")
 
     # Handle common mistakes
-    if url.startswith("http://http://") or url.startswith("https://https://"):
+    if url.startswith(("http://http://", "https://https://")):
         logger.warning(f"{name} contains duplicate protocol, fixing: {url}")
         url = url.split("://", 1)[1]  # Remove first protocol
         if not url.startswith("http"):
@@ -223,7 +223,7 @@ def validate_url(url: str, name: str) -> str:
 try:
     MODEL_MAP = json.loads(RAW_MODEL_MAP)
 except json.JSONDecodeError as e:
-    logger.error(f"Failed to parse MODEL_MAP: {e}")
+    logger.exception(f"Failed to parse MODEL_MAP: {e}")
     MODEL_MAP = {}
 
 
@@ -268,7 +268,7 @@ def load_routes_config() -> Dict:
         return config
 
     except Exception as e:
-        logger.error(f"Failed to load routes config from {ROUTES_CONFIG}: {e}")
+        logger.exception(f"Failed to load routes config from {ROUTES_CONFIG}: {e}")
         return {"routes": []}
 
 
@@ -335,7 +335,7 @@ def find_route(source_host: str, model: str) -> Tuple[str, Optional[str]]:
 try:
     DEFAULT_UPSTREAM = validate_url(DEFAULT_UPSTREAM, "DEFAULT_UPSTREAM")
 except ValueError as e:
-    logger.error(f"Configuration error: {e}")
+    logger.exception(f"Configuration error: {e}")
     logger.error("Please check your environment variables and restart")
     exit(1)
 
@@ -356,7 +356,7 @@ if ENABLE_LOGGING:
     try:
         init_blob_storage()
     except Exception as e:
-        logger.error(f"Failed to initialize blob storage: {e}")
+        logger.exception(f"Failed to initialize blob storage: {e}")
         logger.warning("Request logging will be disabled")
         ENABLE_LOGGING = False
 
@@ -383,7 +383,7 @@ async def init_new_architecture():
                     )
         logger.info("New SmolRouter architecture initialized successfully")
     except Exception as e:
-        logger.error(f"Failed to initialize new architecture: {e}")
+        logger.exception(f"Failed to initialize new architecture: {e}")
         logger.warning("Falling back to legacy architecture only")
 
 
@@ -689,7 +689,7 @@ async def start_request_log(
                     key = await asyncio.to_thread(blob_storage.store, request_body, content_type="application/json")
                     await RedisRequestLog.update_request_body_key(request_id=request_id, request_body_key=key)
                 except Exception as e:
-                    logger.error(f"Failed to store request body asynchronously: {e}")
+                    logger.exception(f"Failed to store request body asynchronously: {e}")
 
             import asyncio
 
@@ -708,11 +708,11 @@ async def start_request_log(
             logger.debug(f"Broadcasting new_request event for request {request_id}")
             _new_request_event_task = asyncio.create_task(broadcast_request_event("new_request", log_entry))
         except Exception as e:
-            logger.error(f"Failed to broadcast new request event: {e}")
+            logger.exception(f"Failed to broadcast new request event: {e}")
 
         return log_entry
     except Exception as e:
-        logger.error(f"Failed to start request log: {e}")
+        logger.exception(f"Failed to start request log: {e}")
         return None
 
 
@@ -737,7 +737,7 @@ def _complete_lb_request(lb_instance, start_time: float, success: bool):
             asyncio.run(model_load_balancer.end_request(lb_instance, response_time, success))
         logger.debug(f"Load balancer: completed request for {lb_instance.model_id} (success={success})")
     except Exception as e:
-        logger.error(f"Failed to complete load balancer request tracking: {e}")
+        logger.exception(f"Failed to complete load balancer request tracking: {e}")
 
 
 def _complete_lb_request_from_metadata(metadata: Any, start_time: float, status_code: int) -> None:
@@ -856,7 +856,7 @@ def _broadcast_request_completion(log_entry: Any) -> str:
         logger.debug(f"Broadcasting request_completed event for request {request_id}")
         _request_completed_task = asyncio.create_task(broadcast_request_event("request_completed", log_entry))
     except Exception as e:
-        logger.error(f"Failed to broadcast request completion event: {e}")
+        logger.exception(f"Failed to broadcast request completion event: {e}")
 
     return request_id
 
@@ -925,7 +925,7 @@ def complete_request_log(
 
         _complete_lb_request_from_metadata(metadata, start_time, status_code)
     except Exception as e:
-        logger.error(f"Failed to complete request log: {e}")
+        logger.exception(f"Failed to complete request log: {e}")
 
 
 def _get_request_source_ip(request: Request) -> str:
@@ -948,7 +948,7 @@ async def _parse_openai_request_payload(
         payload = await request.json()
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
-        logger.error(f"Failed to parse request JSON: {e}")
+        logger.exception(f"Failed to parse request JSON: {e}")
         log_entry = await start_request_log(request, "openai", DEFAULT_UPSTREAM, None, None, auth_payload, None)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
         return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
@@ -975,7 +975,7 @@ def _update_log_entry_models(log_entry: Any, original_model: Optional[str], mapp
         log_entry.mapped_model = mapped_model
         log_entry.save()
     except Exception as e:
-        logger.error(f"Failed to update log entry: {e}")
+        logger.exception(f"Failed to update log entry: {e}")
 
 
 async def _start_openai_request_log(
@@ -1092,7 +1092,7 @@ async def _route_openai_request(
         try:
             return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, False)
         except Exception as fallback_error:
-            logger.error(f"Both streaming and non-streaming failed: {fallback_error}")
+            logger.exception(f"Both streaming and non-streaming failed: {fallback_error}")
             raise fallback_error
 
 
@@ -1104,7 +1104,7 @@ def _update_log_entry_provider_metadata(log_entry: Any, upstream_used: str, meta
         log_entry.upstream_url = upstream_used
         apply_request_metadata(log_entry, metadata, fields=REQUEST_LOG_METADATA_FIELDS)
     except Exception as e:
-        logger.error(f"Failed to update log entry with metadata: {e}")
+        logger.exception(f"Failed to update log entry with metadata: {e}")
 
 
 def _serialize_json_bytes(data: Any) -> Optional[bytes]:
@@ -1185,7 +1185,7 @@ async def proxy_request(path: str, request: Request):
     try:
         route_result = await _route_openai_request(source_ip, model_name, payload, path, headers, is_streaming, legacy_proxy)
     except Exception as e:
-        logger.error(f"Provider architecture failed: {e}")
+        logger.exception(f"Provider architecture failed: {e}")
         return _error_response(log_entry, start_time, 503, str(e), request_body_bytes)
 
     _update_log_entry_provider_metadata(log_entry, route_result.upstream_used, route_result.metadata)
@@ -1239,7 +1239,7 @@ async def _parse_ollama_request_payload(
         payload = await request.json()
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
-        logger.error(f"Failed to parse Ollama request JSON: {e}")
+        logger.exception(f"Failed to parse Ollama request JSON: {e}")
         log_entry = await start_request_log(request, "ollama", DEFAULT_UPSTREAM, None, None, None, None)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
         return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
@@ -1404,7 +1404,7 @@ async def _ollama_streaming_response_generator(upstream: Any, ollama_model: str)
             if is_done:
                 return
         except Exception as e:
-            logger.error(f"Error processing stream: {e}")
+            logger.exception(f"Error processing stream: {e}")
             break
 
 
@@ -1508,7 +1508,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
                 request_body_bytes,
             )
     except httpx.ConnectError as e:
-        logger.error(f"Connection error to upstream {url}: {e}")
+        logger.exception(f"Connection error to upstream {url}: {e}")
         return _error_response(
             log_entry,
             start_time,
@@ -1522,7 +1522,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
             },
         )
     except httpx.TimeoutException as e:
-        logger.error(f"Timeout error to upstream {url}: {e}")
+        logger.exception(f"Timeout error to upstream {url}: {e}")
         return _error_response(
             log_entry,
             start_time,
@@ -1536,7 +1536,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
             },
         )
     except Exception as e:
-        logger.error(f"Unexpected error proxying Ollama request to {url}: {e}")
+        logger.exception(f"Unexpected error proxying Ollama request to {url}: {e}")
         return _error_response(
             log_entry,
             start_time,
@@ -1615,7 +1615,7 @@ async def list_models(request: Request):
             return JSONResponse(content=response_data, status_code=200)
 
         except Exception as e:
-            logger.error(f"Error in new architecture model listing: {e}")
+            logger.exception(f"Error in new architecture model listing: {e}")
             # Fall through to legacy behavior
 
     # Fallback to legacy single-upstream behavior
@@ -1631,7 +1631,7 @@ async def list_models(request: Request):
         # (Optional) rewrite IDs in data.get("data", []) here
         return JSONResponse(content=data, status_code=upstream.status_code)
     except httpx.ConnectError as e:
-        logger.error(f"Connection error to upstream {url}: {e}")
+        logger.exception(f"Connection error to upstream {url}: {e}")
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
@@ -1640,7 +1640,7 @@ async def list_models(request: Request):
             status_code=502,
         )
     except Exception as e:
-        logger.error(f"Error listing models from {url}: {e}")
+        logger.exception(f"Error listing models from {url}: {e}")
         return JSONResponse(
             content={"error": "models_error", "message": "Failed to retrieve models from upstream"}, status_code=500
         )
@@ -1707,7 +1707,7 @@ async def ollama_list_models(request: Request):
             return JSONResponse(content=ollama_response, status_code=200)
 
         except Exception as e:
-            logger.error(f"Error in new architecture Ollama model listing: {e}")
+            logger.exception(f"Error in new architecture Ollama model listing: {e}")
             # Fall through to legacy behavior
 
     # Fallback to legacy behavior
@@ -1739,7 +1739,7 @@ async def ollama_list_models(request: Request):
             return JSONResponse(content=ollama_response, status_code=upstream.status_code)
 
     except httpx.ConnectError as e:
-        logger.error(f"Connection error to upstream {url}: {e}")
+        logger.exception(f"Connection error to upstream {url}: {e}")
         return JSONResponse(
             content={
                 "error": "upstream_connection_failed",
@@ -1748,7 +1748,7 @@ async def ollama_list_models(request: Request):
             status_code=502,
         )
     except Exception as e:
-        logger.error(f"Error converting models to Ollama format: {e}")
+        logger.exception(f"Error converting models to Ollama format: {e}")
         return JSONResponse(content={"error": "conversion_error"}, status_code=500)
 
 
@@ -1762,7 +1762,7 @@ async def dashboard(request: Request):
     try:
         return templates.TemplateResponse(request, "index.html", {"current_page": "dashboard"})
     except Exception as e:
-        logger.error(f"Error rendering dashboard: {e}")
+        logger.exception(f"Error rendering dashboard: {e}")
         # Graceful fallback if templates are unavailable in installed package
         return HTMLResponse(
             content=(
@@ -1789,7 +1789,7 @@ async def performance_dashboard(request: Request):
             request, "performance.html", {"title": "Performance Analytics", "current_page": "performance"}
         )
     except Exception as e:
-        logger.error(f"Error loading performance dashboard: {e}")
+        logger.exception(f"Error loading performance dashboard: {e}")
         return HTMLResponse(content="<h1>Error loading performance dashboard</h1>", status_code=500)
 
 
@@ -2028,7 +2028,7 @@ async def api_logs(limit: int = 100, service_type: str | None = None, q: str | N
     except DashboardFilterError as e:
         return _invalid_dashboard_filter_response(e)
     except Exception as e:
-        logger.error(f"Error getting logs: {e}")
+        logger.exception(f"Error getting logs: {e}")
         return JSONResponse(content={"error": "Failed to get logs"}, status_code=500)
 
 
@@ -2038,7 +2038,7 @@ async def api_stats():
     try:
         return await get_log_stats()
     except Exception as e:
-        logger.error(f"Error getting stats: {e}")
+        logger.exception(f"Error getting stats: {e}")
         return JSONResponse(content={"error": "Failed to get stats"}, status_code=500)
 
 
@@ -2059,7 +2059,7 @@ async def api_dashboard(limit: int = 100, q: str | None = None):
     except DashboardFilterError as e:
         return _invalid_dashboard_filter_response(e)
     except Exception as e:
-        logger.error(f"Error getting dashboard data: {e}")
+        logger.exception(f"Error getting dashboard data: {e}")
         return JSONResponse(content={"error": f"Failed to get dashboard data. {e}"}, status_code=500)
 
 
@@ -2083,7 +2083,7 @@ async def api_inflight():
             for log in inflight
         ]
     except Exception as e:
-        logger.error(f"Error getting inflight requests: {e}")
+        logger.exception(f"Error getting inflight requests: {e}")
         return JSONResponse(content={"error": "Failed to get inflight requests"}, status_code=500)
 
 
@@ -2112,7 +2112,7 @@ async def api_load_balancer():
             },
         }
     except Exception as e:
-        logger.error(f"Error getting load balancer stats: {e}")
+        logger.exception(f"Error getting load balancer stats: {e}")
         return JSONResponse(content={"error": "Failed to get load balancer stats"}, status_code=500)
 
 
@@ -2145,7 +2145,7 @@ async def api_performance(limit: int = 1000, hours: int = 24, model: str | None 
         }
 
     except Exception as e:
-        logger.error(f"Failed to get performance data: {e}")
+        logger.exception(f"Failed to get performance data: {e}")
         return JSONResponse(content={"error": "Failed to get performance data"}, status_code=500)
 
 
@@ -2191,7 +2191,7 @@ async def api_google_genai_stats():
             }
 
         except Exception as e:
-            logger.error(f"Error getting Google GenAI stats: {e}")
+            logger.exception(f"Error getting Google GenAI stats: {e}")
             return JSONResponse(
                 content={"error": "Failed to get Google GenAI stats", "details": str(e)}, status_code=500
             )
@@ -2230,7 +2230,7 @@ async def api_anthropic_stats():
             }
 
         except Exception as e:
-            logger.error(f"Error getting Anthropic stats: {e}")
+            logger.exception(f"Error getting Anthropic stats: {e}")
             return JSONResponse(content={"error": "Failed to get Anthropic stats", "details": str(e)}, status_code=500)
 
     return {"error": "New architecture not available"}
@@ -2334,7 +2334,7 @@ async def api_upstreams():
                     },
                 }
             except Exception as e:
-                logger.error(f"Failed to get load balancer stats: {e}")
+                logger.exception(f"Failed to get load balancer stats: {e}")
                 load_balancer_data = {"enabled": False, "error": str(e)}
 
             return {
@@ -2351,7 +2351,7 @@ async def api_upstreams():
             }
 
         except Exception as e:
-            logger.error(f"Error getting upstream data: {e}")
+            logger.exception(f"Error getting upstream data: {e}")
             return JSONResponse(content={"error": "Failed to get upstream data", "details": str(e)}, status_code=500)
 
     # Fallback to legacy data
@@ -2405,7 +2405,7 @@ async def providers_dashboard(request: Request):
             request, "providers.html", {"title": "Provider Management", "current_page": "providers"}
         )
     except Exception as e:
-        logger.error(f"Error loading providers dashboard: {e}")
+        logger.exception(f"Error loading providers dashboard: {e}")
         return HTMLResponse(content="<h1>Error loading providers dashboard</h1>", status_code=500)
 
 
@@ -2704,7 +2704,7 @@ async def system_dashboard(request: Request):
             }
             logger.debug(f"Load balancer stats: {load_balancing}")
         except Exception as e:
-            logger.error(f"Failed to load load balancer stats: {e}")
+            logger.exception(f"Failed to load load balancer stats: {e}")
             load_balancing = {
                 "enabled": False,
                 "error": str(e),
@@ -2774,7 +2774,7 @@ async def system_dashboard(request: Request):
             },
         )
     except Exception as e:
-        logger.error(f"Error loading system dashboard: {e}")
+        logger.exception(f"Error loading system dashboard: {e}")
         return HTMLResponse(content="<h1>Error loading system dashboard</h1>", status_code=500)
 
 
@@ -2841,7 +2841,7 @@ async def request_detail(request_id: str, request: Request):
             },
         )
     except Exception as e:
-        logger.error(f"Error rendering request detail: {e}")
+        logger.exception(f"Error rendering request detail: {e}")
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load request details: {e}</p>", status_code=500)
 
 
@@ -2867,7 +2867,7 @@ async def get_request_details(request_id: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching request details: {e}")
+        logger.exception(f"Error fetching request details: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -2884,7 +2884,7 @@ async def client_dashboard(client_ip: str, request: Request):
             {"client_ip": client_ip, "current_page": "client"},
         )
     except Exception as e:
-        logger.error(f"Error loading client dashboard for {client_ip}: {e}")
+        logger.exception(f"Error loading client dashboard for {client_ip}: {e}")
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load client dashboard: {e}</p>", status_code=500)
 
 
@@ -2901,7 +2901,7 @@ async def testing_page(request: Request):
             {"current_page": "testing"},
         )
     except Exception as e:
-        logger.error(f"Error loading testing page: {e}")
+        logger.exception(f"Error loading testing page: {e}")
         return HTMLResponse(content=f"<h1>Error</h1><p>Failed to load testing page: {e}</p>", status_code=500)
 
 
@@ -2953,7 +2953,7 @@ async def get_available_models_for_testing(request: Request):
         return {"models": model_list}
 
     except Exception as e:
-        logger.error(f"Error fetching models for testing: {e}")
+        logger.exception(f"Error fetching models for testing: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch available models")
 
 
@@ -3016,7 +3016,7 @@ async def get_client_data(client_ip: str, request: Request, limit: int = 100):
     try:
         return await _build_client_dashboard_payload(client_ip, limit)
     except Exception as e:
-        logger.error(f"Error fetching client data for {client_ip}: {e}")
+        logger.exception(f"Error fetching client data for {client_ip}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -3093,7 +3093,7 @@ async def broadcast_request_event(event_type: str, log_entry=None):
             await manager.broadcast(event_data)
 
     except Exception as e:
-        logger.error(f"Failed to broadcast WebSocket event: {e}")
+        logger.exception(f"Failed to broadcast WebSocket event: {e}")
 
 
 @app.websocket("/ws/dashboard")
@@ -3126,7 +3126,7 @@ async def websocket_dashboard(websocket: WebSocket):
                 websocket,
             )
         except Exception as e:
-            logger.error(f"Failed to send initial dashboard data: {e}")
+            logger.exception(f"Failed to send initial dashboard data: {e}")
 
         # Keep connection alive and handle pings
         while True:
@@ -3145,7 +3145,7 @@ async def websocket_dashboard(websocket: WebSocket):
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                logger.exception(f"WebSocket error: {e}")
                 break
 
     finally:
@@ -3164,7 +3164,7 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
             await manager.send_personal_message(initial_data, websocket)
 
         except Exception as e:
-            logger.error("Failed to send initial client dashboard data: %s", e)
+            logger.exception("Failed to send initial client dashboard data: %s", e)
 
         # Keep connection alive and handle pings
         while True:
@@ -3184,7 +3184,7 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                logger.error("WebSocket error for client dashboard: %s", e)
+                logger.exception("WebSocket error for client dashboard: %s", e)
                 break
 
     finally:
