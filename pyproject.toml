@@ -62,7 +62,7 @@ include-package-data = true
 smolrouter = [
     "templates/*.html",
     "static/css/*.css",
-    "static/js/*.js",
+    "static/vendor/*.js",
     "static/fonts/*.css",
     "static/fonts/*.woff2",
 ]
