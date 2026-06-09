@@ -368,15 +368,15 @@ async def test_route_request_timeout(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_get_smart_router_is_singleton():
-    routing._smart_router = None
+def test_get_smart_router_is_singleton(monkeypatch):
+    monkeypatch.setattr(routing, "_smart_router", None)
     r1 = get_smart_router({"servers": SERVERS}, "http://default")
     r2 = get_smart_router({"servers": {}}, "http://other")
     assert r1 is r2  # second call returns cached instance
 
 
-def test_reload_router_config_replaces_instance():
-    routing._smart_router = None
+def test_reload_router_config_replaces_instance(monkeypatch):
+    monkeypatch.setattr(routing, "_smart_router", None)
     r1 = get_smart_router({"servers": SERVERS}, "http://default")
     reload_router_config({"servers": SERVERS, "aliases": {"big": {"instances": ["alpha"]}}}, "http://default")
     r2 = routing._smart_router

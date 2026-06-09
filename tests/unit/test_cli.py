@@ -9,10 +9,25 @@ from smolrouter.cli import _build_parser, main
 
 
 @pytest.fixture(autouse=True)
-def clean_listen_env(monkeypatch):
-    for key in ("ROUTES_CONFIG", "LISTEN_HOST", "LISTEN_PORT", "RELOAD"):
-        monkeypatch.delenv(key, raising=False)
-    yield
+def clean_listen_env():
+    """Snapshot and restore CLI-related env vars.
+
+    main() mutates os.environ directly (not via monkeypatch), so without an
+    explicit teardown these leak into later test modules that read LISTEN_HOST /
+    LISTEN_PORT / ROUTES_CONFIG at import time, making the suite order-dependent.
+    """
+    keys = ("ROUTES_CONFIG", "LISTEN_HOST", "LISTEN_PORT", "RELOAD")
+    saved = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 # --------------------------------------------------------------------------
@@ -53,10 +68,7 @@ def test_parser_explicit_flags():
 
 def test_main_without_reload_imports_app_and_runs():
     fake_app = object()
-    with (
-        patch("uvicorn.run") as run,
-        patch.dict("sys.modules"),
-    ):
+    with patch("uvicorn.run") as run:
         # Patch the app object that main imports lazily
         with patch("smolrouter.app.app", fake_app):
             main(["--host", "127.0.0.1", "--port", "4321"])
@@ -77,6 +89,8 @@ def test_main_with_reload_uses_import_string():
     run.assert_called_once()
     assert run.call_args.args[0] == "smolrouter.app:app"
     assert run.call_args.kwargs["reload"] is True
+    assert run.call_args.kwargs["host"] == "127.0.0.1"
+    assert run.call_args.kwargs["port"] == 5555
     assert os.environ["RELOAD"] == "true"
 
 

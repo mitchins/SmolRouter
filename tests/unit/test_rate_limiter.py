@@ -58,8 +58,10 @@ async def test_release_decrements_active_count():
 async def test_release_with_no_active_is_safe(caplog):
     funnel = GoogleGenAIRequestFunnel(max_concurrent=2, enabled=True)
     # Release without an acquire should warn but not raise or go negative
-    await funnel.release_slot()
+    with caplog.at_level("WARNING"):
+        await funnel.release_slot()
     assert funnel.stats["active_requests"] == 0
+    assert any("no active requests" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

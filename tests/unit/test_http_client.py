@@ -140,6 +140,9 @@ async def test_close_all_closes_and_clears():
 @pytest.mark.asyncio
 async def test_clear_cache_empties_without_closing():
     factory = HttpClientFactory()
-    factory.get_client_for_model("prov", "m")
+    client = factory.get_client_for_model("prov", "m")
     factory.clear_cache()
     assert factory._clients == {}
+    # clear_cache drops references but must NOT close the underlying client
+    assert not client.is_closed
+    await client.aclose()
