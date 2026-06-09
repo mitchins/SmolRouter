@@ -536,7 +536,10 @@
             tbody.insertBefore(newRow, tbody.firstChild);
 
             while (tbody.children.length > 100) {
-                tbody.lastChild.remove();
+                const lastRow = tbody.lastElementChild;
+                if (lastRow) {
+                    lastRow.remove();
+                }
             }
         }
 

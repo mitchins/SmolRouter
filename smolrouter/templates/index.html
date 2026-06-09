@@ -639,11 +639,18 @@
                 return value;
             }
 
-            return `"${String(value).replaceAll('\\', String.raw`\\`).replaceAll('"', String.raw`\"`)}"`;
+            const escapedValue = String(value)
+                .replaceAll('\\', '\\\\')
+                .replaceAll('"', '\\"');
+            return `"${escapedValue}"`;
         }
 
         function upsertFilterClause(query, field, value) {
-            const clausePattern = new RegExp(String.raw`(^|\s)${field}:(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+)`, 'gi');
+            const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const clausePattern = new RegExp(
+                '(^|\\s)' + escapedField + ':(?:"(?:\\\\.|[^"])*"|\'(?:\\\\.|[^\'])*\'|\\S+)',
+                'gi'
+            );
             const cleanedQuery = (query || '').replace(clausePattern, ' ').replace(/\s+/g, ' ').trim();
             const nextClause = `${field}:${quoteFilterValue(value)}`;
             return [cleanedQuery, nextClause].filter(Boolean).join(' ').trim();
