@@ -22,6 +22,15 @@ import os
 from smolrouter.redis_backend import RedisRequestLog, RedisApiKeyQuota, _circuit_breaker
 from smolrouter.redis_config import redis_client, is_fake_redis
 
+# redis-py >= 8 defaults the async connection pool to max_connections=100.
+# These baselines deliberately fan out hundreds/thousands of operations at
+# once, so cap the number of simultaneously in-flight operations below that
+# limit. Without this, enough command checkouts overlap on slower CI runners
+# to exhaust the shared (Fake)Redis pool, raising MaxConnectionsError and
+# tripping the circuit breaker. 64 still drives throughput far above the
+# asserted targets while leaving headroom in the pool.
+MAX_INFLIGHT_OPS = 64
+
 
 @pytest.fixture(autouse=True)
 def ensure_fakeredis():
@@ -71,19 +80,21 @@ class TestRedisPerformanceBaselines:
 
         start_time = time.time()
         completed_ops = 0
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         # Run sustained load test
         async def single_operation(op_id: int):
             nonlocal completed_ops
 
-            # Simulate realistic production operation: quota increment
-            await RedisApiKeyQuota.increment_usage(
-                api_key=f"sk-perf-test-{op_id % 10}",  # 10 unique keys
-                provider_id="openai",
-                model_name="gpt-4",
-                request_count=1,
-                token_count=100 + (op_id % 50),  # Variable token counts
-            )
+            async with sem:
+                # Simulate realistic production operation: quota increment
+                await RedisApiKeyQuota.increment_usage(
+                    api_key=f"sk-perf-test-{op_id % 10}",  # 10 unique keys
+                    provider_id="openai",
+                    model_name="gpt-4",
+                    request_count=1,
+                    token_count=100 + (op_id % 50),  # Variable token counts
+                )
             completed_ops += 1
 
         # Execute operations with controlled timing
@@ -134,33 +145,34 @@ class TestRedisPerformanceBaselines:
 
         async def request_logging_batch(batch_id: int):
             """Simulate concurrent request logging"""
-            tasks = []
-            for i in range(ops_per_batch):
-                task = RedisRequestLog.create(
-                    source_ip=f"192.168.1.{(batch_id * ops_per_batch + i) % 255}",
-                    method="POST",
-                    path="/v1/chat/completions",
-                    service_type="openai",
-                    upstream_url=f"https://api.openai.com/batch/{batch_id}/op/{i}",
-                )
-                tasks.append(task)
-            return await asyncio.gather(*tasks)
+            async def one(i: int):
+                async with sem:
+                    return await RedisRequestLog.create(
+                        source_ip=f"192.168.1.{(batch_id * ops_per_batch + i) % 255}",
+                        method="POST",
+                        path="/v1/chat/completions",
+                        service_type="openai",
+                        upstream_url=f"https://api.openai.com/batch/{batch_id}/op/{i}",
+                    )
+
+            return await asyncio.gather(*[one(i) for i in range(ops_per_batch)])
 
         async def quota_tracking_batch(batch_id: int):
             """Simulate concurrent quota tracking"""
-            tasks = []
-            for i in range(ops_per_batch):
-                task = RedisApiKeyQuota.increment_usage(
-                    api_key=f"sk-concurrent-{batch_id}-{i % 5}",
-                    provider_id="openai",
-                    model_name="gpt-4",
-                    request_count=1,
-                    token_count=150 + i,
-                )
-                tasks.append(task)
-            return await asyncio.gather(*tasks)
+            async def one(i: int):
+                async with sem:
+                    return await RedisApiKeyQuota.increment_usage(
+                        api_key=f"sk-concurrent-{batch_id}-{i % 5}",
+                        provider_id="openai",
+                        model_name="gpt-4",
+                        request_count=1,
+                        token_count=150 + i,
+                    )
+
+            return await asyncio.gather(*[one(i) for i in range(ops_per_batch)])
 
         start_time = time.time()
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         # Execute both types of operations concurrently
         logging_tasks = [request_logging_batch(i) for i in range(concurrent_batches)]
@@ -202,23 +214,23 @@ class TestRedisPerformanceBaselines:
         print(f"\n📝 Request Logging Performance: {num_requests} logs")
 
         start_time = time.time()
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         # Create request logs in batches for realistic load pattern
-        tasks = []
-        for i in range(num_requests):
-            task = RedisRequestLog.create(
-                source_ip=f"10.0.{i // 256}.{i % 256}",
-                method="POST" if i % 2 == 0 else "GET",
-                path=f"/v1/chat/completions/{i}",
-                service_type="openai",
-                upstream_url="https://api.openai.com/v1/chat/completions",
-                original_model="gpt-4",
-                mapped_model="gpt-4",
-                request_size=1000 + (i % 500),
-            )
-            tasks.append(task)
+        async def one(i: int):
+            async with sem:
+                return await RedisRequestLog.create(
+                    source_ip=f"10.0.{i // 256}.{i % 256}",
+                    method="POST" if i % 2 == 0 else "GET",
+                    path=f"/v1/chat/completions/{i}",
+                    service_type="openai",
+                    upstream_url="https://api.openai.com/v1/chat/completions",
+                    original_model="gpt-4",
+                    mapped_model="gpt-4",
+                    request_size=1000 + (i % 500),
+                )
 
-        request_ids = await asyncio.gather(*tasks)
+        request_ids = await asyncio.gather(*[one(i) for i in range(num_requests)])
 
         end_time = time.time()
         duration = end_time - start_time
@@ -254,19 +266,20 @@ class TestRedisPerformanceBaselines:
         print(f"API keys: {num_api_keys}, Operations per key: {ops_per_key}")
 
         start_time = time.time()
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         # Simulate realistic quota tracking patterns
-        tasks = []
-        for key_id in range(num_api_keys):
-            for op_id in range(ops_per_key):
-                task = RedisApiKeyQuota.increment_usage(
+        async def one(key_id: int, op_id: int):
+            async with sem:
+                return await RedisApiKeyQuota.increment_usage(
                     api_key=f"sk-quota-perf-{key_id:03d}",
                     provider_id="openai",
                     model_name=f"gpt-{3.5 if op_id % 2 == 0 else 4}",
                     request_count=1,
                     token_count=50 + (op_id * 10),
                 )
-                tasks.append(task)
+
+        tasks = [one(key_id, op_id) for key_id in range(num_api_keys) for op_id in range(ops_per_key)]
 
         quota_results = await asyncio.gather(*tasks)
 
@@ -308,34 +321,36 @@ class TestRedisPerformanceBaselines:
         print(f"\n🔀 Mixed Workload Performance: {num_cycles} cycles")
 
         start_time = time.time()
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         async def mixed_operation_cycle(cycle_id: int):
             """Single cycle of mixed operations"""
-            # 1. Create request log
-            request_id = await RedisRequestLog.create(
-                source_ip=f"172.16.{cycle_id % 255}.1",
-                method="POST",
-                path="/v1/chat/completions",
-                service_type="openai",
-                upstream_url="https://api.openai.com/v1/chat/completions",
-            )
+            async with sem:
+                # 1. Create request log
+                request_id = await RedisRequestLog.create(
+                    source_ip=f"172.16.{cycle_id % 255}.1",
+                    method="POST",
+                    path="/v1/chat/completions",
+                    service_type="openai",
+                    upstream_url="https://api.openai.com/v1/chat/completions",
+                )
 
-            # 2. Track quota usage
-            quota_result = await RedisApiKeyQuota.increment_usage(
-                api_key=f"sk-mixed-{cycle_id % 10}",
-                provider_id="openai",
-                model_name="gpt-4",
-                request_count=1,
-                token_count=200 + cycle_id,
-            )
+                # 2. Track quota usage
+                quota_result = await RedisApiKeyQuota.increment_usage(
+                    api_key=f"sk-mixed-{cycle_id % 10}",
+                    provider_id="openai",
+                    model_name="gpt-4",
+                    request_count=1,
+                    token_count=200 + cycle_id,
+                )
 
-            # 3. Retrieve request data (read operation)
-            request_data = await RedisRequestLog.get_by_id(request_id)
+                # 3. Retrieve request data (read operation)
+                request_data = await RedisRequestLog.get_by_id(request_id)
 
-            # 4. Complete the request
-            await RedisRequestLog.update_completion(
-                request_id=request_id, status_code=200, response_size=500 + cycle_id, error_message=None
-            )
+                # 4. Complete the request
+                await RedisRequestLog.update_completion(
+                    request_id=request_id, status_code=200, response_size=500 + cycle_id, error_message=None
+                )
 
             return {"request_id": request_id, "quota": quota_result, "request_data": request_data}
 
@@ -382,20 +397,20 @@ class TestRedisPerformanceBaselines:
         _circuit_breaker.state = "CLOSED"
 
         start_time = time.time()
+        sem = asyncio.Semaphore(MAX_INFLIGHT_OPS)
 
         # Perform operations that should succeed with FakeRedis
-        tasks = []
-        for i in range(num_operations):
-            task = RedisApiKeyQuota.increment_usage(
-                api_key=f"sk-circuit-test-{i % 5}",
-                provider_id="openai",
-                model_name="gpt-4",
-                request_count=1,
-                token_count=100,
-            )
-            tasks.append(task)
+        async def one(i: int):
+            async with sem:
+                return await RedisApiKeyQuota.increment_usage(
+                    api_key=f"sk-circuit-test-{i % 5}",
+                    provider_id="openai",
+                    model_name="gpt-4",
+                    request_count=1,
+                    token_count=100,
+                )
 
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*[one(i) for i in range(num_operations)])
 
         end_time = time.time()
         duration = end_time - start_time
