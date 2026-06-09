@@ -640,15 +640,15 @@
             }
 
             const escapedValue = String(value)
-                .replaceAll('\\', '\\\\')
-                .replaceAll('"', '\\"');
+                .replaceAll('\\', String.raw`\\`)
+                .replaceAll('"', String.raw`\"`);
             return `"${escapedValue}"`;
         }
 
         function upsertFilterClause(query, field, value) {
-            const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
             const clausePattern = new RegExp(
-                '(^|\\s)' + escapedField + ':(?:"(?:\\\\.|[^"])*"|\'(?:\\\\.|[^\'])*\'|\\S+)',
+                String.raw`(^|\s)` + escapedField + String.raw`:(?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|\S+)`,
                 'gi'
             );
             const cleanedQuery = (query || '').replace(clausePattern, ' ').replace(/\s+/g, ' ').trim();
