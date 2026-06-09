@@ -42,20 +42,26 @@ def provider():
 def test_to_pacific_datetime_naive_assume_local():
     naive = datetime(2026, 1, 1, 12, 0, 0)
     result = _to_pacific_datetime(naive, assume_utc=False)
-    assert result.tzinfo is not None
+    # Naive value is reinterpreted as Pacific without shifting the wall clock.
+    assert result.tzinfo.key == "America/Los_Angeles"
+    assert result.tzname() == "PST"  # Jan 1 -> standard time
+    assert result.hour == 12
 
 
 def test_to_pacific_datetime_naive_assume_utc():
     naive = datetime(2026, 1, 1, 12, 0, 0)
     result = _to_pacific_datetime(naive, assume_utc=True)
-    # Converted from UTC to Pacific -> wall-clock hour shifts back
-    assert result.tzinfo is not None
-    assert result.hour != 12
+    # 2026-01-01 12:00 UTC -> 04:00 PST (UTC-8)
+    assert result.tzinfo.key == "America/Los_Angeles"
+    assert result.hour == 4
 
 
 def test_to_pacific_datetime_aware_is_converted():
     aware = datetime(2026, 1, 1, 20, 0, 0, tzinfo=timezone.utc)
     result = _to_pacific_datetime(aware)
+    # 2026-01-01 20:00 UTC -> 12:00 PST
+    assert result.tzinfo.key == "America/Los_Angeles"
+    assert result.hour == 12
     assert result.utcoffset() != aware.utcoffset()
 
 
@@ -188,6 +194,8 @@ def test_convert_genai_to_openai_response(provider):
     meta = SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5)
     genai_resp = SimpleNamespace(text="answer", usage_metadata=meta)
     out = provider._convert_genai_to_openai_response(genai_resp, "gemini-2.5-flash")
+    assert out["id"].startswith("chatcmpl-")
+    assert isinstance(out["created"], int)
     assert out["object"] == "chat.completion"
     assert out["model"] == "gemini-2.5-flash"
     assert out["choices"][0]["message"]["content"] == "answer"
@@ -302,7 +310,10 @@ def test_build_live_model_metadata(provider):
     meta = provider._build_live_google_model_metadata(model, ["generateContent"])
     assert meta["full_name"] == "models/gemini-2.5-flash"
     assert meta["display_name"] == "Gemini 2.5 Flash"
+    assert meta["description"] == "fast"
     assert meta["supported_methods"] == ["generateContent"]
+    assert meta["input_token_limit"] == 1000
+    assert meta["output_token_limit"] == 2000
 
 
 def test_build_static_model_metadata(provider):
@@ -310,6 +321,8 @@ def test_build_static_model_metadata(provider):
     meta = provider._build_static_google_model_metadata(data, ["generateContent"])
     assert meta["full_name"] == "models/gemini-2.0-flash"
     assert meta["display_name"] == "gemini-2.0-flash"  # falls back to extracted name
+    assert meta["description"] == "d"
+    assert meta["supported_methods"] == ["generateContent"]
     assert meta["thinking"] is True
     assert meta["input_token_limit"] == 5
 
