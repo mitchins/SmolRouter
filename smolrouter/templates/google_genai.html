@@ -372,7 +372,7 @@
 
                 // Render each model
                 for (const model of Array.from(allModels).sort()) {
-                    const modelStats = [];
+
                     let totalRequests = 0;
                     let totalTokens = 0;
                     let availableCount = 0;
@@ -381,7 +381,7 @@
                     let lastActivity = null;
 
                     // Aggregate stats across all keys for this model
-                    for (const [keyName, keyData] of Object.entries(providerData)) {
+                    for (const keyData of Object.values(providerData)) {
                         if (typeof keyData === 'object' && keyData.models && keyData.models[model]) {
                             const modelData = keyData.models[model];
                             totalRequests += modelData.requests_today;
