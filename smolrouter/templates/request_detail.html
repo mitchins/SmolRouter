@@ -4,8 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Request #{{ log.id }} - SmolRouter</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link href="/static/fonts/fonts.css" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -136,13 +135,18 @@
         }
         
         .collapsible-header {
+            width: 100%;
             background: #f8f9fa;
             padding: 1rem 1.5rem;
             cursor: pointer;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            border: none;
             border-bottom: 1px solid #e0e0e0;
+            font: inherit;
+            color: inherit;
+            text-align: left;
         }
         
         .collapsible-header:hover {
@@ -412,10 +416,10 @@
             <!-- Request Body -->
             {% if request_body_str %}
             <div class="collapsible">
-                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                <button type="button" class="collapsible-header">
                     <span class="collapsible-title">Request Body</span>
                     <span class="material-icons collapsible-icon">expand_more</span>
-                </div>
+                </button>
                 <div class="collapsible-content">
                     <div class="code-block">{{ request_body_str }}</div>
                 </div>
@@ -425,10 +429,10 @@
             <!-- Duplicate Requests -->
             {% if duplicates and duplicates|length > 0 %}
             <div class="collapsible open">
-                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                <button type="button" class="collapsible-header">
                     <span class="collapsible-title">Duplicate Requests ({{ duplicates|length }})</span>
                     <span class="material-icons collapsible-icon">expand_more</span>
-                </div>
+                </button>
                 <div class="collapsible-content">
                     <div style="padding: 0.5rem 0;">
                         {% for d in duplicates %}
@@ -451,10 +455,10 @@
             <!-- Response Body -->
             {% if response_body_str %}
             <div class="collapsible">
-                <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                <button type="button" class="collapsible-header">
                     <span class="collapsible-title">Response Body</span>
                     <span class="material-icons collapsible-icon">expand_more</span>
-                </div>
+                </button>
                 <div class="collapsible-content">
                     <div class="code-block">{{ response_body_str }}</div>
                 </div>
@@ -468,7 +472,12 @@
             const collapsible = header.parentElement;
             collapsible.classList.toggle('open');
         }
-        
+
+        // Collapsible headers are <button>s, so Enter/Space already activate
+        // them via the native click; just wire the toggle behaviour.
+        document.querySelectorAll('.collapsible-header').forEach(function (header) {
+            header.addEventListener('click', function () { toggleCollapsible(header); });
+        });
         // Auto-refresh if request is still inflight
         {% if not log.completed_at %}
         setTimeout(() => {

@@ -1,0 +1,275 @@
+/*
+ * Shared dashboard styles for the SmolRouter Web UI.
+ * Extracted from index.html and client_dashboard.html (which previously
+ * inlined identical CSS) into a single source of truth served as a static
+ * asset. Page-specific overrides remain inline on each page.
+ */
+
+.stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.stat-card {
+    background: white;
+    padding: 1.5rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    text-align: center;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.stat-card .number {
+    font-size: 2rem;
+    font-weight: bold;
+    margin-bottom: 0.5rem;
+}
+
+.stat-card .label {
+    color: #666;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 2rem 2rem 2rem;
+}
+
+.table-container {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+.table-header {
+    background: #f8f9fa;
+    padding: 1.5rem;
+    border-bottom: 1px solid #e0e0e0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.table-header h2 {
+    margin: 0;
+    color: #333;
+    font-size: 1.25rem;
+}
+
+.action-buttons {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.action-btn {
+    background: #007bff;
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: background 0.2s;
+}
+
+.action-btn:hover {
+    background: #0056b3;
+}
+
+.action-btn.secondary {
+    background: #6c757d;
+}
+
+.action-btn.secondary:hover {
+    background: #5a6268;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th, td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+th {
+    background: #f8f9fa;
+    font-weight: 600;
+    color: #495057;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+tr:hover {
+    background: #f8f9fa;
+}
+
+.status {
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status-200 { background: #d4edda; color: #155724; }
+
+.status-400 { background: #fff3cd; color: #856404; }
+
+.status-500 { background: #f8d7da; color: #721c24; }
+
+.service-badge {
+    background: #e3f2fd;
+    color: #0d47a1;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.service-ollama { background: #e8f5e8; color: #2e7d32; }
+
+.service-openai { background: #fff3e0; color: #f57c00; }
+
+.duration {
+    font-family: 'Monaco', 'Menlo', monospace;
+    font-size: 0.75rem;
+    color: #666;
+}
+
+.timestamp {
+    font-size: 0.75rem;
+    color: #666;
+}
+
+.no-data {
+    text-align: center;
+    padding: 3rem;
+    color: #666;
+    font-style: italic;
+}
+
+.model-info {
+    font-size: 0.8rem;
+}
+
+.model-original {
+    color: #666;
+}
+
+.model-mapped {
+    color: #333;
+    font-weight: 500;
+}
+
+.error-message {
+    background: #f8d7da;
+    color: #721c24;
+    padding: 1rem;
+    border-radius: 4px;
+    margin: 1rem;
+    text-align: center;
+}
+
+.auto-refresh-status {
+    font-size: 0.8rem;
+    color: #666;
+    margin-left: 1rem;
+}
+
+.json-header {
+    background: #e9ecef;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #dee2e6;
+    font-size: 0.8rem;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.json-toggle {
+    background: none;
+    border: none;
+    color: #007bff;
+    cursor: pointer;
+    font-size: 0.7rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+}
+
+.json-toggle:hover {
+    background: rgba(0, 123, 255, 0.1);
+}
+
+.json-content {
+    padding: 0.75rem;
+    font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.json-content.collapsed {
+    display: none;
+}
+
+/* JSON Syntax Highlighting */
+.json-key { color: #0451a5; font-weight: 600; }
+
+.json-string { color: #0a3069; }
+
+.json-number { color: #098658; }
+
+.json-boolean { color: #0550ae; font-weight: 600; }
+
+.json-null { color: #6f7681; font-style: italic; }
+
+/* Expandable rows */
+.expandable-row {
+    cursor: pointer;
+}
+
+.row-details {
+    background: #f8f9fa;
+    border-top: 1px solid #e9ecef;
+}
+
+.row-details td {
+    padding: 1rem;
+    border-bottom: none;
+}
+
+.expand-icon {
+    transition: transform 0.2s;
+    font-size: 1rem;
+    margin-right: 0.5rem;
+    color: #666;
+}
+
+.expand-icon.expanded {
+    transform: rotate(90deg);
+}

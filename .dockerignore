@@ -15,7 +15,6 @@ README.md
 *.md
 docs/
 images/
-templates/
 
 # Configuration files with secrets
 routes.yaml
@@ -68,4 +67,3 @@ Thumbs.db
 !uv.lock
 !smolrouter/
 !routes.yaml.example
-!templates/

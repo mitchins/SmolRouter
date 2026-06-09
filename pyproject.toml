@@ -61,6 +61,10 @@ include-package-data = true
 [tool.setuptools.package-data]
 smolrouter = [
     "templates/*.html",
+    "static/css/*.css",
+    "static/vendor/*.js",
+    "static/fonts/*.css",
+    "static/fonts/*.woff2",
 ]
 
 # Linting configuration migrated from setup.cfg

@@ -27,7 +27,6 @@ COPY --from=builder /app/.venv /app/.venv
 
 # Copy application code (excluding secrets and crud)
 COPY smolrouter/ ./smolrouter/
-COPY templates/ ./templates/
 COPY pyproject.toml ./
 
 # Create volume mount point for configuration

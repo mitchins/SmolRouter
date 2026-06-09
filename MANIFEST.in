@@ -1,1 +1,3 @@
-recursive-include templates *.html
+recursive-include smolrouter/templates *.html
+recursive-include smolrouter/static *.css *.woff2 *.js
+recursive-include smolrouter/static/vendor *.md
