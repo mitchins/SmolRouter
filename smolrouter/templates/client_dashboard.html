@@ -232,6 +232,7 @@
 
                 return highlightJSON(displayLines.join('\n') + truncatedText);
             } catch (e) {
+                console.warn('JSON formatting failed:', e);
                 return `<span style="color: #666;">${escapeHtml(jsonString)}</span>`;
             }
         }
@@ -324,7 +325,7 @@
                     error_message: data.error_message
                 };
 
-                if (Object.values(metadata).some(v => v)) {
+                if (Object.values(metadata).some(Boolean)) {
                     detailsHTML += createJSONDisplay('Metadata', JSON.stringify(metadata, null, 2), requestId);
                 }
 
@@ -428,8 +429,8 @@
 
         // WebSocket connection management
         function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/clients/${CLIENT_IP}`;
+            const protocol = globalThis.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${globalThis.location.host}/ws/clients/${CLIENT_IP}`;
 
             try {
                 websocket = new WebSocket(wsUrl);
@@ -514,7 +515,7 @@
 
             const newRow = document.createElement('tr');
             newRow.className = 'expandable-row';
-            newRow.onclick = () => window.location.href = `/request/${request.id}`;
+            newRow.onclick = () => globalThis.location.href = `/request/${request.id}`;
             newRow.innerHTML = `
                 <td data-label="" aria-hidden="true">
                     <span class="material-icons expand-icon">chevron_right</span>
@@ -535,7 +536,10 @@
             tbody.insertBefore(newRow, tbody.firstChild);
 
             while (tbody.children.length > 100) {
-                tbody.removeChild(tbody.lastChild);
+                const lastRow = tbody.lastElementChild;
+                if (lastRow) {
+                    lastRow.remove();
+                }
             }
         }
 
@@ -562,7 +566,7 @@
                         <td data-label="Status">${formatStatus(request.status_code)}</td>
                     `;
 
-                    row.onclick = () => window.location.href = `/request/${request.id}`;
+                    row.onclick = () => globalThis.location.href = `/request/${request.id}`;
                     break;
                 }
             }

@@ -502,14 +502,14 @@
             
             // Download
             const blob = new Blob([csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
+            const url = globalThis.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
             a.download = `smolrouter-performance-${new Date().toISOString().split('T')[0]}.csv`;
             document.body.appendChild(a);
             a.click();
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
+            a.remove();
+            globalThis.URL.revokeObjectURL(url);
         }
         
         // Load data on page load
