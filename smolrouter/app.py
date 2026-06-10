@@ -2221,7 +2221,7 @@ async def api_error_recent(limit: int = 100):
         return JSONResponse(content={"error": "Failed to get recent errors"}, status_code=500)
 
 
-@app.get("/api/errors/{signature}")
+@app.get("/api/errors/{signature}", responses={404: {"description": "Signature not found"}})
 async def api_error_signature(signature: str):
     """Get aggregated details for a specific exception signature."""
     try:
@@ -2232,11 +2232,11 @@ async def api_error_signature(signature: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"Error getting exception signature detail: {e}")
+        logger.exception("Error getting exception signature detail")
         return JSONResponse(content={"error": "Failed to get signature detail"}, status_code=500)
 
 
-@app.patch("/api/errors/{signature}")
+@app.patch("/api/errors/{signature}", responses={404: {"description": "Signature not found"}})
 async def api_update_error_signature(signature: str, request: Request):
     """Update state and/or notes for an exception signature."""
     try:
@@ -2278,7 +2278,7 @@ async def api_update_error_signature(signature: str, request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"Error updating exception signature {signature}: {e}")
+        logger.exception("Error updating exception signature state")
         return JSONResponse(content={"error": "Failed to update signature"}, status_code=500)
 
 

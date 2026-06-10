@@ -39,6 +39,7 @@ ERROR_EVENT_INDEX_KEY = "errors:events"
 ERROR_EVENTS_BY_SIGNATURE_PREFIX = "errors:signature_events:"
 ERROR_SIGNATURE_REQUEST_IDS_KEY = ":request_ids"
 MAX_EXCEPTION_MESSAGE_LENGTH = 1000
+UNKNOWN_VALUE = "<unknown>"
 
 _EXCEPTION_SIGNATURE_AGGREGATE_LUA_SCRIPT = """
 local event_id = ARGV[1]
@@ -226,22 +227,22 @@ def _extract_exception_top_frame(exception: BaseException) -> str:
     try:
         tb = traceback.extract_tb(exception.__traceback__)
         if not tb:
-            return "<unknown>"
+            return UNKNOWN_VALUE
 
         for frame in reversed(tb):
-            filename = _to_str(frame.filename) or "<unknown>"
+            filename = _to_str(frame.filename) or UNKNOWN_VALUE
             if "/site-packages/" not in filename and "/fastapi/" not in filename and "/starlette/" not in filename:
                 return f"{os.path.basename(filename)}:{frame.lineno}:{frame.name}"
 
         frame = tb[-1]
-        return f"{os.path.basename(_to_str(frame.filename) or 'unknown')}:{frame.lineno}:{frame.name}"
+        return f"{os.path.basename(_to_str(frame.filename) or UNKNOWN_VALUE)}:{frame.lineno}:{frame.name}"
     except Exception:
-        return "<unknown>"
+        return UNKNOWN_VALUE
 
 
 def _build_exception_signature(exception: BaseException, route: str | None, message: str | None) -> tuple[str, dict]:
     exception_class = type(exception).__name__
-    route_pattern = route or "<unknown>"
+    route_pattern = route or UNKNOWN_VALUE
     top_frame = _extract_exception_top_frame(exception)
     normalized_message = _normalize_exception_message(message or str(exception))
 
@@ -253,6 +254,49 @@ def _build_exception_signature(exception: BaseException, route: str | None, mess
     }
     signature_hash = hashlib.sha256(json.dumps(signature_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
     return signature_hash, signature_payload
+
+
+async def _load_exception_signature_state(
+    exception_signature_key: str, status_code_key: str
+) -> tuple[int, str | None, str | None, str | None, dict[str, int]]:
+    existing_count_value = await redis_client.hget(exception_signature_key, "count")
+    existing_count = int(existing_count_value) if existing_count_value not in (None, "", b"", "None", b"None") else 0
+
+    first_seen = await redis_client.hget(exception_signature_key, "first_seen")
+    existing_state = await redis_client.hget(exception_signature_key, "state")
+    existing_notes = await redis_client.hget(exception_signature_key, "notes")
+
+    raw_status_codes = await redis_client.hget(exception_signature_key, "status_codes")
+    status_codes = _safe_json_loads(raw_status_codes, default={}) or {}
+    if not isinstance(status_codes, dict):
+        status_codes = {}
+    status_codes[status_code_key] = int(status_codes.get(status_code_key, 0)) + 1
+
+    return existing_count, first_seen, existing_state, existing_notes, status_codes
+
+
+async def _refresh_signature_request_ids(signature_request_ids_key: str, request_id: str | None) -> list[str]:
+    if request_id:
+        await redis_client.lrem(signature_request_ids_key, 0, request_id)
+        await redis_client.lpush(signature_request_ids_key, request_id)
+        await redis_client.ltrim(signature_request_ids_key, 0, 19)
+
+    request_ids_raw = await redis_client.lrange(signature_request_ids_key, 0, 19)
+    return [_to_str(item) for item in request_ids_raw if item]
+
+
+async def _apply_exception_record_ttl(
+    event_key: str, exception_signature_key: str, signature_request_ids_key: str, signature: str
+) -> None:
+    if MAX_AGE_DAYS <= 0:
+        return
+
+    ttl = MAX_AGE_DAYS * 24 * 60 * 60
+    if ttl > 0:
+        await redis_client.expire(event_key, ttl)
+        await redis_client.expire(exception_signature_key, ttl)
+        await redis_client.expire(signature_request_ids_key, ttl)
+        await redis_client.expire(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}", ttl)
 
 
 async def _record_exception_event_non_atomic(
@@ -277,34 +321,17 @@ async def _record_exception_event_non_atomic(
     signature_request_ids_key = f"{exception_signature_key}{ERROR_SIGNATURE_REQUEST_IDS_KEY}"
 
     event_key = f"{ERROR_EVENT_KEY_PREFIX}{event_id}"
-
-    existing_count_value = await redis_client.hget(exception_signature_key, "count")
-    existing_count = int(existing_count_value) if existing_count_value not in (None, "", b"", "None", b"None") else 0
-
-    first_seen = await redis_client.hget(exception_signature_key, "first_seen")
-    existing_state = await redis_client.hget(exception_signature_key, "state")
-    existing_notes = await redis_client.hget(exception_signature_key, "notes")
-
     status_code_key = str(int(status_code))
-    raw_status_codes = await redis_client.hget(exception_signature_key, "status_codes")
-    status_codes = _safe_json_loads(raw_status_codes, default={}) or {}
-    if not isinstance(status_codes, dict):
-        status_codes = {}
-    status_codes[status_code_key] = int(status_codes.get(status_code_key, 0)) + 1
-
-    if request_id:
-        await redis_client.lrem(signature_request_ids_key, 0, request_id)
-        await redis_client.lpush(signature_request_ids_key, request_id)
-        await redis_client.ltrim(signature_request_ids_key, 0, 19)
-
-    request_ids_raw = await redis_client.lrange(signature_request_ids_key, 0, 19)
-    request_ids = [_to_str(item) for item in request_ids_raw if item]
+    existing_count, first_seen, existing_state, existing_notes, status_codes = await _load_exception_signature_state(
+        exception_signature_key, status_code_key
+    )
+    request_ids = await _refresh_signature_request_ids(signature_request_ids_key, request_id)
 
     signature_data = {
         "id": event_id,
         "signature": signature,
         "exception_class": signature_metadata["exception_class"],
-        "route": route or request_path or "<unknown>",
+        "route": route or request_path or UNKNOWN_VALUE,
         "top_frame": signature_metadata["top_frame"],
         "normalized_message": signature_metadata["normalized_message"],
         "count": str(existing_count + 1),
@@ -336,7 +363,7 @@ async def _record_exception_event_non_atomic(
             "timestamp": now,
             "status_code": status_code_key,
             "exception_class": signature_metadata["exception_class"],
-            "route": route or request_path or "<unknown>",
+            "route": route or request_path or UNKNOWN_VALUE,
             "top_frame": signature_metadata["top_frame"],
             "message": str(exception),
             "stack_trace": stack_text,
@@ -344,14 +371,7 @@ async def _record_exception_event_non_atomic(
     )
     await redis_client.zadd(ERROR_EVENT_INDEX_KEY, {event_key: now_ts})
     await redis_client.zadd(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}", {event_id: now_ts})
-
-    if MAX_AGE_DAYS > 0:
-        ttl = MAX_AGE_DAYS * 24 * 60 * 60
-        if ttl > 0:
-            await redis_client.expire(event_key, ttl)
-            await redis_client.expire(exception_signature_key, ttl)
-            await redis_client.expire(signature_request_ids_key, ttl)
-            await redis_client.expire(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}", ttl)
+    await _apply_exception_record_ttl(event_key, exception_signature_key, signature_request_ids_key, signature)
 
     return signature_data
 
@@ -380,7 +400,7 @@ async def record_exception_event(
         stack = traceback.format_exception(type(exception), exception, exception.__traceback__)
         stack_text = "".join(stack)
         exception_class = signature_metadata["exception_class"]
-        resolved_route = route or request_path or "<unknown>"
+        resolved_route = route or request_path or UNKNOWN_VALUE
         status_code_key = str(int(status_code))
 
         exception_signature_key = f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}"
@@ -438,6 +458,50 @@ async def record_exception_event(
         return None
 
 
+async def _collect_exception_signature_summary(
+    signature_id: str,
+    class_counts: dict[str, int],
+    route_counts: dict[str, int],
+    status_code_counts: dict[str, int],
+) -> dict | None:
+    summary = await redis_client.hgetall(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature_id}")
+    if not summary:
+        return None
+
+    summary_dict = { _to_str(k): _to_str(v) for k, v in summary.items() }
+    count = int(summary_dict.get("count", 0) or 0)
+    exception_class = summary_dict.get("exception_class", "Unknown")
+    route = summary_dict.get("route", UNKNOWN_VALUE)
+
+    class_counts[exception_class] = class_counts.get(exception_class, 0) + count
+    route_counts[route] = route_counts.get(route, 0) + count
+
+    status_codes = _safe_json_loads(summary_dict.get("status_codes", "{}"), default={})
+    if isinstance(status_codes, dict):
+        for status_code, status_count in status_codes.items():
+            status_code_key = str(status_code)
+            status_code_counts[status_code_key] = status_code_counts.get(status_code_key, 0) + int(status_count)
+
+    affected_request_ids = _safe_json_loads(summary_dict.get("affected_request_ids", "[]"), default=[])
+
+    return {
+        "signature": signature_id,
+        "exception_class": exception_class,
+        "route": route,
+        "count": count,
+        "first_seen": summary_dict.get("first_seen"),
+        "last_seen": summary_dict.get("last_seen"),
+        "top_frame": summary_dict.get("top_frame"),
+        "normalized_message": summary_dict.get("normalized_message"),
+        "status_codes": status_codes if isinstance(status_codes, dict) else {},
+        "state": summary_dict.get("state", ERROR_SIGNATURE_STATES[0]),
+        "notes": summary_dict.get("notes", ""),
+        "latest_request_id": summary_dict.get("latest_request_id"),
+        "latest_stack_trace": summary_dict.get("latest_stack_trace"),
+        "affected_request_ids": affected_request_ids if isinstance(affected_request_ids, list) else [],
+    }
+
+
 async def get_error_summary(limit_signatures: int = 50) -> dict:
     try:
         signature_ids = list(await redis_client.smembers(ERROR_SIGNATURE_SET_KEY))
@@ -452,44 +516,11 @@ async def get_error_summary(limit_signatures: int = 50) -> dict:
                 signature_id = _to_str(signature_id)
             if not signature_id:
                 continue
-
-            summary = await redis_client.hgetall(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature_id}")
-            if not summary:
-                continue
-
-            summary_dict = { _to_str(k): _to_str(v) for k, v in summary.items() }
-            count = int(summary_dict.get("count", 0) or 0)
-            exception_class = summary_dict.get("exception_class", "Unknown")
-            route = summary_dict.get("route", "<unknown>")
-
-            class_counts[exception_class] = class_counts.get(exception_class, 0) + count
-            route_counts[route] = route_counts.get(route, 0) + count
-
-            codes = _safe_json_loads(summary_dict.get("status_codes", "{}"), default={})
-            if isinstance(codes, dict):
-                for status_code, status_count in codes.items():
-                    status_code_counts[str(status_code)] = status_code_counts.get(str(status_code), 0) + int(status_count)
-
-            affected_request_ids = _safe_json_loads(summary_dict.get("affected_request_ids", "[]"), default=[])
-
-            summaries.append(
-                {
-                    "signature": signature_id,
-                    "exception_class": exception_class,
-                    "route": route,
-                    "count": count,
-                    "first_seen": summary_dict.get("first_seen"),
-                    "last_seen": summary_dict.get("last_seen"),
-                    "top_frame": summary_dict.get("top_frame"),
-                    "normalized_message": summary_dict.get("normalized_message"),
-                    "status_codes": codes if isinstance(codes, dict) else {},
-                    "state": summary_dict.get("state", ERROR_SIGNATURE_STATES[0]),
-                    "notes": summary_dict.get("notes", ""),
-                    "latest_request_id": summary_dict.get("latest_request_id"),
-                    "latest_stack_trace": summary_dict.get("latest_stack_trace"),
-                    "affected_request_ids": affected_request_ids if isinstance(affected_request_ids, list) else [],
-                }
+            summary = await _collect_exception_signature_summary(
+                signature_id, class_counts, route_counts, status_code_counts
             )
+            if summary is not None:
+                summaries.append(summary)
 
         summaries.sort(key=lambda item: item.get("count", 0), reverse=True)
         if limit_signatures > 0:
@@ -522,7 +553,7 @@ async def get_error_summary(limit_signatures: int = 50) -> dict:
 
 async def get_error_recent_events(limit: int = 100):
     try:
-        recent_ids = [item for item in await redis_client.zrevrange(ERROR_EVENT_INDEX_KEY, 0, max(limit - 1, 0))]
+        recent_ids = list(await redis_client.zrevrange(ERROR_EVENT_INDEX_KEY, 0, max(limit - 1, 0)))
         events = []
 
         for event_id in recent_ids:
@@ -571,7 +602,7 @@ async def get_exception_signature_detail(signature: str):
         return {
             "signature": signature,
             "exception_class": summary.get("exception_class", "Unknown"),
-            "route": summary.get("route", "<unknown>"),
+            "route": summary.get("route", UNKNOWN_VALUE),
             "top_frame": summary.get("top_frame", ""),
             "normalized_message": summary.get("normalized_message", ""),
             "count": int(summary.get("count", 0) or 0),
@@ -589,7 +620,7 @@ async def get_exception_signature_detail(signature: str):
             "recent_events": events,
         }
     except Exception:
-        logger.exception(f"Failed to get exception signature detail for {signature}")
+        logger.exception("Failed to get exception signature detail")
         return None
 
 
@@ -614,7 +645,7 @@ async def set_exception_signature_state(signature: str, state: str | None = None
         updated = await redis_client.hgetall(key)
         return { _to_str(k): _to_str(v) for k, v in updated.items() }
     except Exception:
-        logger.exception(f"Failed to update exception signature state for {signature}")
+        logger.exception("Failed to update exception signature state")
         return None
 
 
@@ -987,72 +1018,83 @@ async def cleanup_old_logs_async(max_age_days: int | None = None) -> int:
             return 0
 
         cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
-        # Get old request IDs
-        old_ids = await client.zrangebyscore("requests:by_time", 0, cutoff_ts)
-        deleted = 0
-        for request_id in old_ids:
-            key = f"request:{request_id}"
-            data = await client.hgetall(key)
-            # Remove from IP index if present
-            source_ip = data.get("source_ip") if data else None
-            if source_ip:
-                await client.srem(f"requests:by_ip:{source_ip}", request_id)
-            # Delete hash and sorted set entry
-            await client.delete(key)
-            await client.zrem("requests:by_time", request_id)
-            deleted += 1
-
-        old_error_event_keys = await client.zrangebyscore(ERROR_EVENT_INDEX_KEY, 0, cutoff_ts)
-        signatures_touched: set[str] = set()
-        for event_key in old_error_event_keys:
-            error_event_key = _to_str(event_key)
-            if not error_event_key:
-                continue
-
-            event_data = await client.hgetall(error_event_key)
-            signature = _to_str(event_data.get("signature", "")) if event_data else None
-
-            event_id = error_event_key
-            if event_id.startswith(ERROR_EVENT_KEY_PREFIX):
-                event_id = error_event_key.replace(ERROR_EVENT_KEY_PREFIX, "", 1)
-
-            await client.delete(error_event_key)
-            await client.zrem(ERROR_EVENT_INDEX_KEY, error_event_key)
-            deleted += 1
-
-            if signature:
-                signatures_touched.add(signature)
-                await client.zrem(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}", event_id)
-
-        stale_signatures = await client.smembers(ERROR_SIGNATURE_SET_KEY)
-        for stale_signature in stale_signatures:
-            stale_signature_text = _to_str(stale_signature)
-            if not stale_signature_text:
-                continue
-
-            signature_key = f"{ERROR_SIGNATURE_KEY_PREFIX}{stale_signature_text}"
-            exists = await client.exists(signature_key)
-            if not exists:
-                signatures_touched.add(stale_signature_text)
-
-        for signature in signatures_touched:
-            signature_key = f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}"
-            if not await client.exists(signature_key):
-                await client.delete(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}")
-                await client.delete(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}{ERROR_SIGNATURE_REQUEST_IDS_KEY}")
-                await client.srem(ERROR_SIGNATURE_SET_KEY, signature)
-                continue
-
-            events_for_signature = await client.zcard(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}")
-            if events_for_signature == 0:
-                await client.delete(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}")
-                await client.delete(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}")
-                await client.delete(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}{ERROR_SIGNATURE_REQUEST_IDS_KEY}")
-                await client.srem(ERROR_SIGNATURE_SET_KEY, signature)
+        deleted = await _cleanup_old_request_logs(client, cutoff_ts)
+        error_deleted, signatures_touched = await _cleanup_old_error_events(client, cutoff_ts)
+        deleted += error_deleted
+        await _cleanup_orphaned_error_signatures(client, signatures_touched)
         return deleted
     except Exception as e:
         logger.error(f"Error during cleanup_old_logs_async: {e}")
         return 0
+
+
+async def _cleanup_old_request_logs(client, cutoff_ts: float) -> int:
+    old_ids = await client.zrangebyscore("requests:by_time", 0, cutoff_ts)
+    deleted = 0
+    for request_id in old_ids:
+        key = f"request:{request_id}"
+        data = await client.hgetall(key)
+        source_ip = data.get("source_ip") if data else None
+        if source_ip:
+            await client.srem(f"requests:by_ip:{source_ip}", request_id)
+        await client.delete(key)
+        await client.zrem("requests:by_time", request_id)
+        deleted += 1
+    return deleted
+
+
+async def _cleanup_old_error_events(client, cutoff_ts: float) -> tuple[int, set[str]]:
+    old_error_event_keys = await client.zrangebyscore(ERROR_EVENT_INDEX_KEY, 0, cutoff_ts)
+    signatures_touched: set[str] = set()
+    deleted = 0
+    for event_key in old_error_event_keys:
+        error_event_key = _to_str(event_key)
+        if not error_event_key:
+            continue
+
+        event_data = await client.hgetall(error_event_key)
+        signature = _to_str(event_data.get("signature", "")) if event_data else None
+
+        event_id = error_event_key
+        if event_id.startswith(ERROR_EVENT_KEY_PREFIX):
+            event_id = error_event_key.replace(ERROR_EVENT_KEY_PREFIX, "", 1)
+
+        await client.delete(error_event_key)
+        await client.zrem(ERROR_EVENT_INDEX_KEY, error_event_key)
+        deleted += 1
+
+        if signature:
+            signatures_touched.add(signature)
+            await client.zrem(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}", event_id)
+
+    return deleted, signatures_touched
+
+
+async def _delete_error_signature_artifacts(client, signature: str) -> None:
+    await client.delete(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}")
+    await client.delete(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}")
+    await client.delete(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}{ERROR_SIGNATURE_REQUEST_IDS_KEY}")
+    await client.srem(ERROR_SIGNATURE_SET_KEY, signature)
+
+
+async def _cleanup_orphaned_error_signatures(client, signatures_touched: set[str]) -> None:
+    stale_signatures = await client.smembers(ERROR_SIGNATURE_SET_KEY)
+    for stale_signature in stale_signatures:
+        stale_signature_text = _to_str(stale_signature)
+        if not stale_signature_text:
+            continue
+
+        if not await client.exists(f"{ERROR_SIGNATURE_KEY_PREFIX}{stale_signature_text}"):
+            signatures_touched.add(stale_signature_text)
+
+    for signature in signatures_touched:
+        signature_key = f"{ERROR_SIGNATURE_KEY_PREFIX}{signature}"
+        if not await client.exists(signature_key):
+            await _delete_error_signature_artifacts(client, signature)
+            continue
+
+        if await client.zcard(f"{ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}") == 0:
+            await _delete_error_signature_artifacts(client, signature)
 
 
 def cleanup_old_logs(max_age_days: int | None = None) -> int:

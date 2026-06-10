@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import smolrouter.database as database
 from unittest.mock import AsyncMock
 
@@ -148,6 +148,88 @@ def test_build_exception_signature_is_deterministic():
     assert metadata_a["exception_class"] == "RuntimeError"
     assert metadata_a["route"] == "/api/items"
     assert metadata_a["top_frame"]
+
+
+def test_to_str_handles_bytes_none_and_objects():
+    assert database._to_str(b"hello") == "hello"
+    assert database._to_str(bytearray(b"world")) == "world"
+    assert database._to_str(None) is None
+    assert database._to_str(123) == "123"
+
+
+def test_extract_exception_top_frame_prefers_application_frame():
+    def explode():
+        raise RuntimeError("boom")
+
+    try:
+        explode()
+    except RuntimeError as exc:
+        top_frame = database._extract_exception_top_frame(exc)
+
+    assert top_frame.endswith(":explode")
+    assert top_frame != database.UNKNOWN_VALUE
+
+
+def test_extract_exception_top_frame_returns_unknown_without_traceback():
+    assert database._extract_exception_top_frame(ValueError("boom")) == database.UNKNOWN_VALUE
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_logs_async_removes_stale_error_artifacts_and_orphans(isolated_db):
+    old_ts = (datetime.now(timezone.utc) - timedelta(days=2)).timestamp()
+    old_request_id = "req-old"
+    old_source_ip = "10.0.0.1"
+
+    await database.redis_client.hset(f"request:{old_request_id}", mapping={"source_ip": old_source_ip})
+    await database.redis_client.zadd("requests:by_time", {old_request_id: old_ts})
+    await database.redis_client.sadd(f"requests:by_ip:{old_source_ip}", old_request_id)
+
+    signature = "sig-old"
+    signature_key = f"{database.ERROR_SIGNATURE_KEY_PREFIX}{signature}"
+    signature_request_ids_key = f"{signature_key}{database.ERROR_SIGNATURE_REQUEST_IDS_KEY}"
+    event_key = f"{database.ERROR_EVENT_KEY_PREFIX}event-old"
+    signature_events_key = f"{database.ERROR_EVENTS_BY_SIGNATURE_PREFIX}{signature}"
+
+    await database.redis_client.hset(
+        signature_key,
+        mapping={
+            "signature": signature,
+            "count": "1",
+            "state": "unknown",
+            "notes": "",
+        },
+    )
+    await database.redis_client.lpush(signature_request_ids_key, old_request_id)
+    await database.redis_client.sadd(database.ERROR_SIGNATURE_SET_KEY, signature)
+    await database.redis_client.hset(
+        event_key,
+        mapping={
+            "signature": signature,
+            "request_id": old_request_id,
+            "timestamp": old_ts,
+            "status_code": "500",
+            "exception_class": "RuntimeError",
+            "route": "/api/test",
+            "top_frame": "test_database.py:1:explode",
+            "message": "boom",
+            "stack_trace": "trace",
+        },
+    )
+    await database.redis_client.zadd(database.ERROR_EVENT_INDEX_KEY, {event_key: old_ts})
+    await database.redis_client.zadd(signature_events_key, {"event-old": old_ts})
+
+    orphan_signature = "sig-orphan"
+    await database.redis_client.sadd(database.ERROR_SIGNATURE_SET_KEY, orphan_signature)
+
+    deleted = await database.cleanup_old_logs_async(max_age_days=1)
+
+    assert deleted == 2
+    assert not await database.redis_client.exists(f"request:{old_request_id}")
+    assert not await database.redis_client.exists(event_key)
+    assert not await database.redis_client.exists(signature_key)
+    assert not await database.redis_client.exists(signature_request_ids_key)
+    assert not await database.redis_client.exists(signature_events_key)
+    assert not await database.redis_client.exists(f"{database.ERROR_SIGNATURE_KEY_PREFIX}{orphan_signature}")
 
 def test_estimate_tokens_from_request_counts_chat_messages():
     request_data = {
