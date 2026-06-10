@@ -437,6 +437,12 @@ def test_split_next_sse_message_multi_event_keeps_remainder_intact():
     assert rest == "data: world\n\n"
 
 
+def test_split_next_sse_message_crlf_delimiter():
+    msg, rest = app._split_next_sse_message("data: hello\r\n\r\ndata: world\r\n\r\n")
+    assert msg == "data: hello"
+    assert rest == "data: world\r\n\r\n"
+
+
 def test_extract_sse_data_payload():
     assert app._extract_sse_data_payload("data: {}") == "{}"
     assert app._extract_sse_data_payload("event: ping") is None
