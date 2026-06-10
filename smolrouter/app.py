@@ -51,10 +51,11 @@ from smolrouter.task_utils import create_logged_task
 def configure_error_file_logging() -> None:
     log_dir = Path(os.getenv("LOG_DIR", "/app/logs"))
     error_log_file = Path(os.getenv("ERROR_LOG_FILE", str(log_dir / "error.log")))
+    logger = logging.getLogger("model-rerouter")
+
     try:
         error_log_file.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        logger = logging.getLogger("model-rerouter")
         logger.warning("Unable to create error log directory %s: %s", error_log_file.parent, exc)
         return
 
@@ -65,11 +66,16 @@ def configure_error_file_logging() -> None:
     file_formatter = logging.Formatter(
         "%(asctime)s %(name)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     )
-    file_handler = RotatingFileHandler(
-        filename=str(error_log_file),
-        maxBytes=max_bytes,
-        backupCount=backup_count,
-    )
+    try:
+        file_handler = RotatingFileHandler(
+            filename=str(error_log_file),
+            maxBytes=max_bytes,
+            backupCount=backup_count,
+        )
+    except Exception as exc:
+        logger.warning("Unable to initialize error file logging: %s", exc)
+        return
+
     file_handler.setLevel(logging.ERROR)
     file_handler.setFormatter(file_formatter)
 
@@ -2234,7 +2240,11 @@ async def api_error_signature(signature: str):
 async def api_update_error_signature(signature: str, request: Request):
     """Update state and/or notes for an exception signature."""
     try:
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
+
         state = payload.get("state") if isinstance(payload, dict) else None
         notes = payload.get("notes") if isinstance(payload, dict) else None
 

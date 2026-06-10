@@ -24,6 +24,11 @@ def create_logged_task(
     except RuntimeError:
         # No running loop available (e.g. during import-time bootstrapping).
         logger.warning("Unable to schedule background task %s: no running event loop", task_name)
+        try:
+            if hasattr(coro, "close"):
+                coro.close()
+        except Exception:
+            logger.debug("Failed to close unscheduled coroutine for %s", task_name, exc_info=True)
         return None
 
     def _on_done(done: Task[Any]) -> None:
@@ -31,7 +36,7 @@ def create_logged_task(
             done.result()
         except asyncio.CancelledError:
             pass
-        except BaseException:
+        except Exception:
             logger.exception("Unhandled exception in %s", task_name)
         finally:
             if done_callback is not None:

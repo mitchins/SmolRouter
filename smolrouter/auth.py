@@ -179,7 +179,11 @@ def create_auth_middleware():
             ).lower() in ("1", "true", "yes", "on")
 
             # Only apply auth to API endpoints
-            if request.url.path.startswith("/api/errors") and allow_error_dashboard_without_auth:
+            if (
+                request.method in {"GET", "HEAD", "OPTIONS"}
+                and request.url.path.startswith("/api/errors")
+                and allow_error_dashboard_without_auth
+            ):
                 return await call_next(request)
 
             if not (request.url.path.startswith("/v1/") or request.url.path.startswith("/api/")):
