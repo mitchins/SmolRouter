@@ -2231,7 +2231,7 @@ async def api_error_signature(signature: str):
         return detail
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Error getting exception signature detail")
         return JSONResponse(content={"error": "Failed to get signature detail"}, status_code=500)
 
@@ -2277,7 +2277,7 @@ async def api_update_error_signature(signature: str, request: Request):
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Error updating exception signature state")
         return JSONResponse(content={"error": "Failed to update signature"}, status_code=500)
 
