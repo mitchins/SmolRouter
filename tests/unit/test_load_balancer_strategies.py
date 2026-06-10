@@ -6,6 +6,8 @@ strategy filtering, best-host scoring, round-robin and fastest-host ordering,
 instance/host/global metric updates, and host health marking.
 """
 
+import pytest
+
 from smolrouter.load_balancer import (
     DistributionStrategy,
     HostMetrics,
@@ -69,7 +71,7 @@ def test_spread_first_host_empty_returns_empty():
     assert lb._apply_distribution_strategy([], DistributionStrategy.SPREAD_FIRST_HOST) == []
 
 
-def test_spread_best_host_filters_to_best(monkeypatch):
+def test_spread_best_host_filters_to_best():
     lb = _make_lb()
     _register_host(lb, "fast", ttft=0.1, rt=0.1)
     _register_host(lb, "slow", ttft=2.0, rt=2.0)
@@ -190,10 +192,14 @@ def test_update_instance_metrics_no_requests_is_noop():
 
 def test_update_instance_metrics_running_average():
     lb = _make_lb()
-    inst = _instance("a", total=1)
-    lb._update_instance_metrics(inst, response_time=2.0, ttft=0.4)
-    assert inst.avg_response_time == 2.0
-    assert inst.avg_ttft == 0.4
+    # total>1 with existing averages so the prior-average term is actually exercised:
+    # new_avg = (prior * (total-1) + sample) / total
+    inst = _instance("a", total=2)
+    inst.avg_response_time = 1.0
+    inst.avg_ttft = 0.2
+    lb._update_instance_metrics(inst, response_time=3.0, ttft=0.4)
+    assert inst.avg_response_time == 2.0  # (1.0*1 + 3.0)/2
+    assert inst.avg_ttft == pytest.approx(0.3)  # (0.2*1 + 0.4)/2
 
 
 def test_update_instance_metrics_skips_ttft_when_zero():
@@ -217,14 +223,16 @@ def test_update_host_metrics_unknown_host_is_noop():
 
 def test_update_host_metrics_success_accounting():
     lb = _make_lb()
-    _register_host(lb, "a", active=2)
+    # Pre-seed prior averages/total so the running-average math is genuinely tested.
+    _register_host(lb, "a", active=2, total=1, rt=1.0, ttft=0.2)
     inst = _instance("a")
-    lb._update_host_metrics(inst, response_time=1.0, success=True, ttft=0.5)
+    lb._update_host_metrics(inst, response_time=3.0, success=True, ttft=0.4)
     host = lb.hosts["a"]
     assert host.active_requests == 1  # decremented
-    assert host.total_requests == 1
+    assert host.total_requests == 2
     assert host.success_count == 1
-    assert host.avg_response_time == 1.0
+    assert host.avg_response_time == 2.0  # (1.0*1 + 3.0)/2
+    assert host.avg_ttft == pytest.approx(0.3)  # (0.2*1 + 0.4)/2
 
 
 def test_update_host_metrics_marks_unhealthy_on_high_failure_rate():

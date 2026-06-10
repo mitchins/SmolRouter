@@ -1,7 +1,7 @@
 # SmolRouter
 
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mitchins_SmolRouter&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mitchins_SmolRouter)
-[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=mitchins_SmolRouter&metric=coverage)](https://sonarcloud.io/summary/new_code?id=mitchins_SmolRouter)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=mitchins_SmolRouter&metric=coverage)](https://sonarcloud.io/summary/overall?id=mitchins_SmolRouter)
 
 SmolRouter is a lightweight AI gateway that keeps OpenAI-compatible clients running while you move traffic across any mix of providers.
 
