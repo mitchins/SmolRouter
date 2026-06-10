@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .interfaces import IModelCache, ModelInfo
+from .task_utils import create_logged_task
 
 logger = logging.getLogger(__name__)
-from smolrouter.task_utils import create_logged_task
 
 
 @dataclass
