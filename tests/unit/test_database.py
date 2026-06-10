@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import smolrouter.database as database
 
 from smolrouter.database import RequestLogEntry, estimate_tokens_from_request
 
@@ -12,12 +13,12 @@ def test_request_log_entry_save_schedules_completion_update(monkeypatch):
         await asyncio.sleep(0)
         return None
 
-    def fake_create_task(coro):
+    def fake_create_logged_task(coro, *_args, **_kwargs):
         scheduled.append(coro)
         coro.close()
 
     monkeypatch.setattr(RequestLogEntry, "_run_completion_update", fake_run_completion_update)
-    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(database, "create_logged_task", fake_create_logged_task)
 
     entry.save()
 
@@ -32,7 +33,7 @@ def test_request_log_entry_save_falls_back_to_asyncio_run(monkeypatch):
         await asyncio.sleep(0)
         return None
 
-    def fake_create_task(coro):
+    def fake_create_logged_task(coro, *_args, **_kwargs):
         coro.close()
         raise RuntimeError("no running event loop")
 
@@ -41,7 +42,7 @@ def test_request_log_entry_save_falls_back_to_asyncio_run(monkeypatch):
         coro.close()
 
     monkeypatch.setattr(RequestLogEntry, "_run_completion_update", fake_run_completion_update)
-    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(database, "create_logged_task", fake_create_logged_task)
     monkeypatch.setattr(asyncio, "run", fake_asyncio_run)
 
     entry.save()

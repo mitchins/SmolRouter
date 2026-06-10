@@ -1,6 +1,8 @@
 import os
+import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import re
 import time
 import hashlib
@@ -8,6 +10,7 @@ import inspect
 import yaml
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -23,8 +26,14 @@ from contextlib import asynccontextmanager
 from smolrouter.database import (
     RequestLog,
     get_recent_logs,
+    get_error_recent_events,
+    get_error_summary,
+    get_exception_signature_detail,
+    record_exception_event,
+    set_exception_signature_state,
     get_log_stats,
     get_inflight_requests,
+    ERROR_SIGNATURE_STATES,
     estimate_tokens_from_request,
     extract_tokens_from_openai_response,
     estimate_token_count,
@@ -36,9 +45,44 @@ from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
 from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
+from smolrouter.task_utils import create_logged_task
+
+
+def configure_error_file_logging() -> None:
+    log_dir = Path(os.getenv("LOG_DIR", "/app/logs"))
+    error_log_file = Path(os.getenv("ERROR_LOG_FILE", str(log_dir / "error.log")))
+    try:
+        error_log_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger = logging.getLogger("model-rerouter")
+        logger.warning("Unable to create error log directory %s: %s", error_log_file.parent, exc)
+        return
+
+    max_bytes = int(os.getenv("ERROR_LOG_MAX_BYTES", "10485760"))
+    backup_count = int(os.getenv("ERROR_LOG_BACKUP_COUNT", "5"))
+
+    root_logger = logging.getLogger()
+    file_formatter = logging.Formatter(
+        "%(asctime)s %(name)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
+    )
+    file_handler = RotatingFileHandler(
+        filename=str(error_log_file),
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+    )
+    file_handler.setLevel(logging.ERROR)
+    file_handler.setFormatter(file_formatter)
+
+    if not any(
+        isinstance(handler, RotatingFileHandler) and getattr(handler, "baseFilename", None) == file_handler.baseFilename
+        for handler in root_logger.handlers
+    ):
+        root_logger.addHandler(file_handler)
+
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO)
+configure_error_file_logging()
 logger = logging.getLogger("model-rerouter")
 
 
@@ -142,6 +186,78 @@ async def disable_cache_for_html_and_json(request: Request, call_next):
         response.headers["Expires"] = "0"
 
     return response
+
+
+def _resolve_route_pattern(request: Request) -> str:
+    route = request.scope.get("route")
+    if route is None:
+        return request.url.path
+
+    route_path = getattr(route, "path", None)
+    if route_path:
+        return route_path
+
+    return request.url.path
+
+
+@app.middleware("http")
+async def exception_capture_middleware(request: Request, call_next):
+    request.state.request_start_time = time.time()
+
+    try:
+        return await call_next(request)
+    except HTTPException:
+        # Preserve framework-level HTTP error responses (auth, rate limits, etc.)
+        raise
+    except Exception as exc:
+        request_id = getattr(request.state, "request_id", None)
+        request_log_id = getattr(request.state, "request_log_id", request_id)
+        log_entry = getattr(request.state, "request_log_entry", None)
+        start_time = getattr(request.state, "request_start_time", None)
+        route = _resolve_route_pattern(request)
+        client_host = _get_request_source_ip(request)
+        exception_class = exc.__class__.__qualname__
+
+        # Update existing request log as a completed failure when possible
+        if log_entry is not None and start_time is not None:
+            complete_request_log(log_entry, start_time, {"status_code": 500, "error_message": str(exc)})
+
+        logger.exception(
+            "Unhandled exception request_id=%s request_log_id=%s method=%s path=%s route=%s client=%s "
+            "status_code=500 exception_class=%s",
+            request_id,
+            request_log_id,
+            request.method,
+            request.url.path,
+            route,
+            client_host,
+            exception_class,
+        )
+
+        if ENABLE_LOGGING:
+            try:
+                await record_exception_event(
+                    request_id=request_id,
+                    exception=exc,
+                    route=route,
+                    request_path=str(request.url.path),
+                    method=request.method,
+                    source_ip=client_host,
+                    status_code=500,
+                    user_agent=request.headers.get("user-agent", ""),
+                )
+            except Exception:
+                logger.exception("Failed to persist exception telemetry event")
+
+        headers = {}
+        if request_id:
+            headers["x-smolrouter-uuid"] = request_id
+
+        return JSONResponse(
+            status_code=500,
+            content={"error": "internal_server_error", "message": "An internal server error occurred."},
+            headers=headers,
+        )
 
 # Setup rate limiting
 setup_rate_limiting(app)
@@ -677,6 +793,9 @@ async def start_request_log(
             request_body_hash=request_body_hash,
         )
 
+        request.state.request_id = getattr(log_entry, "request_id", None)
+        request.state.request_log_entry = log_entry
+
         # Store request body asynchronously in blob storage (avoid blocking hot path)
         if request_body:
             from smolrouter.storage import get_blob_storage
@@ -691,9 +810,11 @@ async def start_request_log(
                 except Exception as e:
                     logger.exception(f"Failed to store request body asynchronously: {e}")
 
-            import asyncio
-
-            _store_request_body_task = asyncio.create_task(_store_request_body_async())
+            _store_request_body_task = create_logged_task(
+                _store_request_body_async(),
+                task_name=f"store-request-body:{request_id}",
+                create_task_fn=asyncio.create_task,
+            )
 
         # Log request start with traceability info (reduced verbosity)
         logger.debug(
@@ -702,11 +823,13 @@ async def start_request_log(
         )
 
         # Broadcast new request event (fire and forget)
-        import asyncio
-
         try:
             logger.debug(f"Broadcasting new_request event for request {request_id}")
-            _new_request_event_task = asyncio.create_task(broadcast_request_event("new_request", log_entry))
+            _new_request_event_task = create_logged_task(
+                broadcast_request_event("new_request", log_entry),
+                task_name=f"request-event:new_request:{request_id}",
+                create_task_fn=asyncio.create_task,
+            )
         except Exception as e:
             logger.exception(f"Failed to broadcast new request event: {e}")
 
@@ -723,7 +846,6 @@ def _complete_lb_request(lb_instance, start_time: float, success: bool):
     This is critical for proper load balancing - without it, active_requests
     keeps incrementing and never decrements, causing load imbalance.
     """
-    import asyncio
     from smolrouter.load_balancer import model_load_balancer
 
     try:
@@ -731,7 +853,11 @@ def _complete_lb_request(lb_instance, start_time: float, success: bool):
         # Schedule the async end_request call
         try:
             asyncio.get_running_loop()
-            _lb_completion_task = asyncio.create_task(model_load_balancer.end_request(lb_instance, response_time, success))
+            _lb_completion_task = create_logged_task(
+                model_load_balancer.end_request(lb_instance, response_time, success),
+                task_name=f"load-balancer-completion:{lb_instance.model_id}",
+                create_task_fn=asyncio.create_task,
+            )
         except RuntimeError:
             # No running loop - create one for this call
             asyncio.run(model_load_balancer.end_request(lb_instance, response_time, success))
@@ -850,11 +976,13 @@ def _broadcast_request_completion(log_entry: Any) -> str:
     """Broadcast a request completion event in a fire-and-forget fashion."""
     request_id = getattr(log_entry, "request_id", "unknown")
 
-    import asyncio
-
     try:
         logger.debug(f"Broadcasting request_completed event for request {request_id}")
-        _request_completed_task = asyncio.create_task(broadcast_request_event("request_completed", log_entry))
+        _request_completed_task = create_logged_task(
+            broadcast_request_event("request_completed", log_entry),
+            task_name=f"request-event:request_completed:{request_id}",
+            create_task_fn=asyncio.create_task,
+        )
     except Exception as e:
         logger.exception(f"Failed to broadcast request completion event: {e}")
 
@@ -948,7 +1076,7 @@ async def _parse_openai_request_payload(
         payload = await request.json()
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
-        logger.exception(f"Failed to parse request JSON: {e}")
+        logger.warning(f"Failed to parse request JSON: {e}")
         log_entry = await start_request_log(request, "openai", DEFAULT_UPSTREAM, None, None, auth_payload, None)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
         return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
@@ -1239,7 +1367,7 @@ async def _parse_ollama_request_payload(
         payload = await request.json()
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
-        logger.exception(f"Failed to parse Ollama request JSON: {e}")
+        logger.warning(f"Failed to parse Ollama request JSON: {e}")
         log_entry = await start_request_log(request, "ollama", DEFAULT_UPSTREAM, None, None, None, None)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
         return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
@@ -2048,11 +2176,13 @@ async def api_dashboard(limit: int = 100, q: str | None = None):
     try:
         logs, parsed_query = await _get_dashboard_logs(limit=limit, q=q)
         stats = await get_log_stats()
+        error_summary = await get_error_summary()
         formatted_logs = [_serialize_request_log(log) for log in logs]
 
         return {
             "logs": formatted_logs,
             "stats": stats,
+            "errors": error_summary,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "filter": parsed_query.to_meta(matched_count=len(formatted_logs), limit=limit),
         }
@@ -2061,6 +2191,85 @@ async def api_dashboard(limit: int = 100, q: str | None = None):
     except Exception as e:
         logger.exception(f"Error getting dashboard data: {e}")
         return JSONResponse(content={"error": f"Failed to get dashboard data. {e}"}, status_code=500)
+
+
+@app.get("/api/errors/summary")
+async def api_error_summary(limit_signatures: int = 50):
+    """Get aggregated exception summary from Redis (signature-level view)."""
+    try:
+        return await get_error_summary(limit_signatures=limit_signatures)
+    except Exception as e:
+        logger.exception(f"Error getting error summary: {e}")
+        return JSONResponse(content={"error": "Failed to get error summary"}, status_code=500)
+
+
+@app.get("/api/errors/recent")
+async def api_error_recent(limit: int = 100):
+    """Get recent exception events from Redis."""
+    try:
+        return {
+            "events": await get_error_recent_events(limit=limit),
+        }
+    except Exception as e:
+        logger.exception(f"Error getting recent errors: {e}")
+        return JSONResponse(content={"error": "Failed to get recent errors"}, status_code=500)
+
+
+@app.get("/api/errors/{signature}")
+async def api_error_signature(signature: str):
+    """Get aggregated details for a specific exception signature."""
+    try:
+        detail = await get_exception_signature_detail(signature)
+        if not detail:
+            raise HTTPException(status_code=404, detail="Signature not found")
+        return detail
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error getting exception signature detail: {e}")
+        return JSONResponse(content={"error": "Failed to get signature detail"}, status_code=500)
+
+
+@app.patch("/api/errors/{signature}")
+async def api_update_error_signature(signature: str, request: Request):
+    """Update state and/or notes for an exception signature."""
+    try:
+        payload = await request.json()
+        state = payload.get("state") if isinstance(payload, dict) else None
+        notes = payload.get("notes") if isinstance(payload, dict) else None
+
+        if state is None and notes is None:
+            return JSONResponse(
+                content={
+                    "error": "Request body must include at least one of 'state' or 'notes'"
+                },
+                status_code=400,
+            )
+
+        if state is not None and state not in ERROR_SIGNATURE_STATES:
+            return JSONResponse(
+                content={
+                    "error": "Invalid state",
+                    "message": "state must be one of: " + ", ".join(ERROR_SIGNATURE_STATES),
+                },
+                status_code=400,
+            )
+
+        updated = await set_exception_signature_state(signature=signature, state=state, notes=notes)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Signature not found")
+
+        return {
+            "signature": signature,
+            "state": updated.get("state"),
+            "notes": updated.get("notes"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error updating exception signature {signature}: {e}")
+        return JSONResponse(content={"error": "Failed to update signature"}, status_code=500)
 
 
 @app.get("/api/inflight")
@@ -3089,7 +3298,8 @@ async def broadcast_request_event(event_type: str, log_entry=None):
         elif event_type == "dashboard_update":
             # Send updated dashboard stats
             stats = await get_log_stats()
-            event_data = {"type": "dashboard_update", "stats": stats}
+            errors = await get_error_summary(limit_signatures=10)
+            event_data = {"type": "dashboard_update", "stats": stats, "errors": errors}
             await manager.broadcast(event_data)
 
     except Exception as e:
@@ -3106,11 +3316,13 @@ async def websocket_dashboard(websocket: WebSocket):
         try:
             logs, parsed_query = await _get_dashboard_logs(limit=100, q=websocket.query_params.get("q"))
             stats = await get_log_stats()
+            errors = await get_error_summary(limit_signatures=10)
 
             initial_data = {
                 "type": "dashboard_update",
                 "logs": [_serialize_request_log(log) for log in logs],
                 "stats": stats,
+                "errors": errors,
                 "filter": parsed_query.to_meta(matched_count=len(logs), limit=100),
             }
             await manager.send_personal_message(initial_data, websocket)

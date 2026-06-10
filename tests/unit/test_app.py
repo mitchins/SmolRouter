@@ -1,7 +1,10 @@
 import pytest
 import httpx
 import asyncio
+import logging
+import uuid
 from types import SimpleNamespace
+from pydantic import BaseModel
 import smolrouter.app as app_module
 from smolrouter.app import (
     app,
@@ -16,10 +19,12 @@ from smolrouter.app import (
 import json
 import respx
 from unittest.mock import AsyncMock, Mock, patch
+from smolrouter.database import get_error_summary
 
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
 from smolrouter.request_metadata import RequestMetadata, apply_request_metadata
+from smolrouter.task_utils import create_logged_task
 
 
 def load_mock_json(filename):
@@ -150,6 +155,84 @@ async def test_ollama_invalid_json_returns_400(async_client, disable_logging):
 
     assert response.status_code == 400
     assert response.json() == {"error": "Invalid JSON in request body"}
+
+
+@pytest.mark.asyncio
+async def test_unhandled_route_exception_returns_500(async_client, disable_logging):
+    route = f"/__test__/boom-{uuid.uuid4().hex}"
+
+    async def boom_route():
+        raise RuntimeError("route explosion")
+
+    app_module.app.add_api_route(route, boom_route, methods=["GET"], include_in_schema=False)
+    response = await async_client.get(route)
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "internal_server_error"
+
+
+@pytest.mark.asyncio
+async def test_exception_middleware_emits_structured_error_log(async_client, disable_logging, caplog):
+    route = f"/__test__/boom-structured-{uuid.uuid4().hex}"
+
+    async def boom_route():
+        raise ValueError("bad-value")
+
+    app_module.app.add_api_route(route, boom_route, methods=["GET"], include_in_schema=False)
+
+    with caplog.at_level(logging.ERROR):
+        response = await async_client.get(route)
+
+    assert response.status_code == 500
+    error_records = [record for record in caplog.records if record.levelname == "ERROR"]
+    assert error_records, "Expected ERROR logs from unhandled exception middleware"
+    message = error_records[0].getMessage()
+    assert "Unhandled exception request_id=" in message
+    assert "method=GET" in message
+    assert f"path={route}" in message
+    assert "status_code=500" in message
+    assert "exception_class=ValueError" in message
+    assert error_records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_does_not_emit_error_log(async_client, disable_logging, caplog):
+    with caplog.at_level(logging.ERROR):
+        response = await async_client.post(
+            "/v1/chat/completions",
+            content="{invalid json",
+            headers={"content-type": "application/json"},
+        )
+
+    assert response.status_code == 400
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_schema_invalid_request_returns_422_without_exception_signature(async_client, isolated_db, caplog):
+    class _SchemaRequest(BaseModel):
+        model: str
+        max_tokens: int
+
+    route = f"/__test__/validation-{uuid.uuid4().hex}"
+
+    async def _validated_route(payload: _SchemaRequest):
+        return {"ok": True}
+
+    app_module.app.add_api_route(route, _validated_route, methods=["POST"], include_in_schema=False)
+
+    before_summary = await get_error_summary()
+
+    with caplog.at_level(logging.ERROR):
+        response = await async_client.post(route, json={"model": 123})
+
+    assert response.status_code == 422
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
+
+    after_summary = await get_error_summary()
+    assert after_summary["total_exceptions"] == before_summary["total_exceptions"]
+    assert after_summary["signature_count"] == before_summary["signature_count"]
+    assert after_summary["count_by_signature"] == before_summary["count_by_signature"]
 
 
 @pytest.mark.asyncio
@@ -538,7 +621,7 @@ def test_complete_request_log_uses_usage_metrics(monkeypatch):
     scheduled_coroutines = []
     completed_lb_calls = []
 
-    def fake_create_task(coro):
+    def fake_create_logged_task(coro, *_args, **_kwargs):
         scheduled_coroutines.append(coro)
         coro.close()
 
@@ -547,7 +630,7 @@ def test_complete_request_log_uses_usage_metrics(monkeypatch):
     monkeypatch.setattr(app_module, "extract_tokens_from_openai_response", lambda response_data: (11, 5, 16))
     monkeypatch.setattr(app_module, "broadcast_request_event", AsyncMock(return_value=None))
     monkeypatch.setattr(app_module, "_complete_lb_request", lambda lb_instance, start_time, success: completed_lb_calls.append((lb_instance, success)))
-    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(app_module, "create_logged_task", fake_create_logged_task)
 
     complete_request_log(
         log_entry,
@@ -579,7 +662,7 @@ def test_complete_request_log_estimates_tokens_without_usage(monkeypatch):
     monkeypatch.setattr(app_module, "estimate_tokens_from_request", lambda request_data: 7)
     monkeypatch.setattr(app_module, "estimate_token_count", lambda text: 3 if text == "hello world" else 0)
     monkeypatch.setattr(app_module, "broadcast_request_event", AsyncMock(return_value=None))
-    monkeypatch.setattr(asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(app_module, "create_logged_task", lambda coro, *_args, **_kwargs: coro.close())
 
     complete_request_log(
         log_entry,
@@ -609,6 +692,19 @@ def test_complete_request_log_without_logging_still_completes_lb_request(monkeyp
     )
 
     assert completed_lb_calls == [("lb-disabled", False)]
+
+
+@pytest.mark.asyncio
+async def test_create_logged_task_logs_exception(caplog):
+    async def boom():
+        raise RuntimeError("boom")
+
+    with caplog.at_level(logging.ERROR, logger="smolrouter.task_utils"):
+        task = create_logged_task(boom(), task_name="background-exception")
+        with pytest.raises(RuntimeError):
+            await task
+
+    assert any("Unhandled exception in background-exception" in rec.getMessage() for rec in caplog.records)
 
 
 def test_request_metadata_to_dict_exposes_contract_fields():

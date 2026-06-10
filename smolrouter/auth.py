@@ -174,7 +174,14 @@ def create_auth_middleware():
             ):
                 return await call_next(request)
 
+            allow_error_dashboard_without_auth = os.getenv(
+                "ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD", "false"
+            ).lower() in ("1", "true", "yes", "on")
+
             # Only apply auth to API endpoints
+            if request.url.path.startswith("/api/errors") and allow_error_dashboard_without_auth:
+                return await call_next(request)
+
             if not (request.url.path.startswith("/v1/") or request.url.path.startswith("/api/")):
                 return await call_next(request)
 

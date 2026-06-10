@@ -233,3 +233,20 @@ async def test_middleware_allows_api_with_valid_token(monkeypatch):
         _call_next_sentinel,
     )
     assert result == "passed-through"
+
+
+@pytest.mark.asyncio
+async def test_middleware_blocks_error_dashboard_by_default(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    mw = _build_middleware()
+    response = await mw.dispatch(_MiddlewareRequest("/api/errors/summary"), _call_next_sentinel)
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_middleware_allows_error_dashboard_with_override(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD", "true")
+    mw = _build_middleware()
+    result = await mw.dispatch(_MiddlewareRequest("/api/errors/summary"), _call_next_sentinel)
+    assert result == "passed-through"
