@@ -1360,11 +1360,11 @@ def _convert_openai_stream_message(ollama_model: str, json_data: str) -> Tuple[O
 
 
 def _split_next_sse_message(buffer: str) -> Tuple[Optional[str], str]:
-    eol = buffer.find("\n\n")
-    if eol == -1:
+    match = re.search(r'\r?\n\r?\n', buffer)
+    if not match:
         return None, buffer
 
-    return buffer[:eol].strip(), buffer[eol + 4 :]
+    return buffer[:match.start()].strip(), buffer[match.end() :]
 
 
 def _extract_sse_data_payload(message: str) -> Optional[str]:
