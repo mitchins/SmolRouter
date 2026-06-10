@@ -65,6 +65,13 @@ def test_to_pacific_datetime_aware_is_converted():
     assert result.utcoffset() != aware.utcoffset()
 
 
+def test_to_pacific_datetime_dst_summer():
+    # June is in Pacific Daylight Time (UTC-7): 2026-06-01 12:00 UTC -> 05:00 PDT.
+    result = _to_pacific_datetime(datetime(2026, 6, 1, 12, 0, 0), assume_utc=True)
+    assert result.tzname() == "PDT"
+    assert result.hour == 5
+
+
 def test_format_optional_datetime():
     assert _format_optional_datetime(None) is None
     dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -224,8 +231,9 @@ def test_is_invalid_key_error(provider):
 
 
 def test_extract_retry_delay(provider):
-    assert provider._extract_retry_delay("Please retry in 20.5s") == 20.5
-    assert provider._extract_retry_delay("retryDelay': '30s'") == 30.0
+    assert provider._extract_retry_delay("Please retry in 20.5s") == 20.5  # pattern 1
+    assert provider._extract_retry_delay("retryDelay': '30s'") == 30.0  # pattern 2
+    assert provider._extract_retry_delay("Please retry after 7.5 seconds") == 7.5  # pattern 3
     assert provider._extract_retry_delay("no delay mentioned") is None
     assert provider._extract_retry_delay(None) is None
 

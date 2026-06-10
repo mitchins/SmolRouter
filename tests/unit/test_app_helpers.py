@@ -350,6 +350,24 @@ def test_build_ollama_openai_payload_generate_wraps_prompt(monkeypatch):
     assert payload["messages"][-1] == {"role": "system", "content": "/no_think"}
 
 
+def test_build_ollama_openai_payload_route_override(monkeypatch):
+    # A matching route with a model override must drive both upstream and final model.
+    monkeypatch.setattr(
+        app,
+        "ROUTES_CONFIG_DATA",
+        {"routes": [{"match": {"model": "llama"}, "route": {"upstream": "http://gpu", "model": "llama-q8"}}]},
+    )
+    monkeypatch.setattr(app, "MODEL_MAP", {})
+    monkeypatch.setattr(app, "DISABLE_THINKING", False)
+    payload, upstream, original, final = app._build_ollama_openai_payload(
+        "/api/chat", "1.2.3.4", {"model": "llama", "messages": []}
+    )
+    assert original == "llama"
+    assert final == "llama-q8"
+    assert payload["model"] == "llama-q8"
+    assert upstream == "http://gpu"
+
+
 def test_extract_openai_choice_content_variants():
     assert app._extract_openai_choice_content({"message": {"content": "m"}}) == "m"
     assert app._extract_openai_choice_content({"text": "t"}) == "t"
