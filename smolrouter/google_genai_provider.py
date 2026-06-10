@@ -27,6 +27,7 @@ from .database import ApiKeyQuota
 from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
 from .request_metadata import RequestMetadata
+from .task_utils import create_logged_task
 
 logger = logging.getLogger(__name__)
 
@@ -445,9 +446,6 @@ class GoogleGenAIProvider(IModelProvider):
         except RuntimeError:
             return
 
-        task = loop.create_task(self._probe_proxy_url(proxy_url))
-        self._proxy_probe_tasks[proxy_url] = task
-
         def _cleanup_probe(done_task: asyncio.Task, url: str = proxy_url):
             if self._proxy_probe_tasks.get(url) is done_task:
                 self._proxy_probe_tasks.pop(url, None)
@@ -458,7 +456,13 @@ class GoogleGenAIProvider(IModelProvider):
             except Exception as exc:
                 logger.debug(f"Proxy health probe failed for {self._mask_proxy_url(url)}: {exc}")
 
-        task.add_done_callback(_cleanup_probe)
+        task = create_logged_task(
+            self._probe_proxy_url(proxy_url),
+            task_name=f"google-proxy-probe:{self._mask_proxy_url(proxy_url)}",
+            create_task_fn=loop.create_task,
+            done_callback=_cleanup_probe,
+        )
+        self._proxy_probe_tasks[proxy_url] = task
 
     async def refresh_proxy_health(self, force: bool = False):
         self._ensure_proxy_health_entries()
@@ -492,7 +496,11 @@ class GoogleGenAIProvider(IModelProvider):
         except RuntimeError:
             return
 
-        self._proxy_health_task = loop.create_task(self._proxy_health_monitor_loop())
+        self._proxy_health_task = create_logged_task(
+            self._proxy_health_monitor_loop(),
+            task_name=f"google-proxy-health-monitor:{self.config.name}",
+            create_task_fn=loop.create_task,
+        )
         logger.info(f"Started proxy health monitor for provider {self.config.name}")
 
     async def stop_proxy_health_monitor(self):

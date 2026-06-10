@@ -20,6 +20,7 @@ from .providers import ProviderFactory, IModelProvider
 from .mediator import ModelMediatorFactory, ModelMediator
 from .caching import InMemoryModelCache, NoOpModelCache, IModelCache
 from .config_paths import normalize_provider_file_references, resolve_routes_config_path
+from .task_utils import create_logged_task
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +302,11 @@ class SmolRouterContainer:
                     logger.error(f"Error in background health monitoring: {e}")
 
         # Start the background task
-        asyncio.create_task(monitor_health())
+        create_logged_task(
+            monitor_health(),
+            task_name="provider-background-health-monitor",
+            create_task_fn=asyncio.create_task,
+        )
 
     async def _perform_background_health_check(self):
         """Perform periodic health checks and refresh cache for healthy providers"""

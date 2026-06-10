@@ -171,9 +171,10 @@ class _URL:
 
 
 class _MiddlewareRequest:
-    def __init__(self, path, headers=None):
+    def __init__(self, path, headers=None, method="GET"):
         self.url = _URL(path)
         self.headers = headers or {}
+        self.method = method
 
 
 def _build_middleware():
@@ -233,3 +234,49 @@ async def test_middleware_allows_api_with_valid_token(monkeypatch):
         _call_next_sentinel,
     )
     assert result == "passed-through"
+
+
+@pytest.mark.asyncio
+async def test_middleware_blocks_error_dashboard_by_default(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    mw = _build_middleware()
+    response = await mw.dispatch(_MiddlewareRequest("/api/errors/summary"), _call_next_sentinel)
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_middleware_allows_error_dashboard_with_override(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD", "true")
+    mw = _build_middleware()
+    result = await mw.dispatch(_MiddlewareRequest("/api/errors/summary"), _call_next_sentinel)
+    assert result == "passed-through"
+
+
+@pytest.mark.asyncio
+async def test_middleware_allows_readonly_error_endpoints_only_with_override(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD", "true")
+    mw = _build_middleware()
+
+    assert await mw.dispatch(_MiddlewareRequest("/api/errors/summary"), _call_next_sentinel) == "passed-through"
+    assert await mw.dispatch(_MiddlewareRequest("/api/errors/recent"), _call_next_sentinel) == "passed-through"
+
+    blocked = await mw.dispatch(
+        _MiddlewareRequest("/api/errors/signature-token", method="PATCH"),
+        _call_next_sentinel,
+    )
+    assert blocked.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_middleware_blocks_error_patch_without_auth_even_with_override(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    monkeypatch.setenv("ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD", "true")
+    mw = _build_middleware()
+    response = await mw.dispatch(
+        _MiddlewareRequest("/api/errors/abc", method="PATCH"),
+        _call_next_sentinel,
+    )
+
+    assert response.status_code == 401

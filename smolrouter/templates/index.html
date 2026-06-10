@@ -199,6 +199,10 @@
             <div class="number" style="color: #ff9800;" id="inflight-requests">-</div>
             <div class="label">🔄 Inflight</div>
         </div>
+        <div class="stat-card">
+            <div class="number" style="color: #d32f2f;" id="exception-count">-</div>
+            <div class="label">Unhandled Exceptions</div>
+        </div>
     </div>
 
     <!-- Recent Requests Table -->
@@ -441,7 +445,7 @@
             return `<span class="material-icons" style="font-size: 1rem; color: #c62828;" title="${escapeHtml(title)}">content_copy</span>`;
         }
 
-        function updateStats(stats) {
+        function updateStats(stats, errors) {
             const processedRequests = stats.completed_requests ?? stats.successful_requests ?? ((stats.openai_requests || 0) + (stats.ollama_requests || 0));
             const recentRequests = stats.recent_requests ?? stats.total_requests ?? 0;
 
@@ -449,6 +453,9 @@
             document.getElementById('successful-requests').textContent = processedRequests || 0;
             document.getElementById('requests-24h').textContent = recentRequests || 0;
             document.getElementById('inflight-requests').textContent = stats.inflight_requests || 0;
+
+            const exceptionSummary = errors || {};
+            document.getElementById('exception-count').textContent = exceptionSummary.total_exceptions || 0;
         }
 
         function updateFilterStatus(filterMeta) {
@@ -531,7 +538,7 @@
                 currentQuery = normalizedQuery;
                 document.getElementById('dashboard-query').value = currentQuery;
                 syncUrlFilterQuery(currentQuery, historyMode);
-                updateStats(payload.stats || {});
+                updateStats(payload.stats || {}, payload.errors || {});
                 updateRequestsTable(payload.logs || []);
                 updateFilterStatus(payload.filter);
 
@@ -608,7 +615,7 @@
             switch (data.type) {
                 case 'dashboard_update':
                     if (data.stats) {
-                        updateStats(data.stats);
+                        updateStats(data.stats || {}, data.errors || {});
                     }
                     if (Array.isArray(data.logs)) {
                         updateRequestsTable(data.logs);
@@ -623,7 +630,7 @@
                     break;
                 case 'stats_update':
                     if (data.stats) {
-                        updateStats(data.stats);
+                        updateStats(data.stats, data.errors || {});
                     }
                     break;
                 case 'filter_error':

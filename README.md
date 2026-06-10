@@ -82,12 +82,16 @@ Use SmolRouter when you need to:
 | `STRIP_THINKING` | `false` | Remove `<think>...</think>` blocks before returning responses |
 | `STRIP_JSON_MARKDOWN` | `false` | Convert fenced JSON markdown into raw JSON payloads |
 | `DISABLE_THINKING` | `false` | Append `/no_think` hints to prompts for providers that respect it |
-| `DB_PATH` | `requests.db` | SQLite database path for request metadata |
 | `MAX_LOG_AGE_DAYS` | `7` | Retention window for automatic log cleanup |
 | `BLOB_STORAGE_TYPE` | `filesystem` | Storage backend for request/response bodies (`filesystem` or `memory`) |
 | `BLOB_STORAGE_PATH` | `~/.smolrouter/blob_storage` | Directory used when `BLOB_STORAGE_TYPE=filesystem`. Set this to `./blob_storage` for checkout-local dev storage if desired |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection used for request/audit logs and exception telemetry |
 | `MAX_BLOB_SIZE` | `10485760` | Per-request blob size cap in bytes (10 MiB) |
 | `MAX_TOTAL_STORAGE_SIZE` | `1073741824` | Aggregate blob storage cap in bytes (1 GiB) |
+| `LOG_DIR` | `/app/logs` | Directory for persisted ERROR log files (rotated via `ERROR_LOG_*`). In non-Docker runs, override to a writable host path such as `./logs` or `/tmp/smolrouter/logs`. |
+| `ERROR_LOG_FILE` | `/app/logs/error.log` | Primary ERROR log file |
+| `ERROR_LOG_MAX_BYTES` | `10485760` | Max size per ERROR log file before rotation |
+| `ERROR_LOG_BACKUP_COUNT` | `5` | Number of rotated ERROR log backups to retain |
 
 **Security & Auth:**
 
@@ -95,6 +99,7 @@ Use SmolRouter when you need to:
 | --- | --- | --- |
 | `JWT_SECRET` | _(unset)_ | Enables JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints (some API endpoints like `/api/logs`, `/api/stats` are exempt). Must be ≥32 characters with good entropy. Leave unset for unauthenticated access |
 | `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls Web UI/dashboard access policy independently of API authentication: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
+| `ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD` | `false` | Set `true` only on trusted LANs to allow unauthenticated access to `/api/errors/*`. Enables stack traces and exception metadata without auth checks. |
 | `WEBUI_ALLOWED_ORIGINS` | _(unset)_ | Comma-separated list of origins allowed to access the dashboard |
 | `RATE_LIMIT_REQUESTS` | _(unset)_ | Requests per minute per API key. Leave empty to disable rate limiting |
 | `RATE_LIMIT_TOKENS` | _(unset)_ | Token budget per minute per API key (estimated from request payloads) |
@@ -189,19 +194,24 @@ providers:
    - `NONE` — no authentication required for Web UI (local development only)
    - `AUTH_WHEN_PROXIED` — require auth when `X-Forwarded-For` headers are present (default)
    - `ALWAYS_AUTH` — always require authentication for Web UI access
-3. Important: When `JWT_SECRET` is set, most API requests require a valid JWT token in the `Authorization` header. The following endpoints are exempt: `/api/logs`, `/api/stats`, `/api/inflight`, `/api/performance`. Leave `JWT_SECRET` unset for completely unauthenticated access
+3. Important: When `JWT_SECRET` is set, most API requests require a valid JWT token in the `Authorization` header. The following endpoints are exempt: `/api/logs`, `/api/stats`, `/api/inflight`, `/api/performance`. `/api/errors/*` is *not* exempt by default; enable `ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD=true` only on trusted LANs where unauthenticated diagnostics are acceptable. Leave `JWT_SECRET` unset for completely unauthenticated access.
 4. Pair JWT auth with rate limiting by defining `RATE_LIMIT_REQUESTS` or `RATE_LIMIT_TOKENS` for each API key
 
 **Logging & Retention:**
-- `ENABLE_LOGGING=false` disables the request log and UI for ultra-lightweight proxies
-- Request metadata uses the Redis-backed logging path, with blob storage for large request/response payloads
-- Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost
+- `ENABLE_LOGGING=false` disables request dashboard persistence and Redis request/audit writes; it does **not** disable ERROR file logging, which remains enabled independently.
+- Request metadata uses the Redis-backed request/audit path (`REDIS_URL`) for searchable diagnostics and route-level summary.
+- Request and response payloads use blob storage (`BLOB_STORAGE_PATH`) for larger bodies outside Redis.
+- Stdout/stderr continue to mirror application logs and are useful for live inspection during LAN soaks.
+- Persisted ERROR logs are written to `ERROR_LOG_FILE` with rotation (`ERROR_LOG_MAX_BYTES`, `ERROR_LOG_BACKUP_COUNT`), which is recommended for post-restart forensics.
+- Set `LOG_DIR` to a writable folder whenever running outside Docker; `/app/logs` is container-oriented and may be unwritable on host shells unless overridden.
+- Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost and retention
 - Background cleanup jobs run automatically during the FastAPI lifespan events
 
 **Path guidance:**
 - Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
 - Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
 - For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
+- `docker-compose.yml` mounts `./logs:/app/logs`, so rotated ERROR logs persist across container restarts.
 
 ## Testing
 

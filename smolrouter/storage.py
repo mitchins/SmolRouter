@@ -10,6 +10,7 @@ from typing import Optional, Dict, List
 from abc import ABC, abstractmethod
 
 from .config_paths import resolve_blob_storage_path
+from .task_utils import create_logged_task
 
 logger = logging.getLogger("model-rerouter")
 
@@ -386,7 +387,11 @@ class FilesystemBlobStorage(BlobStorage):
         try:
             loop = asyncio.get_running_loop()
             if self._janitor_task is None or self._janitor_task.done():
-                self._janitor_task = loop.create_task(self._janitor_loop())
+                self._janitor_task = create_logged_task(
+                    self._janitor_loop(),
+                    task_name="blob-storage-janitor",
+                    create_task_fn=loop.create_task,
+                )
         except RuntimeError:
             # No loop yet; app startup will call again when loop exists
             logger.info("Janitor will start when event loop is available")

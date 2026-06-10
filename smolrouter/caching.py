@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .interfaces import IModelCache, ModelInfo
+from .task_utils import create_logged_task
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,11 @@ class InMemoryModelCache(IModelCache):
     def _start_cleanup_task(self):
         """Start background cleanup task"""
         if self._cleanup_task is None or self._cleanup_task.done():
-            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+            self._cleanup_task = create_logged_task(
+                self._cleanup_loop(),
+                task_name=f"model-cache-cleanup:{id(self)}",
+                create_task_fn=asyncio.create_task,
+            )
 
     async def _cleanup_loop(self):
         """Background task to clean up expired entries"""
@@ -238,7 +243,11 @@ class ModelAggregator:
     def _start_health_monitoring(self):
         """Start background health monitoring"""
         if self._health_check_task is None or self._health_check_task.done():
-            self._health_check_task = asyncio.create_task(self._health_monitoring_loop())
+            self._health_check_task = create_logged_task(
+                self._health_monitoring_loop(),
+                task_name="provider-health-monitor",
+                create_task_fn=asyncio.create_task,
+            )
 
     async def _health_monitoring_loop(self):
         """Background task to monitor provider health"""
