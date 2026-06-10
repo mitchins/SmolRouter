@@ -411,12 +411,12 @@ def test_split_next_sse_message_incomplete_buffer():
     assert app._split_next_sse_message("partial") == (None, "partial")
 
 
-def test_split_next_sse_message_multi_event_drops_two_chars():
-    # NOTE: documents a latent off-by-two: the delimiter "\n\n" is 2 chars but the
-    # slice uses eol + 4, so a second event packed into the same buffer loses its
-    # leading 2 chars ("da" of "data:"). Single-event-per-chunk delivery is unaffected.
-    _, rest = app._split_next_sse_message("data: hello\n\ndata: world\n\n")
-    assert rest == "ta: world\n\n"
+def test_split_next_sse_message_multi_event_keeps_remainder_intact():
+    # Two events packed into one buffer: the first is returned and the second is
+    # left fully intact for the next iteration (delimiter consumed exactly).
+    msg, rest = app._split_next_sse_message("data: hello\n\ndata: world\n\n")
+    assert msg == "data: hello"
+    assert rest == "data: world\n\n"
 
 
 def test_extract_sse_data_payload():
@@ -446,6 +446,18 @@ def test_consume_ollama_sse_buffer_skips_non_data_lines():
     chunks, remaining, is_done = app._consume_ollama_sse_buffer("event: ping\n\n", "llama")
     assert chunks == []
     assert is_done is False
+
+
+def test_consume_ollama_sse_buffer_multiple_events_in_one_buffer(monkeypatch):
+    monkeypatch.setattr(app, "STRIP_THINKING", False)
+    monkeypatch.setattr(app, "STRIP_JSON_MARKDOWN", False)
+    payload = json.dumps({"choices": [{"delta": {"content": "hi"}}]})
+    buffer = f"data: {payload}\n\ndata: [DONE]\n\n"
+    chunks, remaining, is_done = app._consume_ollama_sse_buffer(buffer, "llama")
+    assert is_done is True
+    assert len(chunks) == 2  # content chunk + terminal done chunk
+    assert json.loads(chunks[0])["response"] == "hi"
+    assert json.loads(chunks[1])["done"] is True
 
 
 # ==========================================================================
