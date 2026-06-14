@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from .config_loading import load_first_config_entry
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, coerce_provider_proxy_settings
+from .secret_store import get_keys
 from .google_genai_provider import GoogleGenAIProvider, GoogleGenAIConfig
 from .anthropic_provider import AnthropicProvider, AnthropicConfig
 from .dummy_provider import DummyProvider, DummyConfig
@@ -569,6 +570,9 @@ class ZaiCodingProvider(OpenAIProvider):
 class ProviderFactory:
     """Factory for creating model providers from configuration"""
 
+    _LIST_KEY_TYPES = {"google-genai", "anthropic"}
+    _SINGLE_KEY_TYPES = {"openai", "zai-coding"}
+
     _provider_classes = {
         "ollama": OllamaProvider,
         "openai": OpenAIProvider,
@@ -583,6 +587,47 @@ class ProviderFactory:
         "dummy": DummyConfig,
         "zai-coding": ZaiCodingConfig,
     }
+
+    @classmethod
+    def _apply_secrets_to_provider_config(cls, processed_config: Dict[str, Any]) -> None:
+        provider_name = (str(processed_config.get("name") or "")).strip()
+        provider_type = str(processed_config.get("type") or "").lower()
+
+        if not provider_name:
+            return
+
+        provider_keys = get_keys(provider_name)
+        if not provider_keys:
+            return
+
+        has_inline_keys = False
+        if provider_type in cls._LIST_KEY_TYPES:
+            has_inline_keys = bool(processed_config.get("api_keys")) or bool(processed_config.get("api_keys_file"))
+        elif provider_type in cls._SINGLE_KEY_TYPES:
+            has_inline_keys = processed_config.get("api_key") is not None or bool(processed_config.get("api_key_file"))
+
+        if has_inline_keys:
+            logger.warning(
+                "Inline keys for provider '%s' are being overridden by the secrets store",
+                provider_name,
+            )
+
+        if provider_type in cls._LIST_KEY_TYPES:
+            processed_config["api_keys"] = list(provider_keys)
+            processed_config.pop("api_keys_file", None)
+            return
+
+        if provider_type in cls._SINGLE_KEY_TYPES:
+            processed_config["api_key"] = provider_keys[0]
+            processed_config.pop("api_key_file", None)
+            processed_config.pop("api_keys", None)
+            if len(provider_keys) > 1:
+                logger.warning(
+                    "Provider '%s' has %d keys in the secrets store but is a single-key provider; using the first",
+                    provider_name,
+                    len(provider_keys),
+                )
+            return
 
     @classmethod
     def create_provider(cls, config: ProviderConfig) -> IModelProvider:
@@ -601,6 +646,7 @@ class ProviderFactory:
         for provider_config in providers_config:
             try:
                 processed_config = coerce_provider_proxy_settings(provider_config)
+                cls._apply_secrets_to_provider_config(processed_config)
 
                 config_type = str(processed_config.get("type", "")).lower()
                 config_class = cls._config_classes.get(config_type, ProviderConfig)

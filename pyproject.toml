@@ -29,6 +29,7 @@ dependencies = [
     'slowapi',
     "google-genai", # New unified Google GenAI SDK with httpx transport
     "google-api-core>=2.19.0",
+    "platformdirs",
     "pytz>=2025.2",
     "aiohttp>=3.12.15",
     "redis>=5.0.0",

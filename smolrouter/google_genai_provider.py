@@ -23,6 +23,7 @@ from google.api_core.exceptions import ResourceExhausted, PermissionDenied, Inva
 
 from .config_loading import load_config_entries
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
+from .secret_store import redact_secret, resolve_config_file, secrets_search_paths
 from .database import ApiKeyQuota
 from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
@@ -80,7 +81,7 @@ class ApiKeyModelStats:
     @property
     def key_model_id(self) -> str:
         """Unique identifier for this key+model combination"""
-        return f"{self.api_key[:8]}.../{self.model}"
+        return f"{redact_secret(self.api_key)}/{self.model}"
 
     def is_day_reset_needed(self) -> bool:
         """Check if we need to reset daily counters (Pacific timezone reset)"""
@@ -109,7 +110,7 @@ class ApiKeyModelStats:
         self.tokens_today = 0
         self.error_count = 0
         self.quota_exhausted_at = None  # Clear exhaustion marker
-        logger.info(f"Reset daily stats for API key {self.api_key[:8]}...")
+        logger.info(f"Reset daily stats for API key {redact_secret(self.api_key)}")
 
 
 @dataclass
@@ -181,7 +182,11 @@ class GoogleGenAIConfig(ProviderConfig):
         self.api_keys = list(self.api_keys or [])
 
         if not self.api_keys and not self.api_keys_file:
-            raise ValueError("Either api_keys or api_keys_file must be provided")
+            resolve_config_file("secrets.yaml", "SMOLROUTER_SECRETS")
+            raise ValueError(
+                f"Provider '{self.name}' has no API keys. "
+                f"Looked in: {', '.join(secrets_search_paths())}"
+            )
 
         if self.api_keys_file:
             try:
@@ -875,7 +880,7 @@ class GoogleGenAIProvider(IModelProvider):
         best_key = secrets.choice(lowest_usage_keys)
 
         logger.debug(
-            f"Selected API key {best_key[:8]}... for {model_name} with {lowest_count} requests today "
+            f"Selected API key {redact_secret(best_key)} for {model_name} with {lowest_count} requests today "
             f"({len(lowest_usage_keys)} keys at this usage level)"
         )
 
@@ -894,7 +899,7 @@ class GoogleGenAIProvider(IModelProvider):
         """Return the effective daily request count for a quota record, or None if it should be skipped."""
         # Skip permanently invalid keys first.
         if quota.invalid_key:
-            logger.debug(f"API key {key[:8]}... marked as invalid, skipping")
+            logger.debug(f"API key {redact_secret(key)} marked as invalid, skipping")
             return None
 
         actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
@@ -902,13 +907,13 @@ class GoogleGenAIProvider(IModelProvider):
         if actual_requests_today >= model_limit:
             exhausted_keys.append(key)
             logger.debug(
-                f"API key {key[:8]}... exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
+                f"API key {redact_secret(key)} exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
             )
             return None
 
         if quota.error_count > 20:  # Increased threshold
             error_prone_keys.append(key)
-            logger.debug(f"API key {key[:8]}... too many errors for {model_name} ({quota.error_count})")
+            logger.debug(f"API key {redact_secret(key)} too many errors for {model_name} ({quota.error_count})")
             return None
 
         if self._is_recent_quota_exhaustion(quota, key, model_name, pacific_date):
@@ -924,18 +929,18 @@ class GoogleGenAIProvider(IModelProvider):
         try:
             quota_exhausted_pacific = _to_pacific_datetime(quota.quota_exhausted_at, assume_utc=True)
         except (ValueError, TypeError, AttributeError) as e:
-            logger.warning(f"API key {key[:8]}... has malformed quota_exhausted_at, allowing: {e}")
+            logger.warning(f"API key {redact_secret(key)} has malformed quota_exhausted_at, allowing: {e}")
             return False
 
         exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
         if exhausted_date == pacific_date:
             logger.debug(
-                f"API key {key[:8]}... exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
+                f"API key {redact_secret(key)} exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
             )
             return True
 
         logger.debug(
-            f"API key {key[:8]}... exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
+            f"API key {redact_secret(key)} exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
         )
         return False
 
@@ -999,15 +1004,15 @@ class GoogleGenAIProvider(IModelProvider):
             )
             quota.mark_request_success(tokens=tokens)
             logger.info(
-                "API key %s... successful request for %s: %s/%s RPD, %s tokens",
-                api_key[:8],
+                "API key %s successful request for %s: %s/%s RPD, %s tokens",
+                redact_secret(api_key),
                 model_name,
                 quota.requests_today,
                 self.get_model_daily_limit(model_name),
                 tokens,
             )
         except Exception as e:
-            logger.error(f"❌ CRITICAL: Failed to update quota for {api_key[:8]}... / {model_name}: {e}")
+            logger.error(f"❌ CRITICAL: Failed to update quota for {redact_secret(api_key)} / {model_name}: {e}")
             logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
             quota.mark_request_success(tokens=tokens)
 
@@ -1017,12 +1022,12 @@ class GoogleGenAIProvider(IModelProvider):
         key_hash = quota_backend.hash_api_key(api_key)
         try:
             await quota_backend.mark_invalid_by_hash(key_hash, self.config.name)
-            logger.error(f"🚫 API key {api_key[:8]}... MARKED INVALID (status={status_code}, error={error_message})")
+            logger.error(f"🚫 API key {redact_secret(api_key)} MARKED INVALID (status={status_code}, error={error_message})")
 
             try:
                 self.config.api_keys.remove(api_key)
                 logger.warning(
-                    f"🗑️  Removed API key {api_key[:8]}... from selection pool ({len(self.config.api_keys)} keys remaining)"
+                    f"🗑️  Removed API key {redact_secret(api_key)} from selection pool ({len(self.config.api_keys)} keys remaining)"
                 )
             except ValueError:
                 pass
@@ -1047,13 +1052,13 @@ class GoogleGenAIProvider(IModelProvider):
         except Exception as e:
             logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
 
-        logger.error(f"🚫 API key {api_key[:8]}... QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted")
+        logger.error(f"🚫 API key {redact_secret(api_key)} QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted")
 
         retry_delay = self._extract_retry_delay(error_message)
         if retry_delay:
-            logger.warning(f"🕒 Google suggests retry in {retry_delay}s for {api_key[:8]}... / {model_name}")
+            logger.warning(f"🕒 Google suggests retry in {retry_delay}s for {redact_secret(api_key)} / {model_name}")
         else:
-            logger.warning(f"🕒 Key {api_key[:8]}... / {model_name} exhausted, will reset at midnight Pacific")
+            logger.warning(f"🕒 Key {redact_secret(api_key)} / {model_name} exhausted, will reset at midnight Pacific")
 
     async def _record_regular_error(
         self,
@@ -1074,23 +1079,23 @@ class GoogleGenAIProvider(IModelProvider):
         if status_code == 403:
             logger.warning(f"⚠️  403 error but not marked invalid - status={status_code}, error={error_message!r}")
 
-        logger.warning(f"API key {api_key[:8]}... error #{quota.error_count} for {model_name}: {error_message}")
+        logger.warning(f"API key {redact_secret(api_key)} error #{quota.error_count} for {model_name}: {error_message}")
 
     def _log_quota_status(self, api_key: str, model_name: str, quota: QuotaRecord) -> None:
         model_limit = self.get_model_daily_limit(model_name)
         if model_limit <= 0:
-            logger.warning("API key %s... / %s has non-positive daily limit: %s", api_key[:8], model_name, model_limit)
+            logger.warning("API key %s / %s has non-positive daily limit: %s", redact_secret(api_key), model_name, model_limit)
             return
 
         quota_percentage = (quota.requests_today / model_limit) * 100
         if quota.requests_today >= model_limit:
             logger.error(
-                f"🚫 API key {api_key[:8]}... / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
+                f"🚫 API key {redact_secret(api_key)} / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
             )
         elif quota.requests_today >= (model_limit * 0.8):
             logger.warning(
-                "API key %s... / %s approaching daily limit: %.1f%% used (%s/%s)",
-                api_key[:8],
+                "API key %s / %s approaching daily limit: %.1f%% used (%s/%s)",
+                redact_secret(api_key),
                 model_name,
                 quota_percentage,
                 quota.requests_today,
@@ -1278,7 +1283,7 @@ class GoogleGenAIProvider(IModelProvider):
                 if await self._health_check_api_key(api_key):
                     return True
             except Exception as e:
-                logger.debug(f"Health check failed for key {api_key[:8]}...: {e}")
+                logger.debug(f"Health check failed for key {redact_secret(api_key)}: {e}")
                 continue
         return False
 
@@ -1300,7 +1305,7 @@ class GoogleGenAIProvider(IModelProvider):
                 return models
 
             except Exception as e:
-                logger.error(f"Error discovering models with API key {api_key[:8]}...: {e}")
+                logger.error(f"Error discovering models with API key {redact_secret(api_key)}: {e}")
                 continue
 
         # All API keys failed - fall back to static model list
@@ -1510,7 +1515,7 @@ class GoogleGenAIProvider(IModelProvider):
     ) -> GoogleGenAICompletionContext:
         context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request)
         context.api_key = await self._select_best_api_key(context.model_name)
-        context.api_key_suffix = context.api_key[-8:] if len(context.api_key) > 8 else context.api_key
+        context.api_key_suffix = redact_secret(context.api_key)
         context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
         context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
             context.model_name
@@ -1536,7 +1541,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         key_position_str = f" key #{context.api_key_index}/{context.api_key_total}" if context.api_key_index else ""
         logger.info(
-            f"🚀 Outbound request: model={context.model_name}, api_key=...{context.api_key_suffix}{key_position_str}, proxy={context.proxy_info or 'direct'}{context.pool_info} [obs={context.observation_id}]"
+            f"🚀 Outbound request: model={context.model_name}, api_key={context.api_key_suffix}{key_position_str}, "
+            f"proxy={context.proxy_info or 'direct'}{context.pool_info} [obs={context.observation_id}]"
         )
 
         return context
