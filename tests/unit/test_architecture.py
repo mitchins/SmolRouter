@@ -438,7 +438,7 @@ class TestCaching:
         assert {model.provider_id for model in all_models} == {"healthy", "unhealthy"}
         assert missing_provider_models == []
         assert stats["provider_count"] == 2
-        assert stats["healthy_providers"] == 1
+        assert stats["healthy_providers"] == 2
 
         aggregator.close()
 
@@ -584,6 +584,229 @@ class TestCaching:
         assert await aggregator.get_all_models(force_refresh=True) == models
         assert await aggregator.get_provider_health() == {"recoverable": False}
         assert await aggregator.get_all_models() == models
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_stale_returns_immediately_and_refreshes_in_background(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "stale"
+        provider.health_check = AsyncMock(return_value=True)
+
+        stale_models = [ModelInfo("old@stale", "old", "stale", "openai", "https://stale.example")]
+        fresh_models = [ModelInfo("new@stale", "new", "stale", "openai", "https://stale.example")]
+        discovery_started = asyncio.Event()
+        discovery_released = asyncio.Event()
+
+        async def slow_discovery():
+            discovery_started.set()
+            await discovery_released.wait()
+            return fresh_models
+
+        provider.discover_models = AsyncMock(side_effect=slow_discovery)
+
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=1,
+        )
+        aggregator._last_known_models["stale"] = stale_models.copy()
+
+        started = time.monotonic()
+        assert await aggregator.get_all_models() == stale_models
+        assert time.monotonic() - started < 0.05
+
+        await asyncio.wait_for(discovery_started.wait(), timeout=0.1)
+        refresh_task = aggregator._refresh_tasks["stale"]
+        discovery_released.set()
+        assert await refresh_task == fresh_models
+        await asyncio.sleep(0)
+
+        assert aggregator._last_known_models["stale"] == fresh_models
+        assert provider.discover_models.await_count == 1
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_cold_start_deduplicates_concurrent_refreshes(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "cold"
+        provider.health_check = AsyncMock(return_value=True)
+
+        models = [ModelInfo("model@cold", "model", "cold", "openai", "https://cold.example")]
+        discovery_started = asyncio.Event()
+        discovery_released = asyncio.Event()
+
+        async def slow_discovery():
+            discovery_started.set()
+            await discovery_released.wait()
+            return models
+
+        provider.discover_models = AsyncMock(side_effect=slow_discovery)
+
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=1,
+        )
+
+        callers = [asyncio.create_task(aggregator.get_all_models()) for _ in range(8)]
+        await asyncio.wait_for(discovery_started.wait(), timeout=0.1)
+        discovery_released.set()
+
+        assert await asyncio.gather(*callers) == [models] * 8
+        assert provider.discover_models.await_count == 1
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_bounded_wait_does_not_cancel_shared_refresh_task(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "shared"
+        provider.health_check = AsyncMock(return_value=True)
+
+        models = [ModelInfo("model@shared", "model", "shared", "openai", "https://shared.example")]
+        discovery_started = asyncio.Event()
+        discovery_released = asyncio.Event()
+
+        async def slow_discovery():
+            discovery_started.set()
+            await discovery_released.wait()
+            return models
+
+        provider.discover_models = AsyncMock(side_effect=slow_discovery)
+
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=1,
+        )
+
+        task = await aggregator._get_or_start_refresh(provider)
+        await asyncio.wait_for(discovery_started.wait(), timeout=0.1)
+        aggregator.discovery_timeout = 0.01
+
+        assert await aggregator._await_bounded(task, "shared") == []
+        assert not task.cancelled()
+        assert not task.done()
+
+        discovery_released.set()
+        assert await task == models
+        assert await aggregator.get_all_models() == models
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_failed_refresh_cleans_task_map(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "flaky"
+        provider.health_check = AsyncMock(return_value=True)
+        provider.discover_models = AsyncMock(side_effect=RuntimeError("boom"))
+
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=0.1,
+        )
+
+        assert await aggregator.get_all_models(force_refresh=True) == []
+        await asyncio.sleep(0)
+        assert "flaky" not in aggregator._refresh_tasks
+
+        provider.discover_models = AsyncMock(
+            return_value=[ModelInfo("model@flaky", "model", "flaky", "openai", "https://flaky.example")]
+        )
+
+        assert await aggregator.get_models_by_provider("flaky", force_refresh=True) == [
+            ModelInfo("model@flaky", "model", "flaky", "openai", "https://flaky.example")
+        ]
+        assert provider.discover_models.await_count == 1
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_throttles_background_refresh_for_dead_stale_provider(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "dead"
+        provider.health_check = AsyncMock(return_value=True)
+        provider.discover_models = AsyncMock(side_effect=RuntimeError("dead"))
+
+        stale_models = [ModelInfo("model@dead", "model", "dead", "openai", "https://dead.example")]
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=0.1,
+        )
+        aggregator._last_known_models["dead"] = stale_models.copy()
+
+        for _ in range(5):
+            assert await aggregator.get_all_models() == stale_models
+
+        await asyncio.sleep(0)
+        assert provider.discover_models.await_count == 1
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_successful_refresh_flips_unhealthy_provider_healthy(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "recovering"
+        provider.health_check = AsyncMock(return_value=True)
+
+        old_models = [ModelInfo("old@recovering", "old", "recovering", "openai", "https://recovering.example")]
+        new_models = [ModelInfo("new@recovering", "new", "recovering", "openai", "https://recovering.example")]
+        provider.discover_models = AsyncMock(return_value=new_models)
+
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=0.1,
+        )
+        aggregator._last_known_models["recovering"] = old_models.copy()
+        aggregator._mark_provider_unhealthy("recovering")
+
+        assert await aggregator.get_all_models(force_refresh=True) == new_models
+        assert await aggregator.get_provider_health() == {"recovering": True}
+        assert aggregator._last_known_models["recovering"] == new_models
+
+        aggregator.close()
+
+    @pytest.mark.asyncio
+    async def test_model_aggregator_force_refresh_waits_bounded_and_returns_stale(self):
+        provider = Mock()
+        provider.get_provider_id.return_value = "hung"
+        provider.health_check = AsyncMock(return_value=True)
+
+        async def hang():
+            await asyncio.sleep(3600)
+
+        provider.discover_models = AsyncMock(side_effect=hang)
+
+        stale_models = [ModelInfo("model@hung", "model", "hung", "openai", "https://hung.example")]
+        aggregator = ModelAggregator(
+            [provider],
+            cache=NoOpModelCache(),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+            discovery_timeout=0.02,
+        )
+        aggregator._last_known_models["hung"] = stale_models.copy()
+
+        started = time.monotonic()
+        assert await aggregator.get_all_models(force_refresh=True) == stale_models
+        assert time.monotonic() - started < 0.2
 
         aggregator.close()
 
