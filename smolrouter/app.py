@@ -297,6 +297,10 @@ STRIP_THINKING = os.getenv("STRIP_THINKING", "false").lower() in ("1", "true", "
 STRIP_JSON_MARKDOWN = os.getenv("STRIP_JSON_MARKDOWN", "false").lower() in ("1", "true", "yes")
 
 INVALID_JSON_REQUEST_ERROR = "Invalid JSON in request body"
+# Non-standard but widely-understood (nginx) status for "client closed request":
+# used to finalize the request log when a client disconnects/cancels mid-flight
+# so the entry never lingers as forever-"pending" in the dashboard.
+CLIENT_CLOSED_REQUEST_STATUS = 499
 EXCESSIVE_WHITESPACE_PATTERN = r"\s{2,}"
 ENABLE_LOGGING = os.getenv("ENABLE_LOGGING", "true").lower() in ("1", "true", "yes")
 
@@ -1316,53 +1320,78 @@ async def proxy_request(path: str, request: Request):
     legacy_proxy = _is_legacy_proxy_mode()
     model_name = mapped_model or original_model or "unknown"
 
+    # `completed` guards the single completion of the log entry. Every normal
+    # exit sets it True after logging; the finally finalizes anything else -
+    # most importantly a client disconnect, which raises CancelledError (a
+    # BaseException, so it slips past `except Exception`) and would otherwise
+    # leave the entry "pending" forever (the dashboard's inflight pile).
+    completed = False
     try:
-        route_result = await _route_openai_request(source_ip, model_name, payload, path, headers, is_streaming, legacy_proxy)
-    except Exception as e:
-        logger.exception(f"Provider architecture failed: {e}")
-        return _error_response(log_entry, start_time, 503, str(e), request_body_bytes)
+        try:
+            route_result = await _route_openai_request(source_ip, model_name, payload, path, headers, is_streaming, legacy_proxy)
+        except Exception as e:
+            logger.exception(f"Provider architecture failed: {e}")
+            completed = True
+            return _error_response(log_entry, start_time, 503, str(e), request_body_bytes)
 
-    _update_log_entry_provider_metadata(log_entry, route_result.upstream_used, route_result.metadata)
+        _update_log_entry_provider_metadata(log_entry, route_result.upstream_used, route_result.metadata)
 
-    if route_result.is_streaming:
+        if route_result.is_streaming:
+            complete_request_log(
+                log_entry,
+                start_time,
+                {"status_code": route_result.status_code},
+                request_body=request_body_bytes,
+                metadata=route_result.metadata,
+            )
+            completed = True
+            return route_result.data
+
+        if route_result.status_code >= 400:
+            completed = True
+            return _error_response(
+                log_entry,
+                start_time,
+                route_result.status_code,
+                str(route_result.data),
+                request_body_bytes,
+                response_payload=route_result.data,
+                metadata=route_result.metadata,
+            )
+
+        logger.debug(f"Provider architecture response data: {json.dumps(route_result.data) if route_result.data else 'None'}")
+        _normalize_openai_response_content(route_result.data)
+
+        response_body_bytes = _serialize_json_bytes(route_result.data)
         complete_request_log(
             log_entry,
             start_time,
             {"status_code": route_result.status_code},
             request_body=request_body_bytes,
+            response_body=response_body_bytes,
             metadata=route_result.metadata,
         )
-        return route_result.data
+        completed = True
 
-    if route_result.status_code >= 400:
-        return _error_response(
-            log_entry,
-            start_time,
-            route_result.status_code,
-            str(route_result.data),
-            request_body_bytes,
-            response_payload=route_result.data,
-            metadata=route_result.metadata,
+        return JSONResponse(
+            content=route_result.data,
+            status_code=route_result.status_code,
+            headers=_build_request_tracking_headers(log_entry),
         )
-
-    logger.debug(f"Provider architecture response data: {json.dumps(route_result.data) if route_result.data else 'None'}")
-    _normalize_openai_response_content(route_result.data)
-
-    response_body_bytes = _serialize_json_bytes(route_result.data)
-    complete_request_log(
-        log_entry,
-        start_time,
-        {"status_code": route_result.status_code},
-        request_body=request_body_bytes,
-        response_body=response_body_bytes,
-        metadata=route_result.metadata,
-    )
-
-    return JSONResponse(
-        content=route_result.data,
-        status_code=route_result.status_code,
-        headers=_build_request_tracking_headers(log_entry),
-    )
+    finally:
+        if not completed:
+            # Cancelled/aborted before a normal completion. Finalize so the log
+            # is not orphaned, but never let this mask the original (Cancelled)
+            # exception, which continues to propagate after the finally.
+            try:
+                complete_request_log(
+                    log_entry,
+                    start_time,
+                    {"status_code": CLIENT_CLOSED_REQUEST_STATUS, "error_message": "client closed request"},
+                    request_body=request_body_bytes,
+                )
+            except Exception:
+                logger.warning("Failed to finalize log for aborted request", exc_info=True)
 
 
 async def _parse_ollama_request_payload(

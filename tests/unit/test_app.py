@@ -240,6 +240,54 @@ async def test_schema_invalid_request_returns_422_without_exception_signature(as
     assert after_summary["count_by_signature"] == before_summary["count_by_signature"]
 
 
+@pytest.mark.asyncio
+async def test_proxy_request_finalizes_log_on_client_cancel(monkeypatch, isolated_db):
+    """A client disconnect mid-request must finalize the log (status 499) instead
+    of leaving it 'pending' forever, and the CancelledError must still propagate.
+
+    Regression for the orphaned-inflight pile: CancelledError is a BaseException,
+    so it bypasses `except Exception`; only a finally finalizes the entry.
+    """
+    from starlette.requests import Request
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+
+    async def _cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "_route_openai_request", _cancel)
+
+    completion_statuses = []
+    real_complete = app_module.complete_request_log
+
+    def _spy(log_entry, start_time, response_data, **kwargs):
+        completion_statuses.append(response_data.get("status_code"))
+        return real_complete(log_entry, start_time, response_data, **kwargs)
+
+    monkeypatch.setattr(app_module, "complete_request_log", _spy)
+
+    body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    async def _receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [(b"content-type", b"application/json"), (b"authorization", b"Bearer test-key")],
+        "client": ("127.0.0.1", 12345),
+        "query_string": b"",
+    }
+    request = Request(scope, _receive)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app_module.proxy_request("/v1/chat/completions", request)
+
+    # Finalized exactly once, as a client-close (499) - not orphaned, not double-logged.
+    assert completion_statuses == [app_module.CLIENT_CLOSED_REQUEST_STATUS]
+
+
 def test_resolve_route_pattern_falls_back_to_path():
     request = Mock()
     request.scope = {}
