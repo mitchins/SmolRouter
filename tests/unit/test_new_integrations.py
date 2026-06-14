@@ -1901,6 +1901,31 @@ async def test_exception_after_instance_selected_returns_lb_instance_for_decreme
 
 
 @pytest.mark.asyncio
+async def test_cancellation_after_instance_selected_releases_lb_instance():
+    """Regression (CodeRabbit critical): a client disconnect raises CancelledError
+    (a BaseException) that bypasses the TimeoutError/Exception handlers. The
+    selected LB instance must still be released (active_requests decremented) and
+    the cancellation must still propagate - otherwise the instance leaks busy."""
+    sentinel_instance = SimpleNamespace(model_id="m@host", active_requests=1)
+    mediator = _mediator_with_resolved_lb_instance(sentinel_instance)
+
+    async def _cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    mediator._route_request_internal = AsyncMock(side_effect=_cancel)
+
+    with patch("smolrouter.mediator.model_load_balancer") as lb:
+        lb.end_request = AsyncMock()
+        with pytest.raises(asyncio.CancelledError):
+            await mediator.route_request(
+                "127.0.0.1", "m", {"model": "m", "messages": []}, "/v1/chat/completions", {}, 30.0
+            )
+
+    lb.end_request.assert_awaited_once()
+    assert lb.end_request.await_args.args[0] is sentinel_instance
+
+
+@pytest.mark.asyncio
 async def test_resolve_releases_instance_when_no_model_matches():
     """Regression: select_instance() increments active_requests; if the selected
     instance can't be mapped back to an available model the increment must be

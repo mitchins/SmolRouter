@@ -138,7 +138,7 @@ async def demo_new_architecture():
 
         # Test 3: Get provider health
         print("\n  Checking provider health...")
-        health = await mediator.get_provider_health()
+        health = mediator.get_provider_health()
         for provider_id, is_healthy in health.items():
             status = "Healthy" if is_healthy else "Unhealthy"
             print(f"     {provider_id}: {status}")

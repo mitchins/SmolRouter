@@ -248,7 +248,7 @@ class SmolRouterContainer:
         await self._mediator.aggregator._update_provider_health()
 
         # Get detailed health status
-        detailed_health = await self._mediator.get_provider_health_detailed()
+        detailed_health = self._mediator.get_provider_health_detailed()
 
         healthy_count = 0
         total_count = len(self._providers)
@@ -534,7 +534,7 @@ class SmolRouterContainer:
         if not self._initialized:
             await self.initialize()
 
-        provider_health = await self._mediator.get_provider_health()
+        provider_health = self._mediator.get_provider_health()
         stats = await self._mediator.get_mediator_stats()
 
         return {

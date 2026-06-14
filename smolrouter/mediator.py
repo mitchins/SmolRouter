@@ -225,13 +225,13 @@ class ModelMediator:
 
         logger.info(f"Refreshed models for {provider_id or 'all providers'}")
 
-    async def get_provider_health(self) -> Dict[str, bool]:
-        """Get health status of all providers"""
-        return await self.aggregator.get_provider_health()
+    def get_provider_health(self) -> Dict[str, bool]:
+        """Get health status of all providers (synchronous cached read)"""
+        return self.aggregator.get_provider_health()
 
-    async def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
-        """Get detailed health status of all providers"""
-        return await self.aggregator.get_provider_health_detailed()
+    def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
+        """Get detailed health status of all providers (synchronous cached read)"""
+        return self.aggregator.get_provider_health_detailed()
 
     async def get_mediator_stats(self) -> Dict[str, Any]:
         """Get comprehensive statistics for monitoring"""
@@ -427,7 +427,6 @@ class ModelMediator:
 
     async def _route_request_internal(
         self,
-        client: ClientContext,
         resolved_model: ModelInfo,
         request_payload: Dict[str, Any],
         path: str,
@@ -536,8 +535,18 @@ class ModelMediator:
                 self._apply_resolved_model_to_payload(resolved_model, request_payload)
 
                 return await self._route_request_internal(
-                    client, resolved_model, request_payload, path, headers, lb_instance
+                    resolved_model, request_payload, path, headers, lb_instance
                 )
+
+        except asyncio.CancelledError:
+            # Client disconnect/shutdown. CancelledError is a BaseException, so it
+            # bypasses the handlers below and we can't return metadata (we must
+            # propagate the cancellation). select_instance() already incremented
+            # active_requests, so decrement it directly here or the instance is
+            # leaked as permanently "busy".
+            if lb_instance is not None:
+                await model_load_balancer.end_request(lb_instance, 0.0, success=False)
+            raise
 
         except TimeoutError:
             logger.error(f"Request timeout while routing model '{model}'")

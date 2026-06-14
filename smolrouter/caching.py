@@ -313,6 +313,10 @@ class ModelAggregator:
         """
         # Determine which providers to query. Providers with last-known-good
         # models stay eligible even if their latest health status is unhealthy.
+        # force_refresh (freshness) and include_unhealthy (visibility) are
+        # intentionally orthogonal: a forced refresh still only surfaces healthy
+        # providers unless include_unhealthy is set. Recovery of unhealthy
+        # providers is the background health loop's job.
         providers_to_query = []
         if include_unhealthy:
             providers_to_query = self.providers
@@ -356,12 +360,11 @@ class ModelAggregator:
             task = await self._get_or_start_refresh(provider)
             return await self._await_bounded(task, provider_id)
 
-        if not force_refresh:
-            cached_models = await self.cache.get_cached_models(provider_id)
-            if cached_models is not None:
-                logger.debug(f"Using cached models for provider {provider_id}")
-                self._last_known_models[provider_id] = cached_models.copy()
-                return cached_models
+        cached_models = await self.cache.get_cached_models(provider_id)
+        if cached_models is not None:
+            logger.debug(f"Using cached models for provider {provider_id}")
+            self._last_known_models[provider_id] = cached_models.copy()
+            return cached_models
 
         stale_models = self._last_known_models.get(provider_id)
         if stale_models is not None:
@@ -422,6 +425,12 @@ class ModelAggregator:
         """Wait for a shared refresh task without cancelling it on timeout."""
         done, _ = await asyncio.wait({task}, timeout=self.discovery_timeout)
         if task in done:
+            # A refresh cancelled by close() raises CancelledError from result()
+            # (a BaseException, so it would escape `except Exception`). Fall back
+            # to last-known-good rather than propagating a shutdown cancellation
+            # into a request.
+            if task.cancelled():
+                return self._last_known_models.get(provider_id, []).copy()
             try:
                 return task.result()
             except Exception:
@@ -470,19 +479,30 @@ class ModelAggregator:
         """Refresh cache for specific provider or all providers"""
         if provider_id:
             await self.cache.invalidate_cache(provider_id)
+            # Also drop last-known-good + the refresh throttle so the next read
+            # re-discovers instead of serving stale models (an explicit refresh
+            # is meant to pick up added/removed upstream models).
+            self._last_known_models.pop(provider_id, None)
+            self._last_refresh_attempt.pop(provider_id, None)
             logger.info(f"Refreshed cache for provider {provider_id}")
         else:
             await self.cache.invalidate_cache()
+            self._last_known_models.clear()
+            self._last_refresh_attempt.clear()
             logger.info("Refreshed cache for all providers")
 
-    async def get_provider_health(self) -> Dict[str, bool]:
-        """Get health status of all providers (backward compatibility)"""
+    def get_provider_health(self) -> Dict[str, bool]:
+        """Get health status of all providers (backward compatibility).
+
+        Synchronous: this reads the cached in-memory health map. The async
+        refresh happens in the background health-monitoring loop.
+        """
         return {
             provider_id: health_info.healthy if health_info.healthy is not None else False
             for provider_id, health_info in self._provider_health.items()
         }
 
-    async def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
+    def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
         """Get detailed health status of all providers"""
         result = {}
         for provider_id, health_info in self._provider_health.items():

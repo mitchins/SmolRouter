@@ -488,12 +488,11 @@ def _initialize_blob_storage_strict() -> None:
         return
     try:
         init_blob_storage()
-    except Exception as e:
-        logger.error(
-            "Blob storage failed to initialize while request logging is enabled: %s. "
+    except Exception:
+        logger.exception(
+            "Blob storage failed to initialize while request logging is enabled. "
             "Fix the storage path (e.g. BLOB_STORAGE_PATH must be a writable directory) "
-            "or set ENABLE_LOGGING=false to run without request logging.",
-            e,
+            "or set ENABLE_LOGGING=false to run without request logging."
         )
         raise
 
@@ -2513,10 +2512,10 @@ async def api_upstreams():
             mediator = await container.get_mediator()
 
             # Get provider health (backward compatibility)
-            provider_health = await mediator.get_provider_health()
+            provider_health = mediator.get_provider_health()
 
             # Get detailed provider health information
-            detailed_health = await mediator.get_provider_health_detailed()
+            detailed_health = mediator.get_provider_health_detailed()
 
             # Get architecture stats
             stats = await mediator.get_mediator_stats()
