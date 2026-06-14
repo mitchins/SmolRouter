@@ -742,9 +742,21 @@ class RequestLogEntry:
         from .storage import get_blob_storage
         from .redis_backend import RedisRequestLog
 
-        blob_storage = get_blob_storage()
-        request_body_key = await self._store_request_body_if_needed(blob_storage)
-        response_body_key = await self._store_response_body_if_present(blob_storage)
+        # Body archival is best-effort and must NEVER block the critical
+        # completion accounting. A filesystem/blob failure should cost us the
+        # stored bodies, not the status_code/completed_at the dashboard relies
+        # on - otherwise the request shows "pending" forever.
+        request_body_key = None
+        response_body_key = None
+        try:
+            blob_storage = get_blob_storage()
+            request_body_key = await self._store_request_body_if_needed(blob_storage)
+            response_body_key = await self._store_response_body_if_present(blob_storage)
+        except Exception as e:
+            logger.warning(
+                f"Body storage failed for request {self.request_id}; completing without bodies: {e}"
+            )
+
         await RedisRequestLog.update_completion(
             **self._completion_update_kwargs(request_body_key, response_body_key)
         )

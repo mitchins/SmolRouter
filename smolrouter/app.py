@@ -477,14 +477,28 @@ logger.info(f"ENABLE_LOGGING: {ENABLE_LOGGING}")
 logger.info(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
 logger.info(f"Listening on {LISTEN_HOST}:{LISTEN_PORT}")
 
-# Initialize blob storage if logging is enabled
-if ENABLE_LOGGING:
+# Initialize blob storage. Request logging is ON by default; a bad/unwritable
+# storage path is an operator-fixable precondition, so fail LOUDLY rather than
+# silently downgrade to a "healthy but not logging" process (which previously
+# created request entries that could never be completed -> permanent "pending").
+# To intentionally run without logging, set ENABLE_LOGGING=false.
+def _initialize_blob_storage_strict() -> None:
+    if not ENABLE_LOGGING:
+        logger.warning("Request logging DISABLED by operator (ENABLE_LOGGING=false)")
+        return
     try:
         init_blob_storage()
     except Exception as e:
-        logger.exception(f"Failed to initialize blob storage: {e}")
-        logger.warning("Request logging will be disabled")
-        ENABLE_LOGGING = False
+        logger.error(
+            "Blob storage failed to initialize while request logging is enabled: %s. "
+            "Fix the storage path (e.g. BLOB_STORAGE_PATH must be a writable directory) "
+            "or set ENABLE_LOGGING=false to run without request logging.",
+            e,
+        )
+        raise
+
+
+_initialize_blob_storage_strict()
 
 # Initialize WebUI security
 init_webui_security()

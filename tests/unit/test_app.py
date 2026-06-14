@@ -288,6 +288,81 @@ async def test_proxy_request_finalizes_log_on_client_cancel(monkeypatch, isolate
     assert completion_statuses == [app_module.CLIENT_CLOSED_REQUEST_STATUS]
 
 
+def test_initialize_blob_storage_strict_fails_loud_on_bad_precondition(monkeypatch):
+    """A bad/unwritable storage path with logging enabled must fail LOUDLY, not
+    silently disable logging (which orphaned every request as 'pending')."""
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+
+    def _boom():
+        raise OSError("Read-only file system: '/app/blob_storage'")
+
+    monkeypatch.setattr(app_module, "init_blob_storage", _boom)
+
+    with pytest.raises(OSError):
+        app_module._initialize_blob_storage_strict()
+
+    # It must NOT silently flip logging off.
+    assert app_module.ENABLE_LOGGING is True
+
+
+def test_initialize_blob_storage_strict_skips_when_operator_disabled(monkeypatch):
+    """Running without logging is the explicit footgun: ENABLE_LOGGING=false."""
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    called = []
+    monkeypatch.setattr(app_module, "init_blob_storage", lambda: called.append(1))
+
+    app_module._initialize_blob_storage_strict()  # must not raise, must not init
+
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_completion_persists_status_even_when_blob_store_fails(isolated_db, monkeypatch):
+    """Body archival is best-effort: a blob failure must not lose the completion
+    accounting (status_code/completed_at), or the request stays 'pending'."""
+    from datetime import datetime
+    from starlette.requests import Request
+    from smolrouter.redis_backend import RedisRequestLog
+    import smolrouter.storage as storage_module
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+
+    class _BoomStorage:
+        def store(self, *_args, **_kwargs):
+            raise OSError("read-only file system")
+
+    monkeypatch.setattr(storage_module, "get_blob_storage", lambda: _BoomStorage())
+
+    async def _receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1),
+        "query_string": b"",
+    }
+    log_entry = await app_module.start_request_log(
+        Request(scope, _receive), "openai", "http://up", "m", "m", None, b'{"prompt":"hi"}'
+    )
+
+    log_entry.status_code = 200
+    log_entry.duration_ms = 5
+    log_entry.response_size = 3
+    log_entry.completed_at = datetime.now()
+    log_entry.set_response_body(b'{"ok":1}')
+
+    # Deterministic persistence (no background task race).
+    await log_entry.save_async()
+
+    rec = await RedisRequestLog.get_by_id(log_entry.request_id)
+    assert rec is not None
+    assert rec.status_code == 200
+    assert rec.completed_at is not None  # not orphaned despite blob failure
+
+
 def test_resolve_route_pattern_falls_back_to_path():
     request = Mock()
     request.scope = {}
