@@ -1923,6 +1923,7 @@ async def test_cancellation_after_instance_selected_releases_lb_instance():
 
     lb.end_request.assert_awaited_once()
     assert lb.end_request.await_args.args[0] is sentinel_instance
+    assert lb.end_request.await_args.kwargs.get("success") is False
 
 
 @pytest.mark.asyncio
@@ -1946,6 +1947,7 @@ async def test_resolve_releases_instance_when_no_model_matches():
     assert result is None
     lb.end_request.assert_awaited_once()
     assert lb.end_request.await_args.args[0] is selected
+    assert lb.end_request.await_args.kwargs.get("success") is False
 
 
 @pytest.mark.asyncio

@@ -457,25 +457,29 @@ class TestCaching:
         aggregator.close()
 
     @pytest.mark.asyncio
-    async def test_refresh_provider_cache_clears_last_known_good(self):
-        """An explicit cache refresh must drop last-known-good + the refresh
-        throttle, or it keeps serving stale models (PR review: Codex/CodeRabbit)."""
+    async def test_refresh_provider_cache_forces_rediscovery(self):
+        """An explicit cache refresh must re-discover (pick up added/removed
+        models) rather than keep serving last-known-good (Codex/CodeRabbit).
+        Asserted via public behavior: the post-refresh read returns fresh models."""
         provider = Mock()
         provider.get_provider_id.return_value = "p"
         provider.health_check = AsyncMock(return_value=True)
-        models = [ModelInfo("m@p", "m", "p", "openai", "https://p.example")]
-        provider.discover_models = AsyncMock(return_value=models)
+        v1 = [ModelInfo("a@p", "a", "p", "openai", "https://p.example")]
+        v2 = [ModelInfo("b@p", "b", "p", "openai", "https://p.example")]
+        provider.discover_models = AsyncMock(side_effect=[v1, v2])
 
-        aggregator = ModelAggregator([provider], cache=NoOpModelCache(), default_cache_ttl=30, health_check_interval=3600)
+        aggregator = ModelAggregator(
+            [provider],
+            cache=InMemoryModelCache(default_ttl=30, cleanup_interval=3600),
+            default_cache_ttl=30,
+            health_check_interval=3600,
+        )
 
-        assert await aggregator.get_all_models() == models
-        assert "p" in aggregator._last_known_models
-        assert "p" in aggregator._last_refresh_attempt
-
+        assert await aggregator.get_all_models() == v1
+        # Without clearing last-known-good, this read would serve stale v1.
         await aggregator.refresh_provider_cache("p")
+        assert await aggregator.get_all_models() == v2  # re-discovered
 
-        assert "p" not in aggregator._last_known_models
-        assert "p" not in aggregator._last_refresh_attempt
         aggregator.close()
 
     @pytest.mark.asyncio

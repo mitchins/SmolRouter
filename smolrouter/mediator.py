@@ -542,10 +542,13 @@ class ModelMediator:
             # Client disconnect/shutdown. CancelledError is a BaseException, so it
             # bypasses the handlers below and we can't return metadata (we must
             # propagate the cancellation). select_instance() already incremented
-            # active_requests, so decrement it directly here or the instance is
-            # leaked as permanently "busy".
+            # active_requests, so release it here - best-effort, so a cleanup
+            # failure can never mask the original cancellation.
             if lb_instance is not None:
-                await model_load_balancer.end_request(lb_instance, 0.0, success=False)
+                try:
+                    await model_load_balancer.end_request(lb_instance, 0.0, success=False)
+                except Exception:
+                    logger.exception("Failed to release load balancer instance on cancellation")
             raise
 
         except TimeoutError:
