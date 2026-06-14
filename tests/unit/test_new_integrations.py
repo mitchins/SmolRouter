@@ -1847,6 +1847,148 @@ async def test_mediator_returns_gateway_timeout_when_resolution_exceeds_timeout(
     assert response_data["error"]["type"] == "timeout_error"
 
 
+def _mediator_with_resolved_lb_instance(sentinel_instance):
+    """Build a mediator whose resolution yields a model bound to sentinel_instance."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+
+    resolved = SimpleNamespace(name="m", _lb_instance=sentinel_instance)
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved)
+    return mediator
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_instance_selected_returns_lb_instance_for_decrement():
+    """Regression: a timeout AFTER an LB instance was selected must return the
+    instance in metadata so active_requests can be decremented downstream.
+
+    Previously the timeout path returned metadata=None, so the increment done by
+    select_instance() was never undone - the active_requests "leak" observed in
+    production (active_requests far exceeding total_requests)."""
+    sentinel_instance = SimpleNamespace(model_id="m@host", active_requests=1)
+    mediator = _mediator_with_resolved_lb_instance(sentinel_instance)
+
+    async def slow_internal(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+
+    mediator._route_request_internal = AsyncMock(side_effect=slow_internal)
+
+    _data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1", "m", {"model": "m", "messages": []}, "/v1/chat/completions", {}, 0.001
+    )
+
+    assert status_code == 504
+    assert upstream_used == "timeout"
+    assert metadata is not None and metadata.lb_instance is sentinel_instance
+
+
+@pytest.mark.asyncio
+async def test_exception_after_instance_selected_returns_lb_instance_for_decrement():
+    """Regression: an unexpected error after instance selection must also carry
+    lb_instance in metadata so the counter is decremented (no leak)."""
+    sentinel_instance = SimpleNamespace(model_id="m@host", active_requests=1)
+    mediator = _mediator_with_resolved_lb_instance(sentinel_instance)
+
+    mediator._route_request_internal = AsyncMock(side_effect=RuntimeError("boom"))
+
+    _data, status_code, _upstream, metadata = await mediator.route_request(
+        "127.0.0.1", "m", {"model": "m", "messages": []}, "/v1/chat/completions", {}, 30.0
+    )
+
+    assert status_code == 500
+    assert metadata is not None and metadata.lb_instance is sentinel_instance
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_instance_selected_releases_lb_instance():
+    """Regression (CodeRabbit critical): a client disconnect raises CancelledError
+    (a BaseException) that bypasses the TimeoutError/Exception handlers. The
+    selected LB instance must still be released (active_requests decremented) and
+    the cancellation must still propagate - otherwise the instance leaks busy."""
+    sentinel_instance = SimpleNamespace(model_id="m@host", active_requests=1)
+    mediator = _mediator_with_resolved_lb_instance(sentinel_instance)
+
+    async def _cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    mediator._route_request_internal = AsyncMock(side_effect=_cancel)
+
+    with patch("smolrouter.mediator.model_load_balancer") as lb:
+        lb.end_request = AsyncMock()
+        with pytest.raises(asyncio.CancelledError):
+            await mediator.route_request(
+                "127.0.0.1", "m", {"model": "m", "messages": []}, "/v1/chat/completions", {}, 30.0
+            )
+
+    lb.end_request.assert_awaited_once()
+    assert lb.end_request.await_args.args[0] is sentinel_instance
+    assert lb.end_request.await_args.kwargs.get("success") is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_releases_instance_when_no_model_matches():
+    """Regression: select_instance() increments active_requests; if the selected
+    instance can't be mapped back to an available model the increment must be
+    released, otherwise the counter leaks."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+
+    selected = SimpleNamespace(model_id="m", provider_url="http://host")
+
+    with patch("smolrouter.mediator.model_load_balancer") as lb:
+        lb.select_instance = AsyncMock(return_value=selected)
+        lb.end_request = AsyncMock()
+
+        # available_models is empty -> no model matches the selected instance.
+        result = await mediator._resolve_model_via_load_balancer("m", [])
+
+    assert result is None
+    lb.end_request.assert_awaited_once()
+    assert lb.end_request.await_args.args[0] is selected
+    assert lb.end_request.await_args.kwargs.get("success") is False
+
+
+@pytest.mark.asyncio
+async def test_container_returns_clean_504_on_timeout_without_raising():
+    """Regression: the container must NOT wrap a second asyncio.timeout around
+    the mediator. A nested same-deadline timeout races the mediator's, and when
+    the outer one wins it cancels the mediator mid-flight; the CancelledError
+    bypasses the mediator's TimeoutError handling and surfaces as an uncaught
+    TimeoutError (logged as "Provider architecture failed", returned as 503).
+
+    With the mediator as the single timeout authority, a slow route resolves to
+    a clean 504 response tuple - no exception escapes the container."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+
+    async def slow_resolve(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        return None
+
+    mediator.resolve_model_for_request = AsyncMock(side_effect=slow_resolve)
+
+    container = SmolRouterContainer()
+    container._initialized = True
+    container._mediator = mediator
+
+    # Must return a tuple, not raise TimeoutError/CancelledError.
+    data, status_code, upstream_used, _metadata = await container.route_request(
+        "127.0.0.1",
+        "gpt-4o",
+        {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+        "/v1/chat/completions",
+        {},
+        0.001,
+    )
+
+    assert status_code == 504
+    assert upstream_used == "timeout"
+    assert data["error"]["type"] == "timeout_error"
+
+
 def test_supported_provider_types():
     """Test that new provider types are registered"""
     supported_types = ProviderFactory.get_supported_types()

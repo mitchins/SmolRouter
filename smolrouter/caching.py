@@ -224,13 +224,19 @@ class ModelAggregator:
         cache: Optional[IModelCache] = None,
         default_cache_ttl: int = 300,
         health_check_interval: int = 30,
+        discovery_timeout: float = 10.0,
     ):
         self.providers = providers
         self.cache = cache or InMemoryModelCache(default_ttl=default_cache_ttl)
         self.default_cache_ttl = default_cache_ttl
         self.health_check_interval = health_check_interval
+        self.discovery_timeout = discovery_timeout
         self._provider_health: Dict[str, ProviderHealthInfo] = {}
-        self._discovery_lock = asyncio.Lock()
+        self._last_known_models: Dict[str, List[ModelInfo]] = {}
+        self._refresh_tasks: Dict[str, asyncio.Task[List[ModelInfo]]] = {}
+        self._refresh_guard = asyncio.Lock()
+        self._last_refresh_attempt: Dict[str, float] = {}
+        self._refresh_min_interval: float = min(default_cache_ttl, 30.0)
         self._health_check_task = None
 
         # Initialize health info for all providers as unknown
@@ -305,71 +311,160 @@ class ModelAggregator:
         Returns:
             Aggregated list of all available models
         """
-        async with self._discovery_lock:
-            # Determine which providers to query
-            providers_to_query = []
-            if include_unhealthy:
-                providers_to_query = self.providers
-            else:
-                providers_to_query = [
-                    p
-                    for p in self.providers
-                    if self._provider_health.get(p.get_provider_id(), ProviderHealthInfo(healthy=True)).healthy
-                    is not False
-                ]
+        # Determine which providers to query. Providers with last-known-good
+        # models stay eligible even if their latest health status is unhealthy.
+        # force_refresh (freshness) and include_unhealthy (visibility) are
+        # intentionally orthogonal: a forced refresh still only surfaces healthy
+        # providers unless include_unhealthy is set. Recovery of unhealthy
+        # providers is the background health loop's job.
+        providers_to_query = []
+        if include_unhealthy:
+            providers_to_query = self.providers
+        else:
+            providers_to_query = [
+                p
+                for p in self.providers
+                if self._is_provider_queryable(p)
+            ]
 
-            # Collect models from all providers
-            all_models = []
-            discovery_tasks = []
+        discovery_tasks = [
+            self._discover_models_from_provider(provider, force_refresh)
+            for provider in providers_to_query
+        ]
 
-            for provider in providers_to_query:
-                discovery_tasks.append(self._discover_models_from_provider(provider, force_refresh))
+        provider_results = await asyncio.gather(*discovery_tasks, return_exceptions=True)
 
-            # Execute all discovery tasks concurrently
-            provider_results = await asyncio.gather(*discovery_tasks, return_exceptions=True)
+        all_models = []
+        for provider, result in zip(providers_to_query, provider_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error discovering models from {provider.get_provider_id()}: {result}")
+                continue
 
-            # Collect results
-            for provider, result in zip(providers_to_query, provider_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error discovering models from {provider.get_provider_id()}: {result}")
-                    continue
+            if isinstance(result, list):
+                all_models.extend(result)
 
-                if isinstance(result, list):
-                    all_models.extend(result)
+        logger.info(f"Aggregated {len(all_models)} models from {len(providers_to_query)} providers")
+        return all_models
 
-            logger.info(f"Aggregated {len(all_models)} models from {len(providers_to_query)} providers")
-            return all_models
+    def _is_provider_queryable(self, provider) -> bool:
+        """Return whether a provider should be included in aggregated model reads."""
+        provider_id = provider.get_provider_id()
+        health_info = self._provider_health.get(provider_id, ProviderHealthInfo(healthy=True))
+        return health_info.healthy is not False or provider_id in self._last_known_models
 
     async def _discover_models_from_provider(self, provider, force_refresh: bool) -> List[ModelInfo]:
         """Discover models from a single provider with caching"""
         provider_id = provider.get_provider_id()
 
-        # Check cache first (unless forced refresh)
-        if not force_refresh:
-            cached_models = await self.cache.get_cached_models(provider_id)
-            if cached_models is not None:
-                logger.debug(f"Using cached models for provider {provider_id}")
-                return cached_models
+        if force_refresh:
+            task = await self._get_or_start_refresh(provider)
+            return await self._await_bounded(task, provider_id)
 
-        # Cache miss or forced refresh - discover from provider
+        cached_models = await self.cache.get_cached_models(provider_id)
+        if cached_models is not None:
+            logger.debug(f"Using cached models for provider {provider_id}")
+            self._last_known_models[provider_id] = cached_models.copy()
+            return cached_models
+
+        stale_models = self._last_known_models.get(provider_id)
+        if stale_models is not None:
+            await self._maybe_start_background_refresh(provider)
+            return stale_models.copy()
+
+        task = await self._get_or_start_refresh(provider)
+        return await self._await_bounded(task, provider_id)
+
+    async def _get_or_start_refresh(self, provider) -> asyncio.Task[List[ModelInfo]]:
+        """Return the active provider refresh task, starting one if needed."""
+        provider_id = provider.get_provider_id()
+        async with self._refresh_guard:
+            task = self._refresh_tasks.get(provider_id)
+            if task is None or task.done():
+                task = asyncio.create_task(self._run_refresh(provider))
+                self._refresh_tasks[provider_id] = task
+                self._last_refresh_attempt[provider_id] = time.monotonic()
+                task.add_done_callback(lambda done_task, pid=provider_id: self._on_refresh_done(pid, done_task))
+            return task
+
+    async def _maybe_start_background_refresh(self, provider):
+        """Start a throttled background provider refresh without awaiting it."""
+        provider_id = provider.get_provider_id()
+        elapsed = time.monotonic() - self._last_refresh_attempt.get(provider_id, 0.0)
+        if elapsed < self._refresh_min_interval:
+            return
+
+        await self._get_or_start_refresh(provider)
+
+    async def _run_refresh(self, provider) -> List[ModelInfo]:
+        """Refresh a single provider with timeout and stale fallback."""
+        provider_id = provider.get_provider_id()
+
         try:
             logger.debug(f"Discovering models from provider {provider_id}")
-            models = await provider.discover_models()
+            async with asyncio.timeout(self.discovery_timeout):
+                models = await provider.discover_models()
 
-            # Cache the results
             await self.cache.cache_models(provider_id, models, self.default_cache_ttl)
+            self._last_known_models[provider_id] = models.copy()
+            self._mark_provider_healthy(provider_id)
 
             logger.debug(f"Discovered and cached {len(models)} models from {provider_id}")
             return models
 
+        except TimeoutError:
+            logger.warning(f"Timed out discovering models from provider {provider_id}")
+            self._mark_provider_unhealthy(provider_id)
+            return self._last_known_models.get(provider_id, []).copy()
+
         except Exception as e:
             logger.error(f"Failed to discover models from provider {provider_id}: {e}")
-            # Mark provider as unhealthy
-            health_info = self._provider_health.get(provider_id, ProviderHealthInfo())
-            health_info.healthy = False
-            health_info.last_checked = datetime.now()
-            self._provider_health[provider_id] = health_info
-            return []
+            self._mark_provider_unhealthy(provider_id)
+            return self._last_known_models.get(provider_id, []).copy()
+
+    async def _await_bounded(self, task: asyncio.Task[List[ModelInfo]], provider_id: str) -> List[ModelInfo]:
+        """Wait for a shared refresh task without cancelling it on timeout."""
+        done, _ = await asyncio.wait({task}, timeout=self.discovery_timeout)
+        if task in done:
+            # A refresh cancelled by close() raises CancelledError from result()
+            # (a BaseException, so it would escape `except Exception`). Fall back
+            # to last-known-good rather than propagating a shutdown cancellation
+            # into a request.
+            if task.cancelled():
+                return self._last_known_models.get(provider_id, []).copy()
+            try:
+                return task.result()
+            except Exception:
+                return self._last_known_models.get(provider_id, []).copy()
+
+        return self._last_known_models.get(provider_id, []).copy()
+
+    def _on_refresh_done(self, provider_id: str, task: asyncio.Task[List[ModelInfo]]):
+        """Remove finished refresh tasks and retrieve exceptions."""
+        if self._refresh_tasks.get(provider_id) is task:
+            self._refresh_tasks.pop(provider_id, None)
+
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if exc:
+            logger.warning(f"Background refresh for {provider_id} errored: {exc}")
+
+    def _mark_provider_healthy(self, provider_id: str):
+        """Mark a provider healthy after successful discovery."""
+        now = datetime.now()
+        health_info = self._provider_health.get(provider_id, ProviderHealthInfo())
+        health_info.healthy = True
+        health_info.last_checked = now
+        health_info.last_healthy = now
+        self._provider_health[provider_id] = health_info
+
+    def _mark_provider_unhealthy(self, provider_id: str):
+        """Mark a provider unhealthy after failed discovery."""
+        health_info = self._provider_health.get(provider_id, ProviderHealthInfo())
+        health_info.healthy = False
+        health_info.last_checked = datetime.now()
+        self._provider_health[provider_id] = health_info
 
     async def get_models_by_provider(self, provider_id: str, force_refresh: bool = False) -> List[ModelInfo]:
         """Get models from a specific provider"""
@@ -384,32 +479,41 @@ class ModelAggregator:
         """Refresh cache for specific provider or all providers"""
         if provider_id:
             await self.cache.invalidate_cache(provider_id)
+            # Also drop last-known-good + the refresh throttle so the next read
+            # re-discovers instead of serving stale models (an explicit refresh
+            # is meant to pick up added/removed upstream models).
+            self._last_known_models.pop(provider_id, None)
+            self._last_refresh_attempt.pop(provider_id, None)
             logger.info(f"Refreshed cache for provider {provider_id}")
         else:
             await self.cache.invalidate_cache()
+            self._last_known_models.clear()
+            self._last_refresh_attempt.clear()
             logger.info("Refreshed cache for all providers")
 
-    async def get_provider_health(self) -> Dict[str, bool]:
-        """Get health status of all providers (backward compatibility)"""
-        async with self._discovery_lock:
-            return {
-                provider_id: health_info.healthy if health_info.healthy is not None else False
-                for provider_id, health_info in self._provider_health.items()
-            }
+    def get_provider_health(self) -> Dict[str, bool]:
+        """Get health status of all providers (backward compatibility).
 
-    async def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
+        Synchronous: this reads the cached in-memory health map. The async
+        refresh happens in the background health-monitoring loop.
+        """
+        return {
+            provider_id: health_info.healthy if health_info.healthy is not None else False
+            for provider_id, health_info in self._provider_health.items()
+        }
+
+    def get_provider_health_detailed(self) -> Dict[str, Dict[str, Any]]:
         """Get detailed health status of all providers"""
-        async with self._discovery_lock:
-            result = {}
-            for provider_id, health_info in self._provider_health.items():
-                result[provider_id] = {
-                    "healthy": health_info.healthy,
-                    "status": health_info.status,
-                    "last_checked": health_info.last_checked.isoformat() if health_info.last_checked else None,
-                    "last_healthy": health_info.last_healthy.isoformat() if health_info.last_healthy else None,
-                    "last_checked_ago": self._time_ago(health_info.last_checked) if health_info.last_checked else "never",
-                }
-            return result
+        result = {}
+        for provider_id, health_info in self._provider_health.items():
+            result[provider_id] = {
+                "healthy": health_info.healthy,
+                "status": health_info.status,
+                "last_checked": health_info.last_checked.isoformat() if health_info.last_checked else None,
+                "last_healthy": health_info.last_healthy.isoformat() if health_info.last_healthy else None,
+                "last_checked_ago": self._time_ago(health_info.last_checked) if health_info.last_checked else "never",
+            }
+        return result
 
     def _time_ago(self, timestamp: datetime) -> str:
         """Get human-readable time ago string"""
@@ -438,9 +542,8 @@ class ModelAggregator:
         if get_cache_stats is not None:
             cache_stats = await get_cache_stats()
 
-        async with self._discovery_lock:
-            provider_health = self._provider_health.copy()
-            healthy_providers = sum(1 for health_info in provider_health.values() if health_info.healthy is True)
+        provider_health = self._provider_health.copy()
+        healthy_providers = sum(1 for health_info in provider_health.values() if health_info.healthy is True)
 
         return {
             "provider_count": len(self.providers),
@@ -449,12 +552,17 @@ class ModelAggregator:
             "cache_stats": cache_stats,
             "default_cache_ttl": self.default_cache_ttl,
             "health_check_interval": self.health_check_interval,
+            "discovery_timeout": self.discovery_timeout,
         }
 
     def close(self):
         """Clean shutdown of aggregator"""
         if self._health_check_task and not self._health_check_task.done():
             self._health_check_task.cancel()
+
+        for task in self._refresh_tasks.values():
+            if not task.done():
+                task.cancel()
 
         close_cache = cast(Optional[Callable[[], None]], getattr(self.cache, "close", None))
         if close_cache is not None:

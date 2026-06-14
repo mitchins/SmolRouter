@@ -6,6 +6,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# asyncio only keeps weak references to tasks, so a fire-and-forget task can be
+# garbage-collected mid-flight and silently never finish. Hold a strong
+# reference here until the task completes, then drop it.
+_background_tasks: "set[Task[Any]]" = set()
+
 
 def create_logged_task(
     coro: Awaitable[Any],
@@ -31,7 +36,10 @@ def create_logged_task(
             logger.debug("Failed to close unscheduled coroutine for %s", task_name, exc_info=True)
         return None
 
+    _background_tasks.add(task)
+
     def _on_done(done: Task[Any]) -> None:
+        _background_tasks.discard(done)
         try:
             done.result()
         except asyncio.CancelledError:

@@ -71,3 +71,27 @@ def test_create_logged_task_no_event_loop_logs_and_closes(caplog):
         assert task is None
 
     assert any("Unable to schedule background task task-utils-no-loop: no running event loop" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_create_logged_task_retains_strong_reference_until_done():
+    """asyncio only weakly references tasks; create_logged_task must hold a
+    strong ref until completion so fire-and-forget tasks can't be GC'd mid-flight."""
+    from smolrouter import task_utils
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work():
+        started.set()
+        await release.wait()
+
+    task = task_utils.create_logged_task(work(), task_name="strong-ref")
+    await started.wait()
+    assert task in task_utils._background_tasks  # retained while running
+
+    release.set()
+    await task
+    await asyncio.sleep(0)  # let the done-callback run
+
+    assert task not in task_utils._background_tasks  # dropped once done
