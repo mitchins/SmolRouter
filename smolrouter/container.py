@@ -411,10 +411,17 @@ class SmolRouterContainer:
         if not self._initialized:
             await self.initialize()
 
-        async with asyncio.timeout(request_timeout):
-            return await self._mediator.route_request(
-                source_ip, model, request_payload, path, headers, request_timeout
-            )
+        # The mediator is the single timeout authority: it applies
+        # asyncio.timeout(request_timeout) internally and returns a clean 504
+        # response on expiry (and attaches lb_instance so active_requests is
+        # decremented). Wrapping a second asyncio.timeout with the same deadline
+        # here just races the mediator's: when this outer one wins it cancels the
+        # mediator mid-flight, the CancelledError bypasses the mediator's
+        # TimeoutError handling, and surfaces as an uncaught TimeoutError logged
+        # as "Provider architecture failed" with a 503. Let the mediator own it.
+        return await self._mediator.route_request(
+            source_ip, model, request_payload, path, headers, request_timeout
+        )
 
     async def route_streaming_request(
         self,
@@ -430,10 +437,12 @@ class SmolRouterContainer:
         If a provider does not expose native streaming via the mediator, emit a
         standards-compatible SSE stream synthesized from the non-stream response.
         """
-        async with asyncio.timeout(request_timeout):
-            data, status_code, upstream_used, metadata = await self.route_request(
-                source_ip, model, request_payload, path, headers, request_timeout
-            )
+        # route_request -> mediator already enforces request_timeout and returns
+        # a 504 response dict on expiry; no second nested timeout here (see
+        # route_request for why nesting caused uncaught TimeoutError spew).
+        data, status_code, upstream_used, metadata = await self.route_request(
+            source_ip, model, request_payload, path, headers, request_timeout
+        )
 
         if status_code >= 400:
             return JSONResponse(content=data, status_code=status_code), status_code, upstream_used, metadata
@@ -578,10 +587,11 @@ class LegacySmartRouterAdapter:
 
         Returns: (response_data, status_code, upstream_used)
         """
-        async with asyncio.timeout(request_timeout):
-            return await self.mediator.route_request(
-                source_ip, model, request_payload, path, headers, request_timeout
-            )
+        # Single timeout authority is the mediator (see SmolRouterContainer.
+        # route_request); no redundant nested asyncio.timeout here.
+        return await self.mediator.route_request(
+            source_ip, model, request_payload, path, headers, request_timeout
+        )
 
 
 # Global container instance

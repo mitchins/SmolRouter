@@ -108,6 +108,13 @@ class ModelMediator:
                 model._lb_instance = instance
                 return model
 
+        # select_instance() already incremented active_requests for this instance.
+        # If we can't map it back to an available model nothing downstream will
+        # ever decrement it, so release it here to avoid leaking the counter.
+        logger.warning(
+            f"Load balancer selected instance {instance.model_id} but no matching model found; releasing it"
+        )
+        await model_load_balancer.end_request(instance, 0.0, success=False)
         return None
 
     async def resolve_model_for_request(
@@ -421,28 +428,12 @@ class ModelMediator:
     async def _route_request_internal(
         self,
         client: ClientContext,
-        model: str,
+        resolved_model: ModelInfo,
         request_payload: Dict[str, Any],
         path: str,
         headers: Dict[str, str],
+        lb_instance: Any,
     ) -> Tuple[Dict[str, Any], int, str, Any]:
-        resolved_model = await self.resolve_model_for_request(model, client)
-        if resolved_model is None:
-            return (
-                {
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": f"Model '{model}' not found or not accessible",
-                    }
-                },
-                404,
-                "none",
-                None,
-            )
-
-        lb_instance = getattr(resolved_model, "_lb_instance", None)
-        self._apply_resolved_model_to_payload(resolved_model, request_payload)
-
         provider = self._get_provider_by_id(resolved_model.provider_id)
         if not provider:
             return (
@@ -516,9 +507,37 @@ class ModelMediator:
         if timeout is None:
             timeout = 30.0
 
+        # select_instance() (inside resolve_model_for_request) atomically
+        # increments the chosen instance's active_requests counter. Once that
+        # happens we MUST return the instance in the metadata on every path -
+        # success, timeout, or error - otherwise the counter is never
+        # decremented and the load balancer permanently believes the instance is
+        # busy (the active_requests "leak"). We hoist lb_instance into the outer
+        # scope so the except handlers below can attach it. Resolution stays
+        # inside the timeout so a slow resolution still yields a 504.
+        lb_instance: Any = None
         try:
             async with asyncio.timeout(timeout):
-                return await self._route_request_internal(client, model, request_payload, path, headers)
+                resolved_model = await self.resolve_model_for_request(model, client)
+                if resolved_model is None:
+                    return (
+                        {
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": f"Model '{model}' not found or not accessible",
+                            }
+                        },
+                        404,
+                        "none",
+                        None,
+                    )
+
+                lb_instance = getattr(resolved_model, "_lb_instance", None)
+                self._apply_resolved_model_to_payload(resolved_model, request_payload)
+
+                return await self._route_request_internal(
+                    client, resolved_model, request_payload, path, headers, lb_instance
+                )
 
         except TimeoutError:
             logger.error(f"Request timeout while routing model '{model}'")
@@ -526,7 +545,7 @@ class ModelMediator:
                 {"error": {"type": "timeout_error", "message": "Request timed out"}},
                 504,
                 "timeout",
-                None,
+                self._attach_lb_instance(lb_instance, None),
             )
 
         except Exception as e:
@@ -535,7 +554,7 @@ class ModelMediator:
                 {"error": {"type": "internal_server_error", "message": "Request routing failed"}},
                 500,
                 "unknown",
-                None,
+                self._attach_lb_instance(lb_instance, None),
             )
 
     def _get_provider_by_id(self, provider_id: str) -> Optional[IModelProvider]:

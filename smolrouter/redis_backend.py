@@ -532,27 +532,35 @@ class RedisRequestLog:
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
+        if not request_ids:
+            return []
 
-        # Get request data
-        requests = []
+        # Batch the per-request hash reads into a single pipeline round-trip.
+        # Issuing one hgetall per id (N+1) is the dominant cost of the dashboard
+        # under load: at limit=1000 that is 1000 sequential round-trips.
+        pipe = client.pipeline(transaction=False)
         for request_id in request_ids:
-            data = await client.hgetall(f"request:{request_id}")
-            if data:
-                requests.append(LogRecord(dict(data)))
+            pipe.hgetall(f"request:{request_id}")
+        results = await pipe.execute()
 
-        return requests
+        return [LogRecord(dict(data)) for data in results if data]
 
     @staticmethod
     async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
         """Get requests for a specific source IP ordered by recency."""
         client = get_redis()
         request_ids = [str(request_id) for request_id in await client.smembers(f"requests:by_ip:{source_ip}")]
+        if not request_ids:
+            return []
 
-        requests = []
+        # Batch the per-request hash reads into a single pipeline round-trip
+        # instead of one hgetall per id (N+1).
+        pipe = client.pipeline(transaction=False)
         for request_id in request_ids:
-            data = await client.hgetall(f"request:{request_id}")
-            if data:
-                requests.append(LogRecord(dict(data)))
+            pipe.hgetall(f"request:{request_id}")
+        results = await pipe.execute()
+
+        requests = [LogRecord(dict(data)) for data in results if data]
 
         requests.sort(
             key=lambda log: getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)(),

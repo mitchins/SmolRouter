@@ -1204,8 +1204,9 @@ async def get_log_stats():
             service_type = getattr(log, "service_type", "unknown")
             service_types[service_type] = service_types.get(service_type, 0) + 1
 
-        # Inflight count
-        inflight = await get_inflight_requests()
+        # Inflight count - reuse the sample we already fetched instead of
+        # issuing a second get_recent(1000) (which doubled dashboard cost).
+        inflight = await get_inflight_requests(recent_logs=recent_logs)
 
         error_summary = await get_error_summary(limit_signatures=10)
 
@@ -1223,12 +1224,16 @@ async def get_log_stats():
         return {"total_requests": 0, "completed_requests": 0, "pending_requests": 0, "service_types": {}}
 
 
-async def get_inflight_requests():
-    """Get in-flight (pending) requests from the last 60 minutes"""
+async def get_inflight_requests(recent_logs=None):
+    """Get in-flight (pending) requests from the last 60 minutes.
+
+    Accepts an optional pre-fetched recent-logs sample so callers that already
+    hold one (e.g. get_log_stats) avoid a redundant get_recent(1000).
+    """
     try:
         from datetime import datetime, timedelta, timezone
 
-        all_recent = await RequestLog.get_recent(1000)
+        all_recent = recent_logs if recent_logs is not None else await RequestLog.get_recent(1000)
         cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=60)
 
         # Filter for pending requests (status_code = "pending" or empty completed_at) within 60 min window
