@@ -627,7 +627,6 @@ class ProviderFactory:
                     provider_name,
                     len(provider_keys),
                 )
-            return
 
     @classmethod
     def create_provider(cls, config: ProviderConfig) -> IModelProvider:

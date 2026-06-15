@@ -1011,8 +1011,8 @@ class GoogleGenAIProvider(IModelProvider):
                 self.get_model_daily_limit(model_name),
                 tokens,
             )
-        except Exception as e:
-            logger.error(f"❌ CRITICAL: Failed to update quota for {redact_secret(api_key)} / {model_name}: {e}")
+        except Exception:
+            logger.exception(f"❌ CRITICAL: Failed to update quota for {redact_secret(api_key)} / {model_name}")
             logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
             quota.mark_request_success(tokens=tokens)
 
@@ -1304,8 +1304,8 @@ class GoogleGenAIProvider(IModelProvider):
 
                 return models
 
-            except Exception as e:
-                logger.error(f"Error discovering models with API key {redact_secret(api_key)}: {e}")
+            except Exception:
+                logger.exception(f"Error discovering models with API key {redact_secret(api_key)}")
                 continue
 
         # All API keys failed - fall back to static model list

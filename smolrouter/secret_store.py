@@ -76,9 +76,7 @@ def resolve_config_file(filename: str, env_var: Optional[str]) -> Path | None:
 def _normalize_provider_values(values: object) -> List[str]:
     if isinstance(values, str):
         values = [values]
-    elif isinstance(values, list):
-        pass
-    else:
+    elif not isinstance(values, list):
         return []
 
     normalized: List[str] = []
