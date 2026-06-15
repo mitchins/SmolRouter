@@ -943,7 +943,7 @@ def test_google_genai_completion_context_helpers_use_observed_ground_truth():
         context, observation
     )
 
-    assert actual_key_suffix == "90abcdef"
+    assert actual_key_suffix == "cdef"  # last-4 identifier (minimized key fragment)
     assert actual_proxy == "http://127.0.0.1:8888"
     assert key_verified is True
     assert proxy_verified is True
