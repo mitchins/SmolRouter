@@ -67,7 +67,7 @@ def resolve_config_file(filename: str, env_var: Optional[str]) -> Path | None:
     # A [1:] slice here would skip the ./ dev path, the one that matters most in
     # development.
     for path in candidate_paths:
-        if path.exists():
+        if path.is_file():
             return path
 
     return None
@@ -105,15 +105,18 @@ def load_secrets() -> Dict[str, List[str]]:
     env_value = os.getenv("SMOLROUTER_SECRETS")
     path = resolve_config_file("secrets.yaml", "SMOLROUTER_SECRETS")
 
-    if env_value is not None and path is not None and not path.exists():
+    if env_value is not None and path is not None and not path.is_file():
         raise FileNotFoundError(f"Secrets file not found at explicit override SMOLROUTER_SECRETS={path}")
 
-    if path is None or not path.exists():
+    if path is None or not path.is_file():
         _CACHED_SECRETS = {}
         return {}
 
     raw = path.read_text(encoding="utf-8")
-    parsed = yaml.safe_load(raw) if raw else {}
+    try:
+        parsed = yaml.safe_load(raw) if raw else {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Failed to parse secrets YAML at {path}: {exc}") from exc
 
     if not parsed:
         _CACHED_SECRETS = {}

@@ -29,6 +29,8 @@ from typing import Dict, List
 import yaml
 from platformdirs import user_config_dir
 
+from .config_loading import load_config_entries
+
 APP = "smolrouter"
 KEY_LIST_FIELDS = ("api_keys",)
 KEY_SCALAR_FIELDS = ("api_key",)
@@ -46,7 +48,7 @@ def _dedupe(values: List[str]) -> List[str]:
     return out
 
 
-def extract_keys(provider: dict, base_dir: Path) -> List[str]:
+def extract_keys(provider: dict) -> List[str]:
     """Collect keys from inline + file-backed fields. BYOK (api_key: null) -> none."""
     keys: List[str] = []
 
@@ -63,17 +65,14 @@ def extract_keys(provider: dict, base_dir: Path) -> List[str]:
     for field in KEY_FILE_FIELDS:
         ref = provider.get(field)
         if isinstance(ref, str) and ref.strip():
-            path = Path(ref).expanduser()
-            if not path.is_absolute():
-                path = base_dir / path
-            if path.is_file():
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        keys.append(line)
-            else:
-                # path only, never contents
-                print(f"  ! {provider.get('name')}: {field} -> {path} not found; skipped", file=sys.stderr)
+            # Resolve + parse exactly like the runtime provider loaders: relative
+            # to CWD (not the config dir), honoring env-style assignments and
+            # inline comments. Anything else would write keys the store/provider
+            # can't use, or miss config/*.txt refs entirely.
+            try:
+                keys += load_config_entries(ref, allow_assignments=True, strip_inline_comments=True)
+            except Exception as exc:  # path only, never contents
+                print(f"  ! {provider.get('name')}: {field} -> {ref}: {type(exc).__name__}; skipped", file=sys.stderr)
 
     return _dedupe(keys)
 
@@ -82,11 +81,16 @@ def _atomic_write_0600(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".secrets-", suffix=".tmp")
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # not available on Windows
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
         os.replace(tmp, path)
     except BaseException:
+        try:
+            os.close(fd)  # fd may already be closed by fdopen; ignore
+        except OSError:
+            pass
         try:
             os.unlink(tmp)
         except OSError:
@@ -95,7 +99,7 @@ def _atomic_write_0600(path: Path, text: str) -> None:
     os.chmod(path, 0o600)
 
 
-def build_secrets(config: dict, base_dir: Path) -> tuple[Dict[str, List[str]], list[tuple[str, list[str]]]]:
+def build_secrets(config: dict) -> tuple[Dict[str, List[str]], list[tuple[str, list[str]]]]:
     providers = config.get("providers")
     if not isinstance(providers, list):
         raise SystemExit("error: no 'providers' list found in config")
@@ -108,7 +112,7 @@ def build_secrets(config: dict, base_dir: Path) -> tuple[Dict[str, List[str]], l
         name = str(provider.get("name") or "").strip()
         if not name:
             continue
-        keys = extract_keys(provider, base_dir)
+        keys = extract_keys(provider)
         if keys:
             discovered[name] = keys
             present_fields = [f for f in ALL_KEY_FIELDS if provider.get(f)]
@@ -129,7 +133,7 @@ def main(argv=None) -> int:
         parser.error(f"config not found: {config_path}")
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    discovered, checklist = build_secrets(config, config_path.parent)
+    discovered, checklist = build_secrets(config)
 
     out_path = Path(args.out).expanduser()
     existing: Dict[str, List[str]] = {}

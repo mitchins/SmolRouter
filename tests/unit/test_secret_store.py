@@ -15,6 +15,14 @@ from smolrouter.secret_store import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_secret_cache():
+    """load_secrets() caches globally; reset around every test for isolation."""
+    reload_secrets()
+    yield
+    reload_secrets()
+
+
 @pytest.fixture
 def configured_dirs(monkeypatch, tmp_path):
     """Provide deterministic platform directory overrides for secrets resolution."""

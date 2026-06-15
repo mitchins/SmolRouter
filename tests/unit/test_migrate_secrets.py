@@ -27,9 +27,10 @@ def _write_config(tmp_path: Path) -> Path:
     return path
 
 
-def test_migration_consolidates_keys_without_leaking(tmp_path, capsys):
+def test_migration_consolidates_keys_without_leaking(tmp_path, capsys, monkeypatch):
     mod = _load_module()
     config = _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)  # file refs resolve relative to CWD, like runtime
     out = tmp_path / "secrets.yaml"
 
     rc = mod.main(["--config", str(config), "--out", str(out)])
@@ -54,9 +55,10 @@ def test_migration_consolidates_keys_without_leaking(tmp_path, capsys):
         assert secret not in output
 
 
-def test_dry_run_writes_nothing(tmp_path, capsys):
+def test_dry_run_writes_nothing(tmp_path, capsys, monkeypatch):
     mod = _load_module()
     config = _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
     out = tmp_path / "secrets.yaml"
 
     assert mod.main(["--config", str(config), "--out", str(out), "--dry-run"]) == 0
@@ -64,9 +66,10 @@ def test_dry_run_writes_nothing(tmp_path, capsys):
     assert "dry-run" in capsys.readouterr().out
 
 
-def test_merge_preserves_existing_without_force(tmp_path):
+def test_merge_preserves_existing_without_force(tmp_path, monkeypatch):
     mod = _load_module()
     config = _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
     out = tmp_path / "secrets.yaml"
     out.write_text(yaml.safe_dump({"google": ["PRE-EXISTING"]}))
 

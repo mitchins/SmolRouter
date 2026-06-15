@@ -1628,9 +1628,11 @@ class GoogleGenAIProvider(IModelProvider):
 
         if observation:
             if observation.api_key_used:
-                actual_key_suffix = (
-                    observation.api_key_used[-8:] if len(observation.api_key_used) > 8 else observation.api_key_used
-                )
+                # Identification suffix only - last 4 (dashboard convention).
+                # Not redact_secret(): that keeps the *prefix*, and Google keys
+                # all share the "AIza" prefix, so the suffix is what tells keys
+                # apart. Last-4 minimizes the exposed fragment while staying useful.
+                actual_key_suffix = observation.api_key_used[-4:]
                 key_verified = True
 
             if observation.proxy_url:
