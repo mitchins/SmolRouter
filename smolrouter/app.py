@@ -555,6 +555,36 @@ def rewrite_model(model: str) -> str:
     return model
 
 
+def _normalize_openai_model_name(model_name: str) -> str:
+    """Strip UI/provider annotations from model names (e.g. "gpt-5 [openai-main]")."""
+    normalized = model_name.strip()
+    bracket_index = normalized.find(" [")
+    if bracket_index != -1:
+        return normalized[:bracket_index].strip()
+    return normalized
+
+
+def _should_use_gpt5_completion_tokens(model_name: str) -> bool:
+    normalized_model = _normalize_openai_model_name(model_name).lower()
+    return normalized_model.startswith("gpt-5")
+
+
+def _normalize_openai_request_payload(payload: Dict[str, Any]) -> None:
+    model_name = payload.get("model")
+    if isinstance(model_name, str):
+        normalized_model = _normalize_openai_model_name(model_name)
+        if normalized_model != model_name:
+            payload["model"] = normalized_model
+            model_name = normalized_model
+
+    if not isinstance(model_name, str) or not _should_use_gpt5_completion_tokens(model_name):
+        return
+
+    if "max_completion_tokens" not in payload and "max_tokens" in payload:
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+        logger.debug("Remapped max_tokens -> max_completion_tokens for model %s", payload.get("model"))
+
+
 def should_strip_thinking_for_provider(provider_type: str, provider_url: str) -> bool:
     """Determine if thinking chains should be stripped for this provider.
 
@@ -1098,6 +1128,7 @@ async def _parse_openai_request_payload(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[bytes], Optional[JSONResponse]]:
     try:
         payload = await request.json()
+        _normalize_openai_request_payload(payload)
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
         logger.warning(f"Failed to parse request JSON: {e}")
@@ -1446,6 +1477,7 @@ def _build_ollama_openai_payload(
         logger.debug("Disabling thinking by appending '/no_think' marker to content")
         openai_payload["messages"].append({"role": "system", "content": "/no_think"})
 
+    _normalize_openai_request_payload(openai_payload)
     return openai_payload, upstream_url, original_model, final_model
 
 
