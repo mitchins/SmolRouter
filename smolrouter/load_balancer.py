@@ -435,7 +435,10 @@ class ModelLoadBalancer:
         return instances
 
     async def select_instance(
-        self, requested_model: str, distribution_strategy: DistributionStrategy = DistributionStrategy.SPREAD_ALL_HOSTS
+        self,
+        requested_model: str,
+        distribution_strategy: DistributionStrategy = DistributionStrategy.SPREAD_ALL_HOSTS,
+        provider_id: Optional[str] = None,
     ) -> Optional[ModelInstance]:
         """Select the best instance for a request using least-busy strategy.
 
@@ -446,12 +449,17 @@ class ModelLoadBalancer:
         Args:
             requested_model: Model name requested by client
             distribution_strategy: Distribution strategy for host selection
+            provider_id: If set, only consider instances of this provider. Used to
+                honor an explicit provider pin (e.g. "model [provider]") when the
+                same model name is offered by multiple providers.
 
         Returns:
             Selected model instance or None if none available
         """
         async with self._lock:
             instances = self.get_available_instances(requested_model, distribution_strategy=distribution_strategy)
+            if provider_id is not None:
+                instances = [instance for instance in instances if instance.provider_id == provider_id]
 
             if not instances:
                 base_name, _ = self.parse_model_name(requested_model)

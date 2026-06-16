@@ -206,10 +206,11 @@ class AnthropicProvider(IModelProvider):
             else:
                 user_messages.append(msg)
 
+        max_tokens = openai_request.get("max_tokens", openai_request.get("max_completion_tokens", 1024))
         anthropic_request = {
             "model": openai_request.get("model", "claude-3-sonnet-20240229"),
             "messages": user_messages,
-            "max_tokens": openai_request.get("max_tokens", 1024),
+            "max_tokens": max_tokens,
         }
 
         # Add system message if present

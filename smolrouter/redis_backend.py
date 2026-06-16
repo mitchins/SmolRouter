@@ -45,6 +45,19 @@ end
 
 return removed
 """
+_GET_RECENT_LUA_SCRIPT = """
+local ids = redis.call("ZRANGE", KEYS[1], 0, tonumber(ARGV[1]) - 1, "REV")
+local records = {}
+
+for _, request_id in ipairs(ids) do
+    local data = redis.call("HGETALL", "request:" .. request_id)
+    if #data > 0 then
+        table.insert(records, data)
+    end
+end
+
+return records
+"""
 REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
     {
         "service_type",
@@ -260,16 +273,16 @@ def _build_request_log_data(
     }
 
 
-async def _store_request_log(
-    client: Any,
+def _queue_store_request_log(
+    pipe: Any,
     request_id: str,
     source_ip: str,
     created_at: datetime,
     request_data: Dict[str, Any],
 ) -> None:
-    await client.hset(f"request:{request_id}", mapping=request_data)
-    await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
-    await client.sadd(f"requests:by_ip:{source_ip}", request_id)
+    pipe.hset(f"request:{request_id}", mapping=request_data)
+    pipe.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
+    pipe.sadd(f"requests:by_ip:{source_ip}", request_id)
 
 
 def _status_is_terminal(status_code: Any) -> bool:
@@ -291,14 +304,13 @@ def _status_is_failure(status_code: Any) -> bool:
     return _status_is_terminal(status_code) and int(str(status_code)) >= 400
 
 
-async def _increment_create_stats(client: Any, request_id: str, request_data: Dict[str, Any]) -> None:
+def _queue_create_stats(pipe: Any, request_id: str, request_data: Dict[str, Any]) -> None:
     """Maintain O(1) dashboard counters on create (total, per-service, inflight set).
 
     A request created already-terminal (status_code supplied at create) is counted
     as completed and is NOT added to the inflight set."""
     service_type = request_data.get("service_type") or "unknown"
     status_code = request_data.get("status_code")
-    pipe = client.pipeline(transaction=False)
     pipe.incr(STATS_TOTAL_KEY)
     pipe.hincrby(STATS_SERVICE_TYPES_KEY, service_type, 1)
     if _status_is_terminal(status_code):
@@ -307,7 +319,6 @@ async def _increment_create_stats(client: Any, request_id: str, request_data: Di
             pipe.incr(STATS_FAILED_KEY)
     else:
         pipe.sadd(INFLIGHT_SET_KEY, request_id)
-    await pipe.execute()
 
 
 async def _increment_completion_stats(client: Any, request_id: str, status_code: Any) -> None:
@@ -335,17 +346,24 @@ async def _increment_completion_stats(client: Any, request_id: str, status_code:
     )
 
 
-async def _index_duplicate_request_body(client: Any, request_id: str, request_body_hash: Optional[str]) -> None:
+async def _check_and_queue_duplicate_request_body(
+    client: Any,
+    pipe: Any,
+    request_id: str,
+    request_body_hash: Optional[str],
+) -> None:
+    """Check duplicate count immediately, then queue duplicate index writes."""
     if not request_body_hash:
         return
 
     set_key = f"requests:by_body:{request_body_hash}"
     try:
         existing_count = await client.scard(set_key)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to get duplicate count for %s: %s", set_key, exc)
         existing_count = 0
 
-    await client.hset(
+    pipe.hset(
         f"request:{request_id}",
         mapping={
             "request_body_hash": request_body_hash,
@@ -353,7 +371,7 @@ async def _index_duplicate_request_body(client: Any, request_id: str, request_bo
             "duplicate_count": existing_count,
         },
     )
-    await client.sadd(set_key, request_id)
+    pipe.sadd(set_key, request_id)
 
 
 def _build_completion_update_data(status_code: int, option_fields: RequestLogCompletionOptions) -> Dict[str, Any]:
@@ -379,6 +397,14 @@ def _build_completion_update_data(status_code: int, option_fields: RequestLogCom
             update_data[field_name] = value
 
     return update_data
+
+
+def _flat_pairs_to_dict(data: Any) -> Dict[str, Any]:
+    if isinstance(data, dict):
+        return data
+
+    pairs = iter(data)
+    return {str(key): value for key, value in zip(pairs, pairs)}
 
 
 class LogRecord:
@@ -544,11 +570,6 @@ return {
 }
 """
 
-# Precompute script SHA for EVALSHA optimization. Redis script SHAs are protocol identifiers,
-# not security hashes, so mark this accordingly for security scanners.
-QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode(), usedforsecurity=False).hexdigest()
-
-
 def get_redis():
     """Get the global Redis client"""
     return redis_client
@@ -572,9 +593,11 @@ class RedisRequestLog:
         created_at = _resolve_created_at(option_fields.get("timestamp"))
         request_data = _build_request_log_data(request_id, source_ip, method, path, created_at, option_fields)
 
-        await _store_request_log(client, request_id, source_ip, created_at, request_data)
-        await _index_duplicate_request_body(client, request_id, option_fields.get("request_body_hash"))
-        await _increment_create_stats(client, request_id, request_data)
+        pipe = client.pipeline(transaction=False)
+        _queue_store_request_log(pipe, request_id, source_ip, created_at, request_data)
+        await _check_and_queue_duplicate_request_body(client, pipe, request_id, option_fields.get("request_body_hash"))
+        _queue_create_stats(pipe, request_id, request_data)
+        await pipe.execute()
 
         logger.debug(f"Created Redis request log: {request_id}")
         return request_id
@@ -590,8 +613,23 @@ class RedisRequestLog:
 
         client = get_redis()
         update_data = _build_completion_update_data(status_code, option_fields)
-        await client.hset(f"request:{request_id}", mapping=update_data)
-        await _increment_completion_stats(client, request_id, status_code)
+        if _is_lua_fallback_enabled(False):
+            await client.hset(f"request:{request_id}", mapping=update_data)
+            await _increment_completion_stats(client, request_id, status_code)
+        else:
+            status_code_value = int(status_code) if _status_is_terminal(status_code) else 0
+            pipe = client.pipeline(transaction=False)
+            pipe.hset(f"request:{request_id}", mapping=update_data)
+            pipe.eval(
+                _COMPLETE_ONCE_LUA_SCRIPT,
+                3,
+                INFLIGHT_SET_KEY,
+                STATS_COMPLETED_KEY,
+                STATS_FAILED_KEY,
+                request_id,
+                str(status_code_value),
+            )
+            await pipe.execute()
         logger.debug(f"Updated Redis request completion: {request_id}")
 
     @staticmethod
@@ -635,7 +673,17 @@ class RedisRequestLog:
     @staticmethod
     async def get_recent(limit: int = 100) -> List[LogRecord]:
         """Get recent requests"""
+        if limit <= 0:
+            return []
+
         client = get_redis()
+
+        if not _is_lua_fallback_enabled(False):
+            try:
+                results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
+                return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
+            except Exception as exc:
+                logger.warning("Redis Lua get_recent failed; falling back to pipeline path: %s", exc)
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
@@ -650,13 +698,46 @@ class RedisRequestLog:
             pipe.hgetall(f"request:{request_id}")
         results = await pipe.execute()
 
-        return [LogRecord(dict(data)) for data in results if data]
+        return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
 
     @staticmethod
     async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
         """Get requests for a specific source IP ordered by recency."""
         client = get_redis()
-        request_ids = [str(request_id) for request_id in await client.smembers(f"requests:by_ip:{source_ip}")]
+        set_key = f"requests:by_ip:{source_ip}"
+
+        if limit is not None and limit <= 0:
+            return []
+
+        if limit is not None:
+            request_ids = []
+            page_size = max(limit * 10, 100)
+            start = 0
+            while len(request_ids) < limit:
+                recent_ids = [
+                    str(request_id)
+                    for request_id in await client.zrange(
+                        REDIS_REQUESTS_BY_TIME_KEY,
+                        start,
+                        start + page_size - 1,
+                        desc=True,
+                    )
+                ]
+                if not recent_ids:
+                    break
+
+                pipe = client.pipeline(transaction=False)
+                for request_id in recent_ids:
+                    pipe.sismember(set_key, request_id)
+                matches = await pipe.execute()
+                request_ids.extend(
+                    request_id for request_id, is_member in zip(recent_ids, matches) if is_member
+                )
+                request_ids = request_ids[:limit]
+                start += page_size
+        else:
+            request_ids = [str(request_id) for request_id in await client.smembers(set_key)]
+
         if not request_ids:
             return []
 

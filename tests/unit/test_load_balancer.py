@@ -152,6 +152,24 @@ class TestModelLoadBalancer:
         assert selected.model_id == "gpt-oss-20b:2"
 
     @pytest.mark.asyncio
+    async def test_select_instance_honors_provider_id_filter(self, load_balancer):
+        """Test that explicit provider pinning constrains load-balanced selection."""
+        load_balancer.register_model_instance("gpt-oss-20b", "provider1", "http://localhost:1234")
+        load_balancer.register_model_instance("gpt-oss-20b", "provider2", "http://localhost:5678")
+
+        instances = load_balancer.instances["gpt-oss-20b"]
+        provider1_instance = next(instance for instance in instances if instance.provider_id == "provider1")
+        provider2_instance = next(instance for instance in instances if instance.provider_id == "provider2")
+        provider1_instance.active_requests = 0
+        provider2_instance.active_requests = 5
+
+        selected = await load_balancer.select_instance("gpt-oss-20b", provider_id="provider2")
+
+        assert selected.provider_id == "provider2"
+        assert selected.active_requests == 6
+        assert provider1_instance.active_requests == 0
+
+    @pytest.mark.asyncio
     async def test_select_instance_no_available(self, load_balancer):
         """Test select_instance when no instances are available."""
         # No instances registered

@@ -1601,6 +1601,123 @@ async def test_mediator_routes_zai_coding_provider():
 
 
 @pytest.mark.asyncio
+async def test_mediator_honors_provider_tag_when_model_names_overlap():
+    """A display-name provider tag must select that provider even when names overlap."""
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(
+        return_value=[
+            ModelInfo(
+                id="glm-4.5-air@other-openai",
+                name="glm-4.5-air",
+                provider_id="other-openai",
+                provider_type="openai",
+                endpoint="https://example.com/openai/v1",
+            ),
+            ModelInfo(
+                id="glm-4.5-air@test-zai",
+                name="glm-4.5-air",
+                provider_id="test-zai",
+                provider_type="zai-coding",
+                endpoint="https://api.z.ai/api/coding/paas/v4",
+            ),
+        ]
+    )
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    other_provider = Mock()
+    other_provider.generate_completion = AsyncMock(return_value=({"id": "wrong-provider"}, 200))
+    zai_provider = Mock()
+    zai_provider.generate_completion = AsyncMock(return_value=({"id": "chatcmpl-test"}, 200))
+    mediator._get_provider_by_id = Mock(
+        side_effect=lambda provider_id: {"other-openai": other_provider, "test-zai": zai_provider}[provider_id]
+    )
+
+    response_data, status_code, upstream_used, _metadata = await mediator.route_request(
+        "127.0.0.1",
+        "glm-4.5-air [test-zai]",
+        {"model": "glm-4.5-air [test-zai]", "messages": [{"role": "user", "content": "Hello"}]},
+        "/v1/chat/completions",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 200
+    assert response_data["id"] == "chatcmpl-test"
+    assert upstream_used == "zai-coding:test-zai"
+    other_provider.generate_completion.assert_not_awaited()
+    zai_provider.generate_completion.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mediator_remaps_gpt5_max_tokens_only_for_resolved_openai_provider():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gpt-5.1-nano@test-openai",
+        name="gpt-5.1-nano",
+        provider_id="test-openai",
+        provider_type="openai",
+        endpoint="https://api.openai.com/v1",
+    )
+    provider = Mock()
+    provider.generate_completion = AsyncMock(return_value=({"id": "chatcmpl-test"}, 200))
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    _response_data, status_code, _upstream_used, _metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gpt-5-alias",
+        {"model": "gpt-5-alias", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 77},
+        "/v1/chat/completions",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    forwarded_payload = provider.generate_completion.await_args.args[0]
+    assert status_code == 200
+    assert forwarded_payload["model"] == "gpt-5.1-nano"
+    assert forwarded_payload["max_completion_tokens"] == 77
+    assert "max_tokens" not in forwarded_payload
+
+
+@pytest.mark.asyncio
+async def test_mediator_preserves_gpt5_max_tokens_for_resolved_google_provider():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemini-2.0-flash@test-google",
+        name="gemini-2.0-flash",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    provider.generate_completion = AsyncMock(return_value=({"id": "google-test"}, None))
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    _response_data, status_code, _upstream_used, _metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gpt-5-alias [test-google]",
+        {
+            "model": "gpt-5-alias [test-google]",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 77,
+        },
+        "/v1/chat/completions",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    forwarded_payload = provider.generate_completion.await_args.args[0]
+    assert status_code == 200
+    assert forwarded_payload["model"] == "gemini-2.0-flash"
+    assert forwarded_payload["max_tokens"] == 77
+    assert "max_completion_tokens" not in forwarded_payload
+
+
+@pytest.mark.asyncio
 async def test_mediator_preserves_provider_metadata_for_google_errors():
     """Test Google provider failures still keep downstream provider identity for logging/UI."""
     aggregator = Mock()
@@ -1777,6 +1894,23 @@ def test_anthropic_request_format_conversion():
     assert anthropic_request["max_tokens"] == 100
 
 
+def test_anthropic_request_format_conversion_accepts_max_completion_tokens():
+    """Anthropic should preserve token caps from normalized OpenAI-style payloads."""
+    config = AnthropicConfig(
+        name="test", type="anthropic", enabled=True, url="https://api.anthropic.com", api_keys=["key"]
+    )
+    provider = AnthropicProvider(config)
+    openai_request = {
+        "model": "claude-3-sonnet",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_completion_tokens": 123,
+    }
+
+    anthropic_request = provider._convert_openai_to_anthropic(openai_request)
+
+    assert anthropic_request["max_tokens"] == 123
+
+
 def test_anthropic_response_format_conversion():
     """Test basic Anthropic to OpenAI format conversion"""
     config = AnthropicConfig(
@@ -1853,7 +1987,8 @@ def _mediator_with_resolved_lb_instance(sentinel_instance):
     aggregator.get_all_models = AsyncMock(return_value=[])
     mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
 
-    resolved = SimpleNamespace(name="m", _lb_instance=sentinel_instance)
+    # provider_type is read by post-resolution payload normalization.
+    resolved = SimpleNamespace(name="m", provider_type="openai", _lb_instance=sentinel_instance)
     mediator.resolve_model_for_request = AsyncMock(return_value=resolved)
     return mediator
 

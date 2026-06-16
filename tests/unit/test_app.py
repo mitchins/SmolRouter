@@ -10,6 +10,8 @@ import smolrouter.app as app_module
 from smolrouter.app import (
     app,
     complete_request_log,
+    _normalize_openai_model_name,
+    _normalize_openai_request_payload,
     find_route,
     rewrite_model,
     strip_think_chain_from_text,
@@ -767,6 +769,76 @@ def test_rewrite_model_no_match():
     assert rewrite_model("unmapped-model") == "unmapped-model"
     MODEL_MAP.clear()
     MODEL_MAP.update(original_model_map)
+
+
+def test_normalize_openai_model_name_strips_provider_tag():
+    assert _normalize_openai_model_name("gpt-5.4-nano-2026-03-17 [openai-main]") == "gpt-5.4-nano-2026-03-17"
+    assert _normalize_openai_model_name("gpt-5-mini") == "gpt-5-mini"
+
+
+def test_normalize_openai_request_payload_remaps_gpt5_max_tokens():
+    payload = {
+        "model": "gpt-5.4-nano-2026-03-17 [openai-main]",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 500,
+    }
+    _normalize_openai_request_payload(payload)
+
+    assert payload["model"] == "gpt-5.4-nano-2026-03-17"
+    assert "max_tokens" not in payload
+    assert payload["max_completion_tokens"] == 500
+
+
+def test_normalize_openai_request_payload_does_not_remap_non_gpt5():
+    payload = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 500,
+    }
+    _normalize_openai_request_payload(payload)
+
+    assert payload["model"] == "gpt-4"
+    assert payload["max_tokens"] == 500
+    assert "max_completion_tokens" not in payload
+
+
+def test_normalize_openai_request_payload_prefers_existing_max_completion_tokens():
+    payload = {
+        "model": "gpt-5-nano",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 100,
+        "max_completion_tokens": 200,
+    }
+    _normalize_openai_request_payload(payload)
+
+    assert payload["max_completion_tokens"] == 200
+    assert "max_tokens" not in payload
+
+
+def test_normalize_openai_request_payload_ignores_non_dict_payload():
+    payload = ["not", "a", "dict"]
+    _normalize_openai_request_payload(payload)
+
+    assert payload == ["not", "a", "dict"]
+
+
+@pytest.mark.asyncio
+async def test_parse_openai_request_payload_preserves_provider_tag_and_max_tokens():
+    class RequestStub:
+        async def json(self):
+            return {
+                "model": "glm-4.5-air [zai-coding]",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 500,
+            }
+
+    payload, request_body, error_response = await app_module._parse_openai_request_payload(RequestStub(), 0.0, None)
+
+    assert error_response is None
+    assert payload["model"] == "glm-4.5-air [zai-coding]"
+    assert payload["max_tokens"] == 500
+    assert "max_completion_tokens" not in payload
+    assert json.loads(request_body)["model"] == "glm-4.5-air [zai-coding]"
 
 
 def test_strip_think_chain_from_text():

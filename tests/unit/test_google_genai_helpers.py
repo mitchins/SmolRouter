@@ -156,6 +156,18 @@ def test_convert_openai_to_genai_request(provider):
     }
 
 
+def test_convert_openai_to_genai_request_accepts_max_completion_tokens(provider):
+    request = {
+        "model": "gemini-2.5-flash",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_completion_tokens": 123,
+    }
+
+    _model_name, genai_request = provider._convert_openai_to_genai_request(request)
+
+    assert genai_request["generation_config"]["max_output_tokens"] == 123
+
+
 def test_convert_openai_to_genai_request_no_messages_raises(provider):
     with pytest.raises(ValueError, match="No messages"):
         provider._convert_openai_to_genai_request({"model": "x", "messages": []})

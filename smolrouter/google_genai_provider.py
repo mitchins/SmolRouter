@@ -1374,6 +1374,8 @@ class GoogleGenAIProvider(IModelProvider):
             generation_config["temperature"] = openai_request["temperature"]
         if "max_tokens" in openai_request:
             generation_config["max_output_tokens"] = openai_request["max_tokens"]
+        elif "max_completion_tokens" in openai_request:
+            generation_config["max_output_tokens"] = openai_request["max_completion_tokens"]
         if "top_p" in openai_request:
             generation_config["top_p"] = openai_request["top_p"]
 
