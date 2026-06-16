@@ -777,11 +777,23 @@ class RequestLogEntry:
             **self._completion_update_kwargs(request_body_key, response_body_key)
         )
 
-    async def _run_completion_update(self) -> None:
-        try:
-            await self._store_completion_update()
-        except Exception as e:
-            logger.error(f"Failed to store blobs/update completion asynchronously: {e}")
+    async def _run_completion_update(self, attempts: int = 3) -> None:
+        # The completion write is fire-and-forget; a transient Redis failure
+        # (pool contention under load) must NOT silently orphan the request (it
+        # would also leave it in the inflight set forever). Retry with small
+        # backoff, and on final failure log loudly instead of swallowing silently.
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._store_completion_update()
+                return
+            except Exception as e:
+                if attempt >= attempts:
+                    logger.error(
+                        f"Failed to persist completion for {self.request_id} after "
+                        f"{attempts} attempts (request left pending): {e}"
+                    )
+                    return
+                await asyncio.sleep(0.05 * attempt)
 
     def _schedule_completion_update(self) -> None:
         completion_update_task = create_logged_task(
