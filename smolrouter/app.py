@@ -570,6 +570,10 @@ def _should_use_gpt5_completion_tokens(model_name: str) -> bool:
 
 
 def _normalize_openai_request_payload(payload: Dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        logger.debug("Skipping OpenAI request payload normalization for non-dict payload: %s", type(payload).__name__)
+        return
+
     model_name = payload.get("model")
     if isinstance(model_name, str):
         normalized_model = _normalize_openai_model_name(model_name)
@@ -583,6 +587,8 @@ def _normalize_openai_request_payload(payload: Dict[str, Any]) -> None:
     if "max_completion_tokens" not in payload and "max_tokens" in payload:
         payload["max_completion_tokens"] = payload.pop("max_tokens")
         logger.debug("Remapped max_tokens -> max_completion_tokens for model %s", payload.get("model"))
+    else:
+        payload.pop("max_tokens", None)
 
 
 def should_strip_thinking_for_provider(provider_type: str, provider_url: str) -> bool:

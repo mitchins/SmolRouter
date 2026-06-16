@@ -812,7 +812,14 @@ def test_normalize_openai_request_payload_prefers_existing_max_completion_tokens
     _normalize_openai_request_payload(payload)
 
     assert payload["max_completion_tokens"] == 200
-    assert payload["max_tokens"] == 100
+    assert "max_tokens" not in payload
+
+
+def test_normalize_openai_request_payload_ignores_non_dict_payload():
+    payload = ["not", "a", "dict"]
+    _normalize_openai_request_payload(payload)
+
+    assert payload == ["not", "a", "dict"]
 
 
 def test_strip_think_chain_from_text():
