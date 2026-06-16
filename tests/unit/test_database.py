@@ -11,7 +11,7 @@ def test_request_log_entry_save_schedules_completion_update(monkeypatch):
     entry = RequestLogEntry("req-1", completed_at=datetime.now())
     scheduled = []
 
-    async def fake_run_completion_update(self):
+    async def fake_run_completion_update(self, *args, **kwargs):
         await asyncio.sleep(0)
         return None
 
@@ -31,7 +31,8 @@ def test_request_log_entry_save_falls_back_to_asyncio_run(monkeypatch):
     entry = RequestLogEntry("req-2", completed_at=datetime.now())
     fallback_calls = []
 
-    async def fake_run_completion_update(self):
+    async def fake_run_completion_update(self, *args, **kwargs):
+        assert kwargs == {"run_archival_inline": True}
         await asyncio.sleep(0)
         return None
 
