@@ -391,6 +391,7 @@ class FilesystemBlobStorage(BlobStorage):
                     self._janitor_loop(),
                     task_name="blob-storage-janitor",
                     create_task_fn=loop.create_task,
+                    service=True,
                 )
         except RuntimeError:
             # No loop yet; app startup will call again when loop exists

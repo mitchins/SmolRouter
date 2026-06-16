@@ -45,7 +45,7 @@ from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
 from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
-from smolrouter.task_utils import create_logged_task
+from smolrouter.task_utils import create_logged_task, drain_background_tasks
 
 
 def configure_error_file_logging() -> None:
@@ -170,6 +170,7 @@ async def app_lifespan(app: FastAPI):
     finally:
         await _shutdown_proxy_health_monitors(container)
         _stop_logging_cleanup_if_enabled()
+        await drain_background_tasks()
 
 
 app = FastAPI(
@@ -1641,6 +1642,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
     if ollama_payload is None:
         return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
+    log_entry = None
     logger.debug(f"Received Ollama request to {path}: {ollama_payload}")
     openai_payload, upstream_url, original_model, final_model = _build_ollama_openai_payload(path, source_ip, ollama_payload)
 
@@ -1659,10 +1661,11 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
     url = f"{upstream_url}/v1/chat/completions"
     logger.debug(f"Proxying Ollama request to OpenAI endpoint: {url}")
 
+    completed = False
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             if openai_payload.get("stream"):
-                return await _proxy_ollama_streaming(
+                response = await _proxy_ollama_streaming(
                     client,
                     url,
                     openai_payload,
@@ -1672,8 +1675,10 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
                     start_time,
                     request_body_bytes,
                 )
+                completed = True
+                return response
 
-            return await _proxy_ollama_non_streaming(
+            response = await _proxy_ollama_non_streaming(
                 client,
                 url,
                 openai_payload,
@@ -1683,8 +1688,11 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
                 start_time,
                 request_body_bytes,
             )
+            completed = True
+            return response
     except httpx.ConnectError as e:
         logger.exception(f"Connection error to upstream {url}: {e}")
+        completed = True
         return _error_response(
             log_entry,
             start_time,
@@ -1699,6 +1707,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
         )
     except httpx.TimeoutException as e:
         logger.exception(f"Timeout error to upstream {url}: {e}")
+        completed = True
         return _error_response(
             log_entry,
             start_time,
@@ -1713,6 +1722,7 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
         )
     except Exception as e:
         logger.exception(f"Unexpected error proxying Ollama request to {url}: {e}")
+        completed = True
         return _error_response(
             log_entry,
             start_time,
@@ -1725,6 +1735,17 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
                 "details": str(e),
             },
         )
+    finally:
+        if not completed:
+            try:
+                complete_request_log(
+                    log_entry,
+                    start_time,
+                    {"status_code": CLIENT_CLOSED_REQUEST_STATUS, "error_message": "client closed request"},
+                    request_body=request_body_bytes,
+                )
+            except Exception:
+                logger.warning("Failed to finalize Ollama log for aborted request", exc_info=True)
 
 
 @app.post("/v1/chat/completions")

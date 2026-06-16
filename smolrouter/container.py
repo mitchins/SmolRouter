@@ -306,6 +306,7 @@ class SmolRouterContainer:
             monitor_health(),
             task_name="provider-background-health-monitor",
             create_task_fn=asyncio.create_task,
+            service=True,
         )
 
     async def _perform_background_health_check(self):

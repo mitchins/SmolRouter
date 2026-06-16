@@ -55,9 +55,8 @@ async def real_redis_backend(monkeypatch):
 
     # Backend code resolves the client via redis_backend.get_redis().
     monkeypatch.setattr(redis_backend, "get_redis", lambda: client)
-    # database.py imports the symbols it uses from redis_backend at call time via
-    # RequestLog/get_log_stats, which themselves call get_redis(), so patching
-    # the single accessor is sufficient.
+    # get_error_summary uses database.redis_client directly; point it at real Redis too.
+    monkeypatch.setattr(database, "redis_client", client)
 
     try:
         yield client
@@ -141,3 +140,55 @@ async def test_peak_concurrent_dashboard_reads(real_redis_backend):
     # 25 viewers x N+1 against networked redis would be tens of thousands of
     # round-trips. Batched, this stays comfortably bounded.
     assert elapsed < 3.0, f"peak dashboard load too slow: {elapsed:.3f}s"
+
+
+async def _seed_pending(n: int) -> None:
+    """Seed n never-completed requests (the worst-case orphan/inflight pile)."""
+    from smolrouter.redis_backend import RedisRequestLog
+
+    for i in range(n):
+        await RedisRequestLog.create(
+            source_ip=f"10.1.{i // 256}.{i % 256}",
+            method="POST",
+            path="/v1/chat/completions",
+            service_type="openai",
+            upstream_url="https://api.openai.com/v1/chat/completions",
+            original_model="glm-4.5-air",
+            mapped_model="glm-4.5-air",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stats_under_250ms_worst_case(real_redis_backend):
+    """The literal bar: get_log_stats must be <=250ms even with a large mixed
+    dataset (completed + orphan pile). O(1) counters make this volume-independent."""
+    from smolrouter.database import get_log_stats
+
+    await _seed(1500)            # completed
+    await _seed_pending(1500)    # orphan/inflight pile
+
+    t0 = time.perf_counter()
+    stats = await get_log_stats()
+    elapsed = time.perf_counter() - t0
+
+    print(f"\nget_log_stats(3000 stored): {elapsed * 1000:.1f}ms")
+    assert stats["total_requests"] == 3000
+    assert elapsed < 0.25, f"get_log_stats took {elapsed * 1000:.0f}ms (>250ms)"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_under_250ms_worst_case(real_redis_backend):
+    """/api/dashboard must be <=250ms with a large dataset (it only deserializes
+    the page; stats/inflight are O(1))."""
+    import smolrouter.app as app_module
+
+    await _seed(1500)
+    await _seed_pending(1500)
+
+    t0 = time.perf_counter()
+    result = await app_module.api_dashboard(limit=100)
+    elapsed = time.perf_counter() - t0
+
+    print(f"\napi_dashboard(3000 stored): {elapsed * 1000:.1f}ms")
+    assert result["stats"]["total_requests"] == 3000
+    assert elapsed < 0.25, f"api_dashboard took {elapsed * 1000:.0f}ms (>250ms)"

@@ -13,11 +13,13 @@ import re
 import traceback
 import uuid
 import hashlib
+from typing import Any
 from datetime import datetime, timezone
 
 from .redis_backend import (
     RequestLog as RedisRequestLog,
     ApiKeyQuota as RedisApiKeyQuota,
+    INFLIGHT_SET_KEY,
     init_redis_db,
     close_redis_db,
     get_redis_stats,
@@ -465,6 +467,17 @@ async def _collect_exception_signature_summary(
     status_code_counts: dict[str, int],
 ) -> dict | None:
     summary = await redis_client.hgetall(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature_id}")
+    return _summarize_signature_hash(signature_id, summary, class_counts, route_counts, status_code_counts)
+
+
+def _summarize_signature_hash(
+    signature_id: str,
+    summary: Any,
+    class_counts: dict[str, int],
+    route_counts: dict[str, int],
+    status_code_counts: dict[str, int],
+) -> dict | None:
+    """Process one already-fetched signature hash (no Redis I/O)."""
     if not summary:
         return None
 
@@ -504,23 +517,27 @@ async def _collect_exception_signature_summary(
 
 async def get_error_summary(limit_signatures: int = 50) -> dict:
     try:
-        signature_ids = list(await redis_client.smembers(ERROR_SIGNATURE_SET_KEY))
+        signature_ids = [s for s in (_to_str(s) for s in await redis_client.smembers(ERROR_SIGNATURE_SET_KEY)) if s]
 
         class_counts: dict[str, int] = {}
         route_counts: dict[str, int] = {}
         summaries: list[dict] = []
         status_code_counts: dict[str, int] = {}
 
-        for signature_id in signature_ids:
-            if not isinstance(signature_id, str):
-                signature_id = _to_str(signature_id)
-            if not signature_id:
-                continue
-            summary = await _collect_exception_signature_summary(
-                signature_id, class_counts, route_counts, status_code_counts
-            )
-            if summary is not None:
-                summaries.append(summary)
+        if signature_ids:
+            # Batch all per-signature reads into one pipeline (was N+1 over
+            # signatures - O(signatures) round-trips on every dashboard poll).
+            pipe = redis_client.pipeline(transaction=False)
+            for signature_id in signature_ids:
+                pipe.hgetall(f"{ERROR_SIGNATURE_KEY_PREFIX}{signature_id}")
+            raw_summaries = await pipe.execute()
+
+            for signature_id, raw in zip(signature_ids, raw_summaries):
+                summary = _summarize_signature_hash(
+                    signature_id, raw, class_counts, route_counts, status_code_counts
+                )
+                if summary is not None:
+                    summaries.append(summary)
 
         summaries.sort(key=lambda item: item.get("count", 0), reverse=True)
         if limit_signatures > 0:
@@ -761,11 +778,24 @@ class RequestLogEntry:
             **self._completion_update_kwargs(request_body_key, response_body_key)
         )
 
-    async def _run_completion_update(self) -> None:
-        try:
-            await self._store_completion_update()
-        except Exception as e:
-            logger.error(f"Failed to store blobs/update completion asynchronously: {e}")
+    async def _run_completion_update(self, attempts: int = 3) -> None:
+        # The completion write is fire-and-forget; a transient Redis failure
+        # (pool contention under load) must NOT silently orphan the request (it
+        # would also leave it in the inflight set forever). Retry with small
+        # backoff, and on final failure log loudly instead of swallowing silently.
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._store_completion_update()
+                return
+            except Exception:
+                if attempt >= attempts:
+                    logger.exception(
+                        "Failed to persist completion for %s after %s attempts (request left pending)",
+                        self.request_id,
+                        attempts,
+                    )
+                    return
+                await asyncio.sleep(0.05 * attempt)
 
     def _schedule_completion_update(self) -> None:
         completion_update_task = create_logged_task(
@@ -866,6 +896,11 @@ class RequestLog:
     async def get_by_source_ip(source_ip: str, limit: int | None = None):
         """Get requests for a specific client IP ordered by recency."""
         return await RedisRequestLog.get_by_source_ip(source_ip, limit)
+
+    @staticmethod
+    async def get_stats_counters():
+        """O(1) dashboard counters (total/completed/failed/service_types/inflight)."""
+        return await RedisRequestLog.get_stats_counters()
 
     @staticmethod
     def select():
@@ -1049,6 +1084,7 @@ async def _cleanup_old_request_logs(client, cutoff_ts: float) -> int:
         source_ip = data.get("source_ip") if data else None
         if source_ip:
             await client.srem(f"requests:by_ip:{source_ip}", request_id)
+        await client.srem(INFLIGHT_SET_KEY, request_id)
         await client.delete(key)
         await client.zrem("requests:by_time", request_id)
         deleted += 1
@@ -1161,6 +1197,7 @@ def start_background_cleanup():
             _cleanup_task = create_logged_task(
                 background_cleanup_task(),
                 task_name="background-request-log-cleanup",
+                service=True,
                 create_task_fn=asyncio.create_task,
             )
             logger.info(
@@ -1201,33 +1238,28 @@ async def get_recent_logs(limit: int = 100, service_type: str = None):
 
 
 async def get_log_stats():
-    """Get logging statistics"""
+    """Get logging statistics.
+
+    O(1): served from Redis counters/sets maintained on create/complete, not by
+    scanning+deserializing a 1000-record sample on every call (which blocked the
+    event loop and made the dashboard crawl). total_requests is now a true
+    monotonic counter (requests since these counters were introduced), not the
+    size of a recent sample.
+    """
     try:
-        recent_logs = await RequestLog.get_recent(1000)  # Get larger sample for stats
-        total_requests = len(recent_logs)
-
-        # Calculate basic stats
-        completed_requests = len([log for log in recent_logs if getattr(log, "status_code", "0") != "0"])
-        pending_requests = total_requests - completed_requests
-
-        # Service type breakdown
-        service_types = {}
-        for log in recent_logs:
-            service_type = getattr(log, "service_type", "unknown")
-            service_types[service_type] = service_types.get(service_type, 0) + 1
-
-        # Inflight count - reuse the sample we already fetched instead of
-        # issuing a second get_recent(1000) (which doubled dashboard cost).
-        inflight = await get_inflight_requests(recent_logs=recent_logs)
+        counters = await RequestLog.get_stats_counters()
+        total = counters["total"]
+        completed = counters["completed"]
 
         error_summary = await get_error_summary(limit_signatures=10)
 
         return {
-            "total_requests": total_requests,
-            "completed_requests": completed_requests,
-            "pending_requests": pending_requests,
-            "service_types": service_types,
-            "inflight_requests": len(inflight),
+            "total_requests": total,
+            "completed_requests": completed,
+            "pending_requests": max(0, total - completed),
+            "failed_requests": counters["failed"],
+            "service_types": counters["service_types"],
+            "inflight_requests": counters["inflight"],
             "exception_signatures": error_summary.get("signature_count", 0),
             "exceptions_total": error_summary.get("total_exceptions", 0),
         }

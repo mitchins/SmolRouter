@@ -20,8 +20,31 @@ from .redis_config import redis_client, is_fake_redis, get_redis_status
 UTC_OFFSET_SUFFIX = "+00:00"
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 REDIS_REQUESTS_BY_TIME_KEY = "requests:by_time"
+# O(1) dashboard stats: maintained on create/complete instead of scanning records.
+STATS_TOTAL_KEY = "stats:requests:total"
+STATS_COMPLETED_KEY = "stats:requests:completed"
+STATS_FAILED_KEY = "stats:requests:failed"
+STATS_SERVICE_TYPES_KEY = "stats:requests:service_types"
+INFLIGHT_SET_KEY = "stats:requests:inflight"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
+_COMPLETE_ONCE_LUA_SCRIPT = """
+local inflight_key = KEYS[1]
+local completed_key = KEYS[2]
+local failed_key = KEYS[3]
+local request_id = ARGV[1]
+local status_code = tonumber(ARGV[2])
+
+local removed = redis.call("SREM", inflight_key, request_id)
+if removed == 1 then
+    redis.call("INCR", completed_key)
+    if status_code and status_code >= 400 then
+        redis.call("INCR", failed_key)
+    end
+end
+
+return removed
+"""
 REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
     {
         "service_type",
@@ -247,6 +270,69 @@ async def _store_request_log(
     await client.hset(f"request:{request_id}", mapping=request_data)
     await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
     await client.sadd(f"requests:by_ip:{source_ip}", request_id)
+
+
+def _status_is_terminal(status_code: Any) -> bool:
+    """A request is terminal (completed) when it has a real HTTP status, not
+    'pending'/0/None."""
+    if status_code is None:
+        return False
+    text = str(status_code)
+    if text in ("pending", "0", "", "None"):
+        return False
+    try:
+        int(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _status_is_failure(status_code: Any) -> bool:
+    return _status_is_terminal(status_code) and int(str(status_code)) >= 400
+
+
+async def _increment_create_stats(client: Any, request_id: str, request_data: Dict[str, Any]) -> None:
+    """Maintain O(1) dashboard counters on create (total, per-service, inflight set).
+
+    A request created already-terminal (status_code supplied at create) is counted
+    as completed and is NOT added to the inflight set."""
+    service_type = request_data.get("service_type") or "unknown"
+    status_code = request_data.get("status_code")
+    pipe = client.pipeline(transaction=False)
+    pipe.incr(STATS_TOTAL_KEY)
+    pipe.hincrby(STATS_SERVICE_TYPES_KEY, service_type, 1)
+    if _status_is_terminal(status_code):
+        pipe.incr(STATS_COMPLETED_KEY)
+        if _status_is_failure(status_code):
+            pipe.incr(STATS_FAILED_KEY)
+    else:
+        pipe.sadd(INFLIGHT_SET_KEY, request_id)
+    await pipe.execute()
+
+
+async def _increment_completion_stats(client: Any, request_id: str, status_code: Any) -> None:
+    """Maintain O(1) dashboard counters on completion (completed/failed, remove from inflight)."""
+    status_code_value = int(status_code) if _status_is_terminal(status_code) else 0
+
+    if _is_lua_fallback_enabled(False):
+        removed = await client.srem(INFLIGHT_SET_KEY, request_id)
+        if removed == 1:
+            pipe = client.pipeline(transaction=False)
+            pipe.incr(STATS_COMPLETED_KEY)
+            if _status_is_failure(status_code_value):
+                pipe.incr(STATS_FAILED_KEY)
+            await pipe.execute()
+        return
+
+    await client.eval(
+        _COMPLETE_ONCE_LUA_SCRIPT,
+        3,
+        INFLIGHT_SET_KEY,
+        STATS_COMPLETED_KEY,
+        STATS_FAILED_KEY,
+        request_id,
+        str(status_code_value),
+    )
 
 
 async def _index_duplicate_request_body(client: Any, request_id: str, request_body_hash: Optional[str]) -> None:
@@ -488,6 +574,7 @@ class RedisRequestLog:
 
         await _store_request_log(client, request_id, source_ip, created_at, request_data)
         await _index_duplicate_request_body(client, request_id, option_fields.get("request_body_hash"))
+        await _increment_create_stats(client, request_id, request_data)
 
         logger.debug(f"Created Redis request log: {request_id}")
         return request_id
@@ -504,7 +591,27 @@ class RedisRequestLog:
         client = get_redis()
         update_data = _build_completion_update_data(status_code, option_fields)
         await client.hset(f"request:{request_id}", mapping=update_data)
+        await _increment_completion_stats(client, request_id, status_code)
         logger.debug(f"Updated Redis request completion: {request_id}")
+
+    @staticmethod
+    async def get_stats_counters() -> Dict[str, Any]:
+        """O(1) dashboard counters: a single pipeline of reads, no record scan."""
+        client = get_redis()
+        pipe = client.pipeline(transaction=False)
+        pipe.get(STATS_TOTAL_KEY)
+        pipe.get(STATS_COMPLETED_KEY)
+        pipe.get(STATS_FAILED_KEY)
+        pipe.hgetall(STATS_SERVICE_TYPES_KEY)
+        pipe.scard(INFLIGHT_SET_KEY)
+        total, completed, failed, service_types, inflight = await pipe.execute()
+        return {
+            "total": int(total or 0),
+            "completed": int(completed or 0),
+            "failed": int(failed or 0),
+            "service_types": {str(k): int(v) for k, v in (service_types or {}).items()},
+            "inflight": int(inflight or 0),
+        }
 
     @staticmethod
     async def update_request_body_key(request_id: str, request_body_key: str) -> None:

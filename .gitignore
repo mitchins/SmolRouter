@@ -194,3 +194,4 @@ config/google_api_keys.txt
 scripts/
 scripts/*.py
 scripts/README.md
+.DS_Store

@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from smolrouter.task_utils import create_logged_task
+from smolrouter.task_utils import create_logged_task, drain_background_tasks
 
 
 @pytest.mark.asyncio
@@ -95,3 +95,34 @@ async def test_create_logged_task_retains_strong_reference_until_done():
     await asyncio.sleep(0)  # let the done-callback run
 
     assert task not in task_utils._background_tasks  # dropped once done
+
+
+@pytest.mark.asyncio
+async def test_drain_background_tasks_does_not_wait_for_service_loop():
+    from smolrouter import task_utils
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def service_loop():
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    task = create_logged_task(service_loop(), task_name="service-loop", service=True)
+    assert task is not None
+    await started.wait()
+    assert task in task_utils._service_tasks
+
+    drain_task = asyncio.create_task(drain_background_tasks())
+    await asyncio.wait_for(drain_task, timeout=0.1)
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0)
+    assert task not in task_utils._service_tasks

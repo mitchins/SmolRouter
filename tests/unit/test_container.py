@@ -8,9 +8,10 @@ def test_start_background_health_monitoring_uses_logged_task(monkeypatch):
     container = SmolRouterContainer(SmolRouterConfig(providers=[]))
     captured = {}
 
-    def fake_create_logged_task(coro, *, task_name, create_task_fn=None, done_callback=None):
+    def fake_create_logged_task(coro, *, task_name, create_task_fn=None, done_callback=None, service=False):
         captured["task_name"] = task_name
         captured["create_task_fn"] = create_task_fn
+        captured["service"] = service
         coro.close()
         return object()
 
@@ -20,3 +21,4 @@ def test_start_background_health_monitoring_uses_logged_task(monkeypatch):
 
     assert captured["task_name"] == "provider-background-health-monitor"
     assert captured["create_task_fn"] is asyncio.create_task
+    assert captured["service"] is True  # long-lived loop -> cancelled (not awaited) on shutdown
