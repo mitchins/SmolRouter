@@ -22,7 +22,7 @@ async def test_create_client_falls_back_to_fake_on_real_failure(monkeypatch):
     def _boom(*args, **kwargs):  # pragma: no cover - executed in test
         raise ConnectionError("simulated connection failure")
 
-    monkeypatch.setattr(redis_config.redis, "from_url", _boom)
+    monkeypatch.setattr(redis_config.redis.BlockingConnectionPool, "from_url", _boom)
 
     client, is_fake = redis_config.create_redis_client(env="dev", redis_url="redis://localhost:6379")
 

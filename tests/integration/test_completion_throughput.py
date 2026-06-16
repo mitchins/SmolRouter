@@ -30,6 +30,13 @@ def _redis_max_connections() -> int:
     except (TypeError, ValueError):
         return 2048
 
+
+def _redis_blocking_pool_timeout() -> float:
+    try:
+        return max(0.1, float(os.getenv("REDIS_BLOCKING_POOL_TIMEOUT", "5.0")))
+    except (TypeError, ValueError):
+        return 5.0
+
 pytestmark = [
     pytest.mark.performance,
     pytest.mark.skipif(not REAL_REDIS_URL, reason="set SMOLROUTER_TEST_REDIS_URL to a real redis"),
@@ -42,11 +49,13 @@ async def real_redis(monkeypatch):
     import smolrouter.redis_backend as redis_backend
     import smolrouter.database as database
 
-    client = redis_async.from_url(
+    pool = redis_async.BlockingConnectionPool.from_url(
         REAL_REDIS_URL,
         decode_responses=True,
         max_connections=_redis_max_connections(),
+        timeout=_redis_blocking_pool_timeout(),
     )
+    client = redis_async.Redis(connection_pool=pool)
     await client.flushall()
     monkeypatch.setattr(redis_backend, "get_redis", lambda: client)
     monkeypatch.setattr(database, "redis_client", client)
