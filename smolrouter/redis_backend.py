@@ -45,6 +45,19 @@ end
 
 return removed
 """
+_GET_RECENT_LUA_SCRIPT = """
+local ids = redis.call("ZREVRANGE", KEYS[1], 0, tonumber(ARGV[1]) - 1)
+local records = {}
+
+for _, request_id in ipairs(ids) do
+    local data = redis.call("HGETALL", "request:" .. request_id)
+    if #data > 0 then
+        table.insert(records, data)
+    end
+end
+
+return records
+"""
 REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
     {
         "service_type",
@@ -384,6 +397,13 @@ def _build_completion_update_data(status_code: int, option_fields: RequestLogCom
     return update_data
 
 
+def _flat_pairs_to_dict(data: Any) -> Dict[str, Any]:
+    if isinstance(data, dict):
+        return data
+
+    return {str(data[i]): data[i + 1] for i in range(0, len(data), 2)}
+
+
 class LogRecord:
     """Object wrapper for Redis log data to provide attribute access"""
 
@@ -655,7 +675,14 @@ class RedisRequestLog:
     @staticmethod
     async def get_recent(limit: int = 100) -> List[LogRecord]:
         """Get recent requests"""
+        if limit <= 0:
+            return []
+
         client = get_redis()
+
+        if not _is_lua_fallback_enabled(False):
+            results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
+            return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
@@ -670,7 +697,7 @@ class RedisRequestLog:
             pipe.hgetall(f"request:{request_id}")
         results = await pipe.execute()
 
-        return [LogRecord(dict(data)) for data in results if data]
+        return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
 
     @staticmethod
     async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
