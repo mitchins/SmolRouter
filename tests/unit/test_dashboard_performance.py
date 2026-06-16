@@ -68,6 +68,43 @@ async def _seed_requests(n: int, *, complete: bool = True) -> None:
             )
 
 
+class TestDashboardStatsDeserializationCost:
+    """DEFECT repro: get_log_stats deserializes the whole recent sample (up to
+    1000 records) on EVERY call to compute totals/pending/service-types/inflight.
+
+    Redis is on the same host in production, so the dashboard latency is NOT
+    Redis round-trips (the N+1 fix doesn't help here) - it is synchronous Python
+    deserialization of ~1000 records per poll, which blocks the single asyncio
+    event loop (~2.3s observed) and starves live request handling. The cost must
+    not scale with stored volume.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_log_stats_deserializes_whole_sample_per_call(self, fresh_redis, monkeypatch):
+        await _seed_requests(600)
+
+        original_get_recent = RedisRequestLog.get_recent
+        seen = {"records": 0, "calls": 0}
+
+        async def counting_get_recent(limit: int = 100):
+            records = await original_get_recent(limit)
+            seen["records"] += len(records)
+            seen["calls"] += 1
+            return records
+
+        monkeypatch.setattr(RedisRequestLog, "get_recent", staticmethod(counting_get_recent))
+
+        await get_log_stats()
+
+        # A few-TPS dashboard poll must not deserialize the entire stored sample.
+        # Today get_log_stats pulls up to 1000 records (here all 600) every call.
+        assert seen["records"] <= 50, (
+            f"get_log_stats deserialized {seen['records']} records across "
+            f"{seen['calls']} get_recent call(s); cost scales with stored volume "
+            f"and blocks the event loop (dashboard-latency defect)."
+        )
+
+
 class TestGetRecentRoundTrips:
     """get_recent must batch reads: O(1) round-trips, not O(N)."""
 
