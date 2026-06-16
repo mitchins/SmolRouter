@@ -169,14 +169,15 @@ class TestStatsWorstCase:
 
 @pytest.mark.performance
 class TestInflightWorstCase:
-    """Inflight count must be O(1), not a scan of all pending records."""
+    """The inflight COUNT shown in stats must be O(1), not a scan of pending records."""
 
     @pytest.mark.asyncio
-    async def test_inflight_o1_with_many_inflight(self, fresh_redis):
-        await _seed(800, "inflight")
+    async def test_inflight_count_is_o1_and_correct(self, fresh_redis):
+        await _seed(800, "inflight")  # created, never completed -> in the inflight set
         with count_records_deserialized() as c:
-            await get_inflight_requests()
-        assert c["records"] <= O1_RECORDS, f"inflight deserialized {c['records']} records with 800 inflight"
+            stats = await get_log_stats()
+        assert stats["inflight_requests"] == 800, f"expected 800 inflight, got {stats['inflight_requests']}"
+        assert c["records"] <= O1_RECORDS, f"inflight count deserialized {c['records']} records"
 
 
 @pytest.mark.performance
