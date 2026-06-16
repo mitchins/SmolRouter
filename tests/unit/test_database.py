@@ -183,6 +183,7 @@ async def test_cleanup_old_logs_async_removes_stale_error_artifacts_and_orphans(
     await database.redis_client.hset(f"request:{old_request_id}", mapping={"source_ip": old_source_ip})
     await database.redis_client.zadd("requests:by_time", {old_request_id: old_ts})
     await database.redis_client.sadd(f"requests:by_ip:{old_source_ip}", old_request_id)
+    await database.redis_client.sadd(database.INFLIGHT_SET_KEY, old_request_id)
 
     signature = "sig-old"
     signature_key = f"{database.ERROR_SIGNATURE_KEY_PREFIX}{signature}"
@@ -225,6 +226,7 @@ async def test_cleanup_old_logs_async_removes_stale_error_artifacts_and_orphans(
 
     assert deleted == 2
     assert not await database.redis_client.exists(f"request:{old_request_id}")
+    assert not await database.redis_client.sismember(database.INFLIGHT_SET_KEY, old_request_id)
     assert not await database.redis_client.exists(event_key)
     assert not await database.redis_client.exists(signature_key)
     assert not await database.redis_client.exists(signature_request_ids_key)

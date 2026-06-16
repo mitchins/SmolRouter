@@ -175,6 +175,29 @@ async def test_request_log_update_completion_rejects_unexpected_fields():
 
 
 @pytest.mark.asyncio
+async def test_request_log_update_completion_is_idempotent_for_retries():
+    await redis_client.flushall()
+    request_id = await RedisRequestLog.create(source_ip="127.0.0.1", method="POST", path="/v1/chat/completions")
+
+    await RedisRequestLog.update_completion(
+        request_id=request_id,
+        status_code=200,
+        response_size=12,
+    )
+    await RedisRequestLog.update_completion(
+        request_id=request_id,
+        status_code=200,
+        response_size=24,
+    )
+
+    stats = await RedisRequestLog.get_stats_counters()
+    assert stats["total"] == 1
+    assert stats["completed"] == 1
+    assert stats["failed"] == 0
+    assert stats["inflight"] == 0
+
+
+@pytest.mark.asyncio
 async def test_request_log_round_trip_preserves_recency_and_duplicate_indexes(monkeypatch):
     monkeypatch.setattr(
         storage_module,

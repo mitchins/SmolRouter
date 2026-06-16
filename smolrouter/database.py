@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from .redis_backend import (
     RequestLog as RedisRequestLog,
     ApiKeyQuota as RedisApiKeyQuota,
+    INFLIGHT_SET_KEY,
     init_redis_db,
     close_redis_db,
     get_redis_stats,
@@ -786,11 +787,12 @@ class RequestLogEntry:
             try:
                 await self._store_completion_update()
                 return
-            except Exception as e:
+            except Exception:
                 if attempt >= attempts:
-                    logger.error(
-                        f"Failed to persist completion for {self.request_id} after "
-                        f"{attempts} attempts (request left pending): {e}"
+                    logger.exception(
+                        "Failed to persist completion for %s after %s attempts (request left pending)",
+                        self.request_id,
+                        attempts,
                     )
                     return
                 await asyncio.sleep(0.05 * attempt)
@@ -1082,6 +1084,7 @@ async def _cleanup_old_request_logs(client, cutoff_ts: float) -> int:
         source_ip = data.get("source_ip") if data else None
         if source_ip:
             await client.srem(f"requests:by_ip:{source_ip}", request_id)
+        await client.srem(INFLIGHT_SET_KEY, request_id)
         await client.delete(key)
         await client.zrem("requests:by_time", request_id)
         deleted += 1

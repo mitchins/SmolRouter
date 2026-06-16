@@ -13,6 +13,7 @@ _background_tasks: "set[Task[Any]]" = set()
 # Long-lived service loops (health/cache-cleanup/janitor). They never finish on
 # their own, so shutdown must CANCEL them, not wait for them.
 _service_tasks: "set[Task[Any]]" = set()
+BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 def create_logged_task(
@@ -67,32 +68,49 @@ def create_logged_task(
     return task
 
 
-async def _cancel_tasks(tasks: "set[Task[Any]]") -> None:
+async def _cancel_tasks(tasks: "set[Task[Any]]", *, wait: bool = True) -> None:
     pending = {task for task in tasks if not task.done()}
     if not pending:
         return
     for task in pending:
         task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    if wait:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
-async def drain_background_tasks(timeout: float = 5.0) -> None:
+async def _wait_for_tasks_with_timeout(tasks: "set[Task[Any]]") -> "set[Task[Any]]":
+    if not tasks:
+        return set()
+
+    try:
+        async with asyncio.timeout(BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS):
+            _done, still_pending = await asyncio.wait(tasks)
+            return still_pending
+    except TimeoutError:
+        return {task for task in tasks if not task.done()}
+
+
+async def _cancel_service_tasks() -> None:
+    await _cancel_tasks(set(_service_tasks), wait=False)
+
+
+async def drain_background_tasks() -> None:
     """Flush fire-and-forget work on shutdown.
 
-    Short-lived tasks (e.g. completion writes) are awaited up to `timeout` so
-    in-flight work finishes cleanly; anything still pending is then cancelled so
-    shutdown cannot hang. Long-lived service loops are cancelled outright - they
-    never finish on their own, so waiting for them would just burn the timeout.
+    Short-lived tasks (e.g. completion writes) are awaited up to a fixed
+    timeout so in-flight work finishes cleanly; anything still pending is then
+    cancelled so shutdown cannot hang. Long-lived service loops are cancelled
+    outright - they never finish on their own, so waiting for them would just
+    burn the timeout.
     """
     drainable = {t for t in _background_tasks if not t.done() and t not in _service_tasks}
-    if drainable:
-        _done, still_pending = await asyncio.wait(drainable, timeout=timeout)
-        if still_pending:
-            logger.warning(
-                "Cancelling %d background task(s) after waiting %.1fs for shutdown",
-                len(still_pending),
-                timeout,
-            )
-            await _cancel_tasks(still_pending)
+    still_pending = await _wait_for_tasks_with_timeout(drainable)
+    if still_pending:
+        logger.warning(
+            "Cancelling %d background task(s) after waiting %.1fs for shutdown",
+            len(still_pending),
+            BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS,
+        )
+        await _cancel_tasks(still_pending, wait=False)
 
-    await _cancel_tasks(set(_service_tasks))
+    await _cancel_service_tasks()

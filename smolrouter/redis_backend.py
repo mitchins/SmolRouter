@@ -28,6 +28,23 @@ STATS_SERVICE_TYPES_KEY = "stats:requests:service_types"
 INFLIGHT_SET_KEY = "stats:requests:inflight"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
+_COMPLETE_ONCE_LUA_SCRIPT = """
+local inflight_key = KEYS[1]
+local completed_key = KEYS[2]
+local failed_key = KEYS[3]
+local request_id = ARGV[1]
+local status_code = tonumber(ARGV[2])
+
+local removed = redis.call("SREM", inflight_key, request_id)
+if removed == 1 then
+    redis.call("INCR", completed_key)
+    if status_code and status_code >= 400 then
+        redis.call("INCR", failed_key)
+    end
+end
+
+return removed
+"""
 REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
     {
         "service_type",
@@ -295,12 +312,27 @@ async def _increment_create_stats(client: Any, request_id: str, request_data: Di
 
 async def _increment_completion_stats(client: Any, request_id: str, status_code: Any) -> None:
     """Maintain O(1) dashboard counters on completion (completed/failed, remove from inflight)."""
-    pipe = client.pipeline(transaction=False)
-    pipe.incr(STATS_COMPLETED_KEY)
-    if _status_is_failure(status_code):
-        pipe.incr(STATS_FAILED_KEY)
-    pipe.srem(INFLIGHT_SET_KEY, request_id)
-    await pipe.execute()
+    status_code_value = int(status_code) if _status_is_terminal(status_code) else 0
+
+    if _is_lua_fallback_enabled(False):
+        removed = await client.srem(INFLIGHT_SET_KEY, request_id)
+        if removed == 1:
+            pipe = client.pipeline(transaction=False)
+            pipe.incr(STATS_COMPLETED_KEY)
+            if _status_is_failure(status_code_value):
+                pipe.incr(STATS_FAILED_KEY)
+            await pipe.execute()
+        return
+
+    await client.eval(
+        _COMPLETE_ONCE_LUA_SCRIPT,
+        3,
+        INFLIGHT_SET_KEY,
+        STATS_COMPLETED_KEY,
+        STATS_FAILED_KEY,
+        request_id,
+        str(status_code_value),
+    )
 
 
 async def _index_duplicate_request_body(client: Any, request_id: str, request_body_hash: Optional[str]) -> None:
