@@ -260,16 +260,16 @@ def _build_request_log_data(
     }
 
 
-async def _store_request_log(
-    client: Any,
+def _queue_store_request_log(
+    pipe: Any,
     request_id: str,
     source_ip: str,
     created_at: datetime,
     request_data: Dict[str, Any],
 ) -> None:
-    await client.hset(f"request:{request_id}", mapping=request_data)
-    await client.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
-    await client.sadd(f"requests:by_ip:{source_ip}", request_id)
+    pipe.hset(f"request:{request_id}", mapping=request_data)
+    pipe.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
+    pipe.sadd(f"requests:by_ip:{source_ip}", request_id)
 
 
 def _status_is_terminal(status_code: Any) -> bool:
@@ -291,14 +291,13 @@ def _status_is_failure(status_code: Any) -> bool:
     return _status_is_terminal(status_code) and int(str(status_code)) >= 400
 
 
-async def _increment_create_stats(client: Any, request_id: str, request_data: Dict[str, Any]) -> None:
+def _queue_create_stats(pipe: Any, request_id: str, request_data: Dict[str, Any]) -> None:
     """Maintain O(1) dashboard counters on create (total, per-service, inflight set).
 
     A request created already-terminal (status_code supplied at create) is counted
     as completed and is NOT added to the inflight set."""
     service_type = request_data.get("service_type") or "unknown"
     status_code = request_data.get("status_code")
-    pipe = client.pipeline(transaction=False)
     pipe.incr(STATS_TOTAL_KEY)
     pipe.hincrby(STATS_SERVICE_TYPES_KEY, service_type, 1)
     if _status_is_terminal(status_code):
@@ -307,7 +306,6 @@ async def _increment_create_stats(client: Any, request_id: str, request_data: Di
             pipe.incr(STATS_FAILED_KEY)
     else:
         pipe.sadd(INFLIGHT_SET_KEY, request_id)
-    await pipe.execute()
 
 
 async def _increment_completion_stats(client: Any, request_id: str, status_code: Any) -> None:
@@ -335,7 +333,12 @@ async def _increment_completion_stats(client: Any, request_id: str, status_code:
     )
 
 
-async def _index_duplicate_request_body(client: Any, request_id: str, request_body_hash: Optional[str]) -> None:
+async def _queue_duplicate_request_body(
+    client: Any,
+    pipe: Any,
+    request_id: str,
+    request_body_hash: Optional[str],
+) -> None:
     if not request_body_hash:
         return
 
@@ -345,7 +348,7 @@ async def _index_duplicate_request_body(client: Any, request_id: str, request_bo
     except Exception:
         existing_count = 0
 
-    await client.hset(
+    pipe.hset(
         f"request:{request_id}",
         mapping={
             "request_body_hash": request_body_hash,
@@ -353,7 +356,7 @@ async def _index_duplicate_request_body(client: Any, request_id: str, request_bo
             "duplicate_count": existing_count,
         },
     )
-    await client.sadd(set_key, request_id)
+    pipe.sadd(set_key, request_id)
 
 
 def _build_completion_update_data(status_code: int, option_fields: RequestLogCompletionOptions) -> Dict[str, Any]:
@@ -572,9 +575,11 @@ class RedisRequestLog:
         created_at = _resolve_created_at(option_fields.get("timestamp"))
         request_data = _build_request_log_data(request_id, source_ip, method, path, created_at, option_fields)
 
-        await _store_request_log(client, request_id, source_ip, created_at, request_data)
-        await _index_duplicate_request_body(client, request_id, option_fields.get("request_body_hash"))
-        await _increment_create_stats(client, request_id, request_data)
+        pipe = client.pipeline(transaction=False)
+        _queue_store_request_log(pipe, request_id, source_ip, created_at, request_data)
+        await _queue_duplicate_request_body(client, pipe, request_id, option_fields.get("request_body_hash"))
+        _queue_create_stats(pipe, request_id, request_data)
+        await pipe.execute()
 
         logger.debug(f"Created Redis request log: {request_id}")
         return request_id
@@ -590,8 +595,23 @@ class RedisRequestLog:
 
         client = get_redis()
         update_data = _build_completion_update_data(status_code, option_fields)
-        await client.hset(f"request:{request_id}", mapping=update_data)
-        await _increment_completion_stats(client, request_id, status_code)
+        if _is_lua_fallback_enabled(False):
+            await client.hset(f"request:{request_id}", mapping=update_data)
+            await _increment_completion_stats(client, request_id, status_code)
+        else:
+            status_code_value = int(status_code) if _status_is_terminal(status_code) else 0
+            pipe = client.pipeline(transaction=False)
+            pipe.hset(f"request:{request_id}", mapping=update_data)
+            pipe.eval(
+                _COMPLETE_ONCE_LUA_SCRIPT,
+                3,
+                INFLIGHT_SET_KEY,
+                STATS_COMPLETED_KEY,
+                STATS_FAILED_KEY,
+                request_id,
+                str(status_code_value),
+            )
+            await pipe.execute()
         logger.debug(f"Updated Redis request completion: {request_id}")
 
     @staticmethod

@@ -22,7 +22,13 @@ import pytest
 import pytest_asyncio
 
 REAL_REDIS_URL = os.getenv("SMOLROUTER_TEST_REDIS_URL")
-REAL_REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNS", "2048"))
+
+
+def _redis_max_connections() -> int:
+    try:
+        return max(1, int(os.getenv("REDIS_MAX_CONNS", "2048")))
+    except (TypeError, ValueError):
+        return 2048
 
 pytestmark = [
     pytest.mark.performance,
@@ -39,7 +45,7 @@ async def real_redis(monkeypatch):
     client = redis_async.from_url(
         REAL_REDIS_URL,
         decode_responses=True,
-        max_connections=REAL_REDIS_MAX_CONNECTIONS,
+        max_connections=_redis_max_connections(),
     )
     await client.flushall()
     monkeypatch.setattr(redis_backend, "get_redis", lambda: client)
