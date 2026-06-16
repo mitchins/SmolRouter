@@ -770,10 +770,20 @@ class RequestLogEntry:
         if not self._needs_body_archival():
             return
 
+        request_body_key = None
+        response_body_key = None
         try:
             blob_storage = get_blob_storage()
-            request_body_key = await self._store_request_body_if_needed(blob_storage)
-            response_body_key = await self._store_response_body_if_present(blob_storage)
+            try:
+                request_body_key = await self._store_request_body_if_needed(blob_storage)
+            except Exception as e:
+                logger.warning(f"Request body storage failed for request {self.request_id}: {e}")
+
+            try:
+                response_body_key = await self._store_response_body_if_present(blob_storage)
+            except Exception as e:
+                logger.warning(f"Response body storage failed for request {self.request_id}: {e}")
+
             await RedisRequestLog.update_body_keys(
                 request_id=self.request_id,
                 request_body_key=request_body_key,
@@ -796,7 +806,7 @@ class RequestLogEntry:
         if archival_task is not None:
             self._body_archival_scheduled = True
 
-    async def _store_completion_update(self) -> None:
+    async def _store_completion_update(self, *, run_archival_inline: bool = False) -> None:
         from .redis_backend import RedisRequestLog
 
         await RedisRequestLog.update_completion(
@@ -805,16 +815,19 @@ class RequestLogEntry:
                 getattr(self, "response_body_key", None),
             )
         )
-        self._schedule_body_archival()
+        if run_archival_inline:
+            await self._archive_bodies_after_completion()
+        else:
+            self._schedule_body_archival()
 
-    async def _run_completion_update(self, attempts: int = 3) -> None:
+    async def _run_completion_update(self, attempts: int = 3, *, run_archival_inline: bool = False) -> None:
         # The completion write is fire-and-forget; a transient Redis failure
         # (pool contention under load) must NOT silently orphan the request (it
         # would also leave it in the inflight set forever). Retry with small
         # backoff, and on final failure log loudly instead of swallowing silently.
         for attempt in range(1, attempts + 1):
             try:
-                await self._store_completion_update()
+                await self._store_completion_update(run_archival_inline=run_archival_inline)
                 return
             except Exception:
                 if attempt >= attempts:
@@ -837,7 +850,7 @@ class RequestLogEntry:
 
         # No event loop running - run synchronously (tests/CLI)
         try:
-            asyncio.run(self._run_completion_update())
+            asyncio.run(self._run_completion_update(run_archival_inline=True))
         except Exception as e:
             logger.error(f"Failed to run async store/update: {e}")
 
@@ -849,14 +862,14 @@ class RequestLogEntry:
         self._schedule_completion_update()
 
     async def save_async(self):
-        """Async version of save() that awaits completion persistence directly.
+        """Async version of save() that awaits completion persistence and archival.
 
-        Useful in tests to avoid races with the critical completion write.
+        Useful in tests and sync-adjacent call sites that need deterministic bodies.
         """
         if not self._has_completion_data():
             return
 
-        await self._store_completion_update()
+        await self._store_completion_update(run_archival_inline=True)
 
     def set_request_body(self, body):
         """Store request body for logging"""

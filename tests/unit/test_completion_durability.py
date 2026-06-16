@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+import smolrouter.database as database_module
 from smolrouter.database import RequestLog
 from smolrouter.redis_backend import RedisRequestLog
 from smolrouter.task_utils import drain_background_tasks
@@ -116,3 +117,58 @@ async def test_completion_persists_before_body_archival(isolated_db, monkeypatch
 
     release_archival.set()
     await drain_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_save_async_persists_request_body_key_when_response_archival_fails(isolated_db, monkeypatch):
+    entry = await _pending_entry()
+    entry.request_body = b'{"messages":[{"role":"user","content":"hi"}]}'
+    entry.response_body = b'{"choices":[{"message":{"content":"hello"}}]}'
+
+    async def request_body_store(self, _blob_storage):
+        self.request_body_key = "blob/request-body-1"
+        return self.request_body_key
+
+    async def failing_response_store(self, _blob_storage):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(type(entry), "_store_request_body_if_needed", request_body_store)
+    monkeypatch.setattr(type(entry), "_store_response_body_if_present", failing_response_store)
+
+    await entry.save_async()
+
+    rec = await RedisRequestLog.get_by_id(entry.request_id)
+    assert rec is not None
+    assert getattr(rec, "request_body_key", None) == "blob/request-body-1"
+    assert getattr(rec, "response_body_key", None) in (None, "")
+    assert rec.status_code == 200
+
+
+def test_save_without_event_loop_archives_bodies(isolated_db, monkeypatch):
+    entry = asyncio.run(_pending_entry())
+    entry.request_body = b'{"messages":[{"role":"user","content":"hi"}]}'
+    entry.response_body = b'{"choices":[{"message":{"content":"hello"}}]}'
+
+    async def request_body_store(self, _blob_storage):
+        self.request_body_key = "blob/request-body-inline"
+        return self.request_body_key
+
+    async def response_body_store(self, _blob_storage):
+        self.response_body_key = "blob/response-body-inline"
+        return self.response_body_key
+
+    monkeypatch.setattr(type(entry), "_store_request_body_if_needed", request_body_store)
+    monkeypatch.setattr(type(entry), "_store_response_body_if_present", response_body_store)
+    def unscheduled_task(coro, *args, **kwargs):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(database_module, "create_logged_task", unscheduled_task)
+
+    entry.save()
+
+    rec = asyncio.run(RedisRequestLog.get_by_id(entry.request_id))
+    assert rec is not None
+    assert getattr(rec, "request_body_key", None) == "blob/request-body-inline"
+    assert getattr(rec, "response_body_key", None) == "blob/response-body-inline"
+    assert rec.status_code == 200
