@@ -1134,7 +1134,6 @@ async def _parse_openai_request_payload(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[bytes], Optional[JSONResponse]]:
     try:
         payload = await request.json()
-        _normalize_openai_request_payload(payload)
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
         logger.warning(f"Failed to parse request JSON: {e}")
@@ -1262,6 +1261,8 @@ async def _route_openai_request(
     legacy_proxy: bool,
 ) -> RoutedRequestResult:
     if legacy_proxy:
+        payload["model"] = _normalize_openai_model_name(model_name)
+        _normalize_openai_request_payload(payload)
         return await _execute_legacy_proxy_request(path, payload, headers)
 
     active_container = await _get_active_container(False)

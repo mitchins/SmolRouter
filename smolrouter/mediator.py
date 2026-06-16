@@ -22,6 +22,25 @@ from .request_metadata import RequestMetadata
 logger = logging.getLogger(__name__)
 
 
+def _should_use_openai_completion_tokens(model_name: Any) -> bool:
+    return isinstance(model_name, str) and model_name.lower().startswith("gpt-5")
+
+
+def _normalize_resolved_openai_request_payload(resolved_model: ModelInfo, request_payload: Dict[str, Any]) -> None:
+    """Apply OpenAI-only request compatibility after provider/model resolution."""
+    if resolved_model.provider_type != "openai":
+        return
+
+    if not _should_use_openai_completion_tokens(request_payload.get("model")):
+        return
+
+    if "max_completion_tokens" not in request_payload and "max_tokens" in request_payload:
+        request_payload["max_completion_tokens"] = request_payload.pop("max_tokens")
+        logger.debug("Remapped max_tokens -> max_completion_tokens for model %s", request_payload.get("model"))
+    else:
+        request_payload.pop("max_tokens", None)
+
+
 class ModelMediator:
     """
     Central orchestrator for model operations.
@@ -93,10 +112,15 @@ class ModelMediator:
         logger.info(f"Registered {len(models)} models in load balancer")
 
     async def _resolve_model_via_load_balancer(
-        self, requested_model: str, available_models: List[ModelInfo]
+        self, requested_model: str, available_models: List[ModelInfo], pinned_provider: Optional[str] = None
     ) -> Optional[ModelInfo]:
-        """Resolve a model name through the load balancer and attach LB metadata."""
-        instance = await model_load_balancer.select_instance(requested_model)
+        """Resolve a model name through the load balancer and attach LB metadata.
+
+        pinned_provider constrains selection to one provider so an explicit
+        "model [provider]" request is honored even when the bare name is offered
+        by several providers.
+        """
+        instance = await model_load_balancer.select_instance(requested_model, provider_id=pinned_provider)
         if not instance:
             return None
 
@@ -154,8 +178,19 @@ class ModelMediator:
         # original request name also exists as a concrete model.
         resolved_model = await self.strategy.resolve_model_request(requested_model, available_models)
 
+        # If the client explicitly pinned a provider ("model [provider]" / full id),
+        # constrain load balancing to that provider so an overlapping bare name on
+        # another provider can't be selected instead.
+        pinned_provider = (
+            resolved_model.provider_id
+            if resolved_model and requested_model in (resolved_model.display_name, resolved_model.id)
+            else None
+        )
+
         candidate_model_name = resolved_model.name if resolved_model else requested_model
-        lb_resolved_model = await self._resolve_model_via_load_balancer(candidate_model_name, available_models)
+        lb_resolved_model = await self._resolve_model_via_load_balancer(
+            candidate_model_name, available_models, pinned_provider=pinned_provider
+        )
         if lb_resolved_model:
             return lb_resolved_model
 
@@ -533,6 +568,7 @@ class ModelMediator:
 
                 lb_instance = getattr(resolved_model, "_lb_instance", None)
                 self._apply_resolved_model_to_payload(resolved_model, request_payload)
+                _normalize_resolved_openai_request_payload(resolved_model, request_payload)
 
                 return await self._route_request_internal(
                     resolved_model, request_payload, path, headers, lb_instance
