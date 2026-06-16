@@ -22,6 +22,7 @@ import pytest
 import pytest_asyncio
 
 REAL_REDIS_URL = os.getenv("SMOLROUTER_TEST_REDIS_URL")
+REAL_REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNS", "2048"))
 
 pytestmark = [
     pytest.mark.performance,
@@ -35,7 +36,11 @@ async def real_redis(monkeypatch):
     import smolrouter.redis_backend as redis_backend
     import smolrouter.database as database
 
-    client = redis_async.from_url(REAL_REDIS_URL, decode_responses=True)
+    client = redis_async.from_url(
+        REAL_REDIS_URL,
+        decode_responses=True,
+        max_connections=REAL_REDIS_MAX_CONNECTIONS,
+    )
     await client.flushall()
     monkeypatch.setattr(redis_backend, "get_redis", lambda: client)
     monkeypatch.setattr(database, "redis_client", client)

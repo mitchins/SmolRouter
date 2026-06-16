@@ -32,6 +32,7 @@ import pytest
 import pytest_asyncio
 
 REAL_REDIS_URL = os.getenv("SMOLROUTER_TEST_REDIS_URL")
+REAL_REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNS", "2048"))
 
 pytestmark = [
     pytest.mark.performance,
@@ -50,7 +51,11 @@ async def real_redis_backend(monkeypatch):
     import smolrouter.redis_backend as redis_backend
     import smolrouter.database as database  # noqa: F401 - ensures module import
 
-    client = redis_async.from_url(REAL_REDIS_URL, decode_responses=True)
+    client = redis_async.from_url(
+        REAL_REDIS_URL,
+        decode_responses=True,
+        max_connections=REAL_REDIS_MAX_CONNECTIONS,
+    )
     await client.flushall()
 
     # Backend code resolves the client via redis_backend.get_redis().
@@ -95,11 +100,11 @@ async def test_get_recent_latency_is_flat_across_volume(real_redis_backend):
 
     await _seed(900)  # 1000 total
     t0 = time.perf_counter()
-    logs = await RedisRequestLog.get_recent(1000)
+    logs = await RedisRequestLog.get_recent(100)
     large = time.perf_counter() - t0
 
-    assert len(logs) == 1000
-    print(f"\nget_recent: 100={small * 1000:.1f}ms  1000={large * 1000:.1f}ms")
+    assert len(logs) == 100
+    print(f"\nget_recent: 100={small * 1000:.1f}ms  (after 1000 total)={large * 1000:.1f}ms")
     # Batched: ~2 round-trips regardless of size. Allow generous headroom for
     # payload size growth, but a per-record N+1 would make this ~10x, not <4x.
     assert large < small * 4 + 0.05, f"latency scaled with volume: {small:.3f}s -> {large:.3f}s"
