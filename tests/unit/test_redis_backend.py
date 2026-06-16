@@ -256,6 +256,32 @@ async def test_request_log_round_trip_preserves_recency_and_duplicate_indexes(mo
 
 
 @pytest.mark.asyncio
+async def test_request_log_create_falls_back_when_duplicate_count_fails(monkeypatch, caplog):
+    await redis_client.flushall()
+
+    async def failing_scard(_key):
+        raise RuntimeError("scard unavailable")
+
+    monkeypatch.setattr(redis_client, "scard", failing_scard)
+    caplog.set_level("DEBUG", logger=redis_backend_module.logger.name)
+
+    request_id = await RedisRequestLog.create(
+        source_ip="192.168.1.100",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-scard-failure",
+        request_body_hash="body-hash",
+    )
+
+    record = await RedisRequestLog.get_by_id(request_id)
+
+    assert record is not None
+    assert record.is_duplicate is False
+    assert record.duplicate_count == 0
+    assert "Failed to get duplicate count for requests:by_body:body-hash" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_api_key_quota_round_trip_and_usage_markers(monkeypatch):
     await redis_client.flushall()
     monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())
