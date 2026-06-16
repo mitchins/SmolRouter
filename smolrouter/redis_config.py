@@ -48,10 +48,6 @@ def _connect_timeout() -> float:
     return float(os.getenv("REDIS_CONNECT_TIMEOUT", "1.0"))
 
 
-def _blocking_pool_timeout() -> float:
-    return float(os.getenv("REDIS_BLOCKING_POOL_TIMEOUT", "5.0"))
-
-
 def _health_check_interval() -> int:
     return int(os.getenv("REDIS_HEALTH_CHECK_INTERVAL", "30"))
 
@@ -76,11 +72,10 @@ def _should_use_real_redis(redis_url: Optional[str]) -> bool:
 
 
 def _create_real_redis_client(redis_url: str) -> Any:
-    pool = redis.BlockingConnectionPool.from_url(
+    client = redis.from_url(
         redis_url,
         decode_responses=True,
         max_connections=_max_conns(),
-        timeout=_blocking_pool_timeout(),
         socket_timeout=_socket_timeout(),
         socket_connect_timeout=_connect_timeout(),
         health_check_interval=_health_check_interval(),
@@ -88,7 +83,6 @@ def _create_real_redis_client(redis_url: str) -> Any:
         socket_keepalive=True,
         socket_keepalive_options={},
     )
-    client = redis.Redis(connection_pool=pool)
     logger.info(f"Redis: using REAL redis at {_redact_url(redis_url)}")
     return client
 

@@ -114,7 +114,7 @@ jobs:
           --health-retries 5
     env:
       SMOLROUTER_TEST_REDIS_URL: redis://localhost:6379/0
-      REDIS_MAX_CONNS: "256"
+      REDIS_MAX_CONNS: "2048"
 
     steps:
     - name: Checkout code
@@ -199,7 +199,7 @@ jobs:
           --health-retries 5
     env:
       SMOLROUTER_TEST_REDIS_URL: redis://localhost:6379/0
-      REDIS_MAX_CONNS: "256"
+      REDIS_MAX_CONNS: "2048"
 
     steps:
     - name: Checkout code
