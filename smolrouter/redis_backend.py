@@ -46,7 +46,7 @@ end
 return removed
 """
 _GET_RECENT_LUA_SCRIPT = """
-local ids = redis.call("ZREVRANGE", KEYS[1], 0, tonumber(ARGV[1]) - 1)
+local ids = redis.call("ZRANGE", KEYS[1], 0, tonumber(ARGV[1]) - 1, "REV")
 local records = {}
 
 for _, request_id in ipairs(ids) do
@@ -403,7 +403,8 @@ def _flat_pairs_to_dict(data: Any) -> Dict[str, Any]:
     if isinstance(data, dict):
         return data
 
-    return {str(data[i]): data[i + 1] for i in range(0, len(data), 2)}
+    pairs = iter(data)
+    return {str(key): value for key, value in zip(pairs, pairs)}
 
 
 class LogRecord:
@@ -569,11 +570,6 @@ return {
 }
 """
 
-# Precompute script SHA for EVALSHA optimization. Redis script SHAs are protocol identifiers,
-# not security hashes, so mark this accordingly for security scanners.
-QUOTA_UPDATE_SHA = hashlib.sha1(QUOTA_UPDATE_SCRIPT.encode(), usedforsecurity=False).hexdigest()
-
-
 def get_redis():
     """Get the global Redis client"""
     return redis_client
@@ -683,8 +679,11 @@ class RedisRequestLog:
         client = get_redis()
 
         if not _is_lua_fallback_enabled(False):
-            results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
-            return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
+            try:
+                results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
+                return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
+            except Exception as exc:
+                logger.warning("Redis Lua get_recent failed; falling back to pipeline path: %s", exc)
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
@@ -705,7 +704,40 @@ class RedisRequestLog:
     async def get_by_source_ip(source_ip: str, limit: Optional[int] = None) -> List[LogRecord]:
         """Get requests for a specific source IP ordered by recency."""
         client = get_redis()
-        request_ids = [str(request_id) for request_id in await client.smembers(f"requests:by_ip:{source_ip}")]
+        set_key = f"requests:by_ip:{source_ip}"
+
+        if limit is not None and limit <= 0:
+            return []
+
+        if limit is not None:
+            request_ids = []
+            page_size = max(limit * 10, 100)
+            start = 0
+            while len(request_ids) < limit:
+                recent_ids = [
+                    str(request_id)
+                    for request_id in await client.zrange(
+                        REDIS_REQUESTS_BY_TIME_KEY,
+                        start,
+                        start + page_size - 1,
+                        desc=True,
+                    )
+                ]
+                if not recent_ids:
+                    break
+
+                pipe = client.pipeline(transaction=False)
+                for request_id in recent_ids:
+                    pipe.sismember(set_key, request_id)
+                matches = await pipe.execute()
+                request_ids.extend(
+                    request_id for request_id, is_member in zip(recent_ids, matches) if is_member
+                )
+                request_ids = request_ids[:limit]
+                start += page_size
+        else:
+            request_ids = [str(request_id) for request_id in await client.smembers(set_key)]
+
         if not request_ids:
             return []
 

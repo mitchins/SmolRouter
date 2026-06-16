@@ -4,7 +4,7 @@ import pytest
 
 import smolrouter.redis_backend as redis_backend_module
 import smolrouter.storage as storage_module
-from smolrouter.redis_backend import LogRecord, QuotaRecord, RedisApiKeyQuota, RedisRequestLog
+from smolrouter.redis_backend import LogRecord, QuotaRecord, RedisApiKeyQuota, RedisRequestLog, _flat_pairs_to_dict
 from smolrouter.redis_config import redis_client
 
 
@@ -93,6 +93,10 @@ def test_log_record_normalizes_pending_and_invalid_values(monkeypatch):
     assert record.is_duplicate is False
     assert record.request_body is None
     assert record.response_body is None
+
+
+def test_flat_pairs_to_dict_ignores_unpaired_tail_value():
+    assert _flat_pairs_to_dict(["request_id", "req-1", "orphan"]) == {"request_id": "req-1"}
 
 
 def test_quota_record_parses_booleans_and_timestamps():
@@ -253,6 +257,49 @@ async def test_request_log_round_trip_preserves_recency_and_duplicate_indexes(mo
     assert [item.id for item in by_source_ip] == [second_id]
     assert set(duplicate_ids) == {first_id, second_id}
     assert recent_duplicate_ids == [second_id]
+
+
+@pytest.mark.asyncio
+async def test_request_log_get_by_source_ip_with_limit_avoids_full_set_fetch(monkeypatch):
+    await redis_client.flushall()
+    request_id = await RedisRequestLog.create(
+        source_ip="192.168.1.100",
+        method="GET",
+        path="/health",
+        request_id="req-source-ip-limited",
+    )
+
+    async def failing_smembers(_key):
+        raise AssertionError("limited get_by_source_ip should not use SMEMBERS")
+
+    monkeypatch.setattr(redis_client, "smembers", failing_smembers)
+
+    records = await RedisRequestLog.get_by_source_ip("192.168.1.100", limit=1)
+
+    assert [record.id for record in records] == [request_id]
+
+
+@pytest.mark.asyncio
+async def test_request_log_get_recent_falls_back_when_lua_fails(monkeypatch):
+    await redis_client.flushall()
+    request_id = await RedisRequestLog.create(
+        source_ip="192.168.1.100",
+        method="GET",
+        path="/health",
+        request_id="req-lua-fallback",
+    )
+    original_eval = redis_client.eval
+
+    async def failing_eval(*_args, **_kwargs):
+        raise RuntimeError("lua unavailable")
+
+    monkeypatch.setattr(redis_client, "eval", failing_eval)
+    monkeypatch.setenv("REDIS_DISABLE_LUA", "false")
+
+    recent = await RedisRequestLog.get_recent(limit=1)
+
+    monkeypatch.setattr(redis_client, "eval", original_eval)
+    assert [record.id for record in recent] == [request_id]
 
 
 @pytest.mark.asyncio
