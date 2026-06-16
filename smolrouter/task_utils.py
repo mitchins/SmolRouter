@@ -16,6 +16,38 @@ _service_tasks: "set[Task[Any]]" = set()
 BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
+def _close_unscheduled_coro(coro: Awaitable[Any], task_name: str) -> None:
+    """Best-effort close of a coroutine we never managed to schedule."""
+    if not hasattr(coro, "close"):
+        return
+    try:
+        coro.close()
+    except Exception:
+        logger.debug("Failed to close unscheduled coroutine for %s", task_name, exc_info=True)
+
+
+def _finalize_task(
+    task: Task[Any],
+    task_name: str,
+    done_callback: Optional[Callable[[Task[Any]], None]],
+) -> None:
+    """Drop the strong ref, surface any unhandled exception, then run the callback."""
+    _background_tasks.discard(task)
+    _service_tasks.discard(task)
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.exception("Unhandled exception in %s", task_name)
+    finally:
+        if done_callback is not None:
+            try:
+                done_callback(task)
+            except Exception:
+                logger.exception("Background task completion callback failed for %s", task_name)
+
+
 def create_logged_task(
     coro: Awaitable[Any],
     *,
@@ -37,34 +69,14 @@ def create_logged_task(
     except RuntimeError:
         # No running loop available (e.g. during import-time bootstrapping).
         logger.warning("Unable to schedule background task %s: no running event loop", task_name)
-        try:
-            if hasattr(coro, "close"):
-                coro.close()
-        except Exception:
-            logger.debug("Failed to close unscheduled coroutine for %s", task_name, exc_info=True)
+        _close_unscheduled_coro(coro, task_name)
         return None
 
     _background_tasks.add(task)
     if service:
         _service_tasks.add(task)
 
-    def _on_done(done: Task[Any]) -> None:
-        _background_tasks.discard(done)
-        _service_tasks.discard(done)
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Unhandled exception in %s", task_name)
-        finally:
-            if done_callback is not None:
-                try:
-                    done_callback(done)
-                except Exception:
-                    logger.exception("Background task completion callback failed for %s", task_name)
-
-    task.add_done_callback(_on_done)
+    task.add_done_callback(lambda done: _finalize_task(done, task_name, done_callback))
     return task
 
 
