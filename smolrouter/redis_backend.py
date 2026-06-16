@@ -346,19 +346,21 @@ async def _increment_completion_stats(client: Any, request_id: str, status_code:
     )
 
 
-async def _queue_duplicate_request_body(
+async def _check_and_queue_duplicate_request_body(
     client: Any,
     pipe: Any,
     request_id: str,
     request_body_hash: Optional[str],
 ) -> None:
+    """Check duplicate count immediately, then queue duplicate index writes."""
     if not request_body_hash:
         return
 
     set_key = f"requests:by_body:{request_body_hash}"
     try:
         existing_count = await client.scard(set_key)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to get duplicate count for %s: %s", set_key, exc)
         existing_count = 0
 
     pipe.hset(
@@ -597,7 +599,7 @@ class RedisRequestLog:
 
         pipe = client.pipeline(transaction=False)
         _queue_store_request_log(pipe, request_id, source_ip, created_at, request_data)
-        await _queue_duplicate_request_body(client, pipe, request_id, option_fields.get("request_body_hash"))
+        await _check_and_queue_duplicate_request_body(client, pipe, request_id, option_fields.get("request_body_hash"))
         _queue_create_stats(pipe, request_id, request_data)
         await pipe.execute()
 
