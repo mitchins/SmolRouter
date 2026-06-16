@@ -77,6 +77,7 @@ class InMemoryModelCache(IModelCache):
                 self._cleanup_loop(),
                 task_name=f"model-cache-cleanup:{id(self)}",
                 create_task_fn=asyncio.create_task,
+                service=True,
             )
 
     async def _cleanup_loop(self):
@@ -253,6 +254,7 @@ class ModelAggregator:
                 self._health_monitoring_loop(),
                 task_name="provider-health-monitor",
                 create_task_fn=asyncio.create_task,
+                service=True,
             )
 
     async def _health_monitoring_loop(self):

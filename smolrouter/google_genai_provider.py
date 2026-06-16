@@ -505,6 +505,7 @@ class GoogleGenAIProvider(IModelProvider):
             self._proxy_health_monitor_loop(),
             task_name=f"google-proxy-health-monitor:{self.config.name}",
             create_task_fn=loop.create_task,
+            service=True,
         )
         logger.info(f"Started proxy health monitor for provider {self.config.name}")
 

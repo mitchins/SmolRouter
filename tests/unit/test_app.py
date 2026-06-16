@@ -288,6 +288,52 @@ async def test_proxy_request_finalizes_log_on_client_cancel(monkeypatch, isolate
     assert completion_statuses == [app_module.CLIENT_CLOSED_REQUEST_STATUS]
 
 
+@pytest.mark.asyncio
+async def test_proxy_ollama_request_finalizes_log_on_client_cancel(monkeypatch, isolated_db):
+    """Ollama requests should finalize as client-closed too.
+
+    The Ollama path previously lacked a finally block, so CancelledError could
+    orphan the request log even though the OpenAI path was already fixed.
+    """
+    from starlette.requests import Request
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+
+    async def _cancel(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(app_module, "_proxy_ollama_non_streaming", _cancel)
+
+    completion_statuses = []
+    real_complete = app_module.complete_request_log
+
+    def _spy(log_entry, start_time, response_data, **kwargs):
+        completion_statuses.append(response_data.get("status_code"))
+        return real_complete(log_entry, start_time, response_data, **kwargs)
+
+    monkeypatch.setattr(app_module, "complete_request_log", _spy)
+
+    body = json.dumps({"model": "m", "prompt": "hi", "stream": False}).encode()
+
+    async def _receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/generate",
+        "headers": [(b"content-type", b"application/json"), (b"authorization", b"Bearer test-key")],
+        "client": ("127.0.0.1", 12345),
+        "query_string": b"",
+    }
+    request = Request(scope, _receive)
+
+    with pytest.raises(asyncio.CancelledError):
+        await app_module.proxy_ollama_request("/api/generate", request)
+
+    assert completion_statuses == [app_module.CLIENT_CLOSED_REQUEST_STATUS]
+
+
 def test_initialize_blob_storage_strict_fails_loud_on_bad_precondition(monkeypatch):
     """A bad/unwritable storage path with logging enabled must fail LOUDLY, not
     silently disable logging (which orphaned every request as 'pending')."""
@@ -661,6 +707,42 @@ async def test_app_lifespan_allows_sync_proxy_monitor_shutdown(monkeypatch):
             await asyncio.sleep(0)
 
     assert stop_calls == ["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_app_lifespan_drains_background_tasks(monkeypatch):
+    from smolrouter import task_utils
+
+    monkeypatch.setattr(app_module, "container", None)
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    monkeypatch.setattr(app_module, "_initialize_lua_scripting", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "init_new_architecture", AsyncMock(return_value=None))
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _work():
+        started.set()
+        await release.wait()
+
+    task = create_logged_task(_work(), task_name="lifespan-drain-test")
+    assert task is not None
+    await started.wait()
+    assert task in task_utils._background_tasks
+
+    async def _release_later():
+        await asyncio.sleep(0.01)
+        release.set()
+
+    release_task = asyncio.create_task(_release_later())
+
+    async with app_module.app_lifespan(app):
+        await asyncio.sleep(0)
+
+    await release_task
+    await asyncio.sleep(0)
+
+    assert task not in task_utils._background_tasks
 
 
 def test_rewrite_model_exact_match():

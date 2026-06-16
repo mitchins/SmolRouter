@@ -1194,6 +1194,7 @@ def start_background_cleanup():
             _cleanup_task = create_logged_task(
                 background_cleanup_task(),
                 task_name="background-request-log-cleanup",
+                service=True,
                 create_task_fn=asyncio.create_task,
             )
             logger.info(
