@@ -704,6 +704,7 @@ class RequestLogEntry:
         self.request_body_hash = kwargs.get("request_body_hash")
         self.is_duplicate = kwargs.get("is_duplicate", False)
         self.duplicate_count = kwargs.get("duplicate_count", 0)
+        self._body_archival_scheduled = False
 
     def _has_completion_data(self) -> bool:
         return bool(getattr(self, "completed_at", None))
@@ -746,6 +747,7 @@ class RequestLogEntry:
             "prompt_tokens": getattr(self, "prompt_tokens", None),
             "completion_tokens": getattr(self, "completion_tokens", None),
             "total_tokens": getattr(self, "total_tokens", None),
+            "upstream_url": getattr(self, "upstream_url", None),
             "request_body_key": request_body_key,
             "response_body_key": response_body_key,
             "api_key_suffix": getattr(self, "api_key_suffix", None),
@@ -755,28 +757,55 @@ class RequestLogEntry:
             "api_key_total": getattr(self, "api_key_total", None),
         }
 
-    async def _store_completion_update(self) -> None:
+    def _needs_body_archival(self) -> bool:
+        return (
+            (getattr(self, "request_body", None) and not getattr(self, "request_body_key", None))
+            or (getattr(self, "response_body", None) and not getattr(self, "response_body_key", None))
+        )
+
+    async def _archive_bodies_after_completion(self) -> None:
         from .storage import get_blob_storage
         from .redis_backend import RedisRequestLog
 
-        # Body archival is best-effort and must NEVER block the critical
-        # completion accounting. A filesystem/blob failure should cost us the
-        # stored bodies, not the status_code/completed_at the dashboard relies
-        # on - otherwise the request shows "pending" forever.
-        request_body_key = None
-        response_body_key = None
+        if not self._needs_body_archival():
+            return
+
         try:
             blob_storage = get_blob_storage()
             request_body_key = await self._store_request_body_if_needed(blob_storage)
             response_body_key = await self._store_response_body_if_present(blob_storage)
+            await RedisRequestLog.update_body_keys(
+                request_id=self.request_id,
+                request_body_key=request_body_key,
+                response_body_key=response_body_key,
+            )
         except Exception as e:
             logger.warning(
-                f"Body storage failed for request {self.request_id}; completing without bodies: {e}"
+                f"Body storage failed for request {self.request_id} after completion persisted: {e}"
             )
 
-        await RedisRequestLog.update_completion(
-            **self._completion_update_kwargs(request_body_key, response_body_key)
+    def _schedule_body_archival(self) -> None:
+        if self._body_archival_scheduled or not self._needs_body_archival():
+            return
+
+        archival_task = create_logged_task(
+            self._archive_bodies_after_completion(),
+            task_name=f"request-body-archival:{self.request_id}",
+            create_task_fn=asyncio.create_task,
         )
+        if archival_task is not None:
+            self._body_archival_scheduled = True
+
+    async def _store_completion_update(self) -> None:
+        from .redis_backend import RedisRequestLog
+
+        await RedisRequestLog.update_completion(
+            **self._completion_update_kwargs(
+                getattr(self, "request_body_key", None),
+                getattr(self, "response_body_key", None),
+            )
+        )
+        self._schedule_body_archival()
 
     async def _run_completion_update(self, attempts: int = 3) -> None:
         # The completion write is fire-and-forget; a transient Redis failure
@@ -820,9 +849,9 @@ class RequestLogEntry:
         self._schedule_completion_update()
 
     async def save_async(self):
-        """Async version of save() that awaits blob storage and Redis updates.
+        """Async version of save() that awaits completion persistence directly.
 
-        Useful in tests to avoid races with background tasks.
+        Useful in tests to avoid races with the critical completion write.
         """
         if not self._has_completion_data():
             return

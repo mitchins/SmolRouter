@@ -17,6 +17,7 @@ completed == total). Gated on SMOLROUTER_TEST_REDIS_URL:
 import asyncio
 import os
 import time
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -49,6 +50,7 @@ async def real_redis(monkeypatch):
     )
     await client.flushall()
     monkeypatch.setattr(redis_backend, "get_redis", lambda: client)
+    monkeypatch.setattr(redis_backend, "is_fake_redis", lambda: False)
     monkeypatch.setattr(database, "redis_client", client)
     try:
         yield client
@@ -138,3 +140,38 @@ async def test_no_orphans_while_dashboard_polled_under_load(real_redis):
     )
     assert dashboard_latencies_ms, "dashboard poller did not run under load"
     assert counters["inflight"] == 0, f"orphans under load: {counters['inflight']}"
+
+
+@pytest.mark.asyncio
+async def test_background_save_path_persists_completion(real_redis):
+    from smolrouter.database import RequestLog
+    from smolrouter.redis_backend import RedisRequestLog
+    from smolrouter.task_utils import drain_background_tasks
+
+    before = await RedisRequestLog.get_stats_counters()
+
+    entry = await RequestLog.create(
+        source_ip="10.0.0.9",
+        method="POST",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="https://api.example/v1/chat/completions",
+        original_model="glm-4.5-air",
+        mapped_model="glm-4.5-air",
+    )
+    entry.status_code = 200
+    entry.completed_at = datetime.now()
+    entry.duration_ms = 5
+    entry.response_body = b'{"ok": true}'
+
+    entry.save()
+    await drain_background_tasks()
+
+    rec = await RedisRequestLog.get_by_id(entry.request_id)
+    counters = await RedisRequestLog.get_stats_counters()
+
+    assert rec is not None
+    assert rec.status_code == 200
+    assert rec.completed_at is not None
+    assert counters["completed"] >= before["completed"] + 1
+    assert counters["inflight"] == before["inflight"]

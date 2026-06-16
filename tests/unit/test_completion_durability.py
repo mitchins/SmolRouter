@@ -5,10 +5,13 @@ condition that produced the orphan pile) leaves the request permanently
 "pending" AND leaves it in the inflight set (the SREM never fires) - silently.
 
 These prove the defect (RED) and lock the fix (GREEN): a transient failure on the
-completion write must not orphan the request. Deterministic - the fire-and-forget
-body (_run_completion_update) is awaited directly, no background-task timing.
+completion write must not orphan the request, and completion accounting must not
+wait on blob archival. Deterministic - the fire-and-forget body
+(_run_completion_update) is awaited directly unless the test is explicitly
+verifying the background scheduler.
 """
 
+import asyncio
 import os
 from datetime import datetime
 from unittest.mock import patch
@@ -17,6 +20,7 @@ import pytest
 
 from smolrouter.database import RequestLog
 from smolrouter.redis_backend import RedisRequestLog
+from smolrouter.task_utils import drain_background_tasks
 
 
 @pytest.fixture(autouse=True)
@@ -82,3 +86,33 @@ async def test_inflight_set_drains_after_transient_failure(isolated_db, monkeypa
 
     after = await RedisRequestLog.get_stats_counters()
     assert after["inflight"] == 0, "DEFECT: orphaned completion left the request in the inflight set"
+
+
+@pytest.mark.asyncio
+async def test_completion_persists_before_body_archival(isolated_db, monkeypatch):
+    entry = await _pending_entry()
+    entry.request_body = b'{"messages":[{"role":"user","content":"hi"}]}'
+
+    release_archival = asyncio.Event()
+
+    async def blocked_request_body_store(self, _blob_storage):
+        await release_archival.wait()
+        self.request_body_key = "blob/request-body-1"
+        return self.request_body_key
+
+    async def no_response_body(self, _blob_storage):
+        return None
+
+    monkeypatch.setattr(type(entry), "_store_request_body_if_needed", blocked_request_body_store)
+    monkeypatch.setattr(type(entry), "_store_response_body_if_present", no_response_body)
+
+    await asyncio.wait_for(entry._run_completion_update(), timeout=0.2)
+
+    rec = await RedisRequestLog.get_by_id(entry.request_id)
+    assert rec is not None
+    assert rec.status_code == 200, "DEFECT: completion waited on blob archival before persisting status"
+    counters = await RedisRequestLog.get_stats_counters()
+    assert counters["inflight"] == 0, "DEFECT: completion accounting waited on blob archival"
+
+    release_archival.set()
+    await drain_background_tasks()

@@ -856,26 +856,6 @@ async def start_request_log(
         request.state.request_id = getattr(log_entry, "request_id", None)
         request.state.request_log_entry = log_entry
 
-        # Store request body asynchronously in blob storage (avoid blocking hot path)
-        if request_body:
-            from smolrouter.storage import get_blob_storage
-            from smolrouter.redis_backend import RedisRequestLog
-
-            blob_storage = get_blob_storage()
-
-            async def _store_request_body_async():
-                try:
-                    key = await asyncio.to_thread(blob_storage.store, request_body, content_type="application/json")
-                    await RedisRequestLog.update_request_body_key(request_id=request_id, request_body_key=key)
-                except Exception as e:
-                    logger.exception(f"Failed to store request body asynchronously: {e}")
-
-            _store_request_body_task = create_logged_task(
-                _store_request_body_async(),
-                task_name=f"store-request-body:{request_id}",
-                create_task_fn=asyncio.create_task,
-            )
-
         # Log request start with traceability info (reduced verbosity)
         logger.debug(
             f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "
