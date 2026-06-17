@@ -86,6 +86,7 @@ REQUEST_LOG_COMPLETION_OPTION_KEYS = frozenset(
         "prompt_tokens",
         "completion_tokens",
         "total_tokens",
+        "upstream_url",
         "request_body_key",
         "response_body_key",
         "api_key_suffix",
@@ -96,6 +97,7 @@ REQUEST_LOG_COMPLETION_OPTION_KEYS = frozenset(
     }
 )
 REQUEST_LOG_COMPLETION_TRUTHY_FIELDS = (
+    "upstream_url",
     "request_body_key",
     "response_body_key",
     "api_key_suffix",
@@ -144,6 +146,7 @@ class RequestLogCompletionOptions(TypedDict, total=False):
     prompt_tokens: Optional[int]
     completion_tokens: Optional[int]
     total_tokens: Optional[int]
+    upstream_url: Optional[str]
     request_body_key: Optional[str]
     response_body_key: Optional[str]
     api_key_suffix: Optional[str]
@@ -654,14 +657,32 @@ class RedisRequestLog:
     @staticmethod
     async def update_request_body_key(request_id: str, request_body_key: str) -> None:
         """Attach a stored request body blob key without marking the request complete."""
-        client = get_redis()
-        await client.hset(
-            f"request:{request_id}",
-            mapping={
-                "request_body_key": request_body_key,
-            },
-        )
+        await RedisRequestLog.update_body_keys(request_id, request_body_key=request_body_key)
         logger.debug(f"Updated Redis request body key: {request_id}")
+
+    @staticmethod
+    async def update_response_body_key(request_id: str, response_body_key: str) -> None:
+        """Attach a stored response body blob key without changing completion counters."""
+        await RedisRequestLog.update_body_keys(request_id, response_body_key=response_body_key)
+        logger.debug(f"Updated Redis response body key: {request_id}")
+
+    @staticmethod
+    async def update_body_keys(
+        request_id: str,
+        request_body_key: Optional[str] = None,
+        response_body_key: Optional[str] = None,
+    ) -> None:
+        """Attach stored request/response body blob keys without changing terminal state."""
+        client = get_redis()
+        mapping = {}
+        if request_body_key:
+            mapping["request_body_key"] = request_body_key
+        if response_body_key:
+            mapping["response_body_key"] = response_body_key
+        if not mapping:
+            return
+        await client.hset(f"request:{request_id}", mapping=mapping)
+        logger.debug(f"Updated Redis body keys: {request_id}")
 
     @staticmethod
     async def get_by_id(request_id: str) -> Optional[LogRecord]:
