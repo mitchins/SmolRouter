@@ -74,6 +74,25 @@ def test_filesystem_delete_decrements_usage_counter(tmp_path):
     assert storage._total_size_bytes() == 0
 
 
+def test_filesystem_delete_returns_false_when_blob_was_removed_elsewhere(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    key = storage.store(b"abc")
+
+    storage._get_blob_path(key).unlink()
+
+    assert storage.delete(key) is False
+
+
+def test_usage_lock_gracefully_skips_when_fcntl_is_unavailable(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    monkeypatch.setattr(storage_module, "fcntl", None)
+
+    with storage._usage_lock():
+        storage._write_usage_bytes_locked(7)
+
+    assert storage._read_usage_bytes() == 7
+
+
 def test_usage_counter_rebuilds_once_then_store_stays_incremental(tmp_path, monkeypatch):
     storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
     storage.store(b"aa")

@@ -159,6 +159,7 @@ async def app_lifespan(app: FastAPI):
         raise
 
     await _initialize_request_logging_system()
+    _initialize_blob_storage_strict()
 
     # Initialize new architecture container
     await init_new_architecture()

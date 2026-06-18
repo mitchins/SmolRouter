@@ -595,63 +595,75 @@ class ProviderFactory:
         return os.getenv(cls._STRICT_SECRETS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
     @classmethod
-    def _apply_secrets_to_provider_config(cls, processed_config: Dict[str, Any]) -> None:
-        provider_name = (str(processed_config.get("name") or "")).strip()
-        provider_type = str(processed_config.get("type") or "").lower()
-
-        if not provider_name:
-            return
-
-        strict_secret_mode = cls._strict_secret_mode_enabled()
-        is_key_sensitive_type = provider_type in cls._LIST_KEY_TYPES | cls._SINGLE_KEY_TYPES
-        has_explicit_openai_bypass = (
+    def _has_explicit_openai_bypass(cls, provider_type: str, processed_config: Dict[str, Any]) -> bool:
+        return (
             provider_type == "openai"
             and "api_key" in processed_config
             and processed_config.get("api_key") is None
             and not bool(processed_config.get("api_key_file"))
         )
 
-        provider_keys = get_keys(provider_name)
-        has_inline_keys = False
+    @classmethod
+    def _has_inline_keys(cls, provider_type: str, processed_config: Dict[str, Any]) -> bool:
         if provider_type in cls._LIST_KEY_TYPES:
-            has_inline_keys = bool(processed_config.get("api_keys")) or bool(processed_config.get("api_keys_file"))
-        elif provider_type in cls._SINGLE_KEY_TYPES:
-            has_inline_keys = processed_config.get("api_key") is not None or bool(processed_config.get("api_key_file"))
+            return bool(processed_config.get("api_keys")) or bool(processed_config.get("api_keys_file"))
+        if provider_type in cls._SINGLE_KEY_TYPES:
+            return processed_config.get("api_key") is not None or bool(processed_config.get("api_key_file"))
+        return False
 
-        if strict_secret_mode and is_key_sensitive_type:
-            if has_inline_keys and not has_explicit_openai_bypass:
-                raise ValueError(
-                    f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) and provider '{provider_name}' "
-                    "has inline key configuration. Move key values into secrets.yaml."
-                )
-
-            if not (provider_keys or (provider_type == "openai" and not has_inline_keys)):
-                raise ValueError(
-                    f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) but provider '{provider_name}' has no "
-                    f"keys in the secrets store."
-                )
-
-        if not provider_keys:
+    @classmethod
+    def _enforce_strict_secret_mode(
+        cls,
+        provider_name: str,
+        provider_type: str,
+        provider_keys: List[str],
+        has_inline_keys: bool,
+        has_explicit_openai_bypass: bool,
+    ) -> None:
+        if not cls._strict_secret_mode_enabled():
+            return
+        if provider_type not in cls._LIST_KEY_TYPES | cls._SINGLE_KEY_TYPES:
             return
 
         if has_inline_keys and not has_explicit_openai_bypass:
+            raise ValueError(
+                f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) and provider '{provider_name}' "
+                "has inline key configuration. Move key values into secrets.yaml."
+            )
+
+        if provider_keys or has_explicit_openai_bypass:
+            return
+
+        raise ValueError(
+            f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) but provider '{provider_name}' has no "
+            f"keys in the secrets store."
+        )
+
+    @classmethod
+    def _apply_secret_store_keys(
+        cls,
+        processed_config: Dict[str, Any],
+        provider_name: str,
+        provider_type: str,
+        provider_keys: List[str],
+        has_inline_keys: bool,
+        has_explicit_openai_bypass: bool,
+    ) -> None:
+        if not provider_keys or has_explicit_openai_bypass:
+            return
+
+        if has_inline_keys:
             logger.warning(
                 "Inline keys for provider '%s' are being overridden by the secrets store",
                 provider_name,
             )
 
         if provider_type in cls._LIST_KEY_TYPES:
-            if has_explicit_openai_bypass:
-                return
-
             processed_config["api_keys"] = list(provider_keys)
             processed_config.pop("api_keys_file", None)
             return
 
         if provider_type in cls._SINGLE_KEY_TYPES:
-            if has_explicit_openai_bypass:
-                return
-
             processed_config["api_key"] = provider_keys[0]
             processed_config.pop("api_key_file", None)
             processed_config.pop("api_keys", None)
@@ -661,6 +673,34 @@ class ProviderFactory:
                     provider_name,
                     len(provider_keys),
                 )
+
+    @classmethod
+    def _apply_secrets_to_provider_config(cls, processed_config: Dict[str, Any]) -> None:
+        provider_name = (str(processed_config.get("name") or "")).strip()
+        provider_type = str(processed_config.get("type") or "").lower()
+
+        if not provider_name:
+            return
+
+        has_explicit_openai_bypass = cls._has_explicit_openai_bypass(provider_type, processed_config)
+        has_inline_keys = cls._has_inline_keys(provider_type, processed_config)
+        provider_keys = get_keys(provider_name)
+
+        cls._enforce_strict_secret_mode(
+            provider_name,
+            provider_type,
+            provider_keys,
+            has_inline_keys,
+            has_explicit_openai_bypass,
+        )
+        cls._apply_secret_store_keys(
+            processed_config,
+            provider_name,
+            provider_type,
+            provider_keys,
+            has_inline_keys,
+            has_explicit_openai_bypass,
+        )
 
     @classmethod
     def create_provider(cls, config: ProviderConfig) -> IModelProvider:

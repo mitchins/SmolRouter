@@ -5,11 +5,15 @@ import shutil
 import asyncio
 import time
 import secrets
-import fcntl
 from pathlib import Path
 from typing import Optional, Dict, List
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised via monkeypatch on non-Unix test hosts
+    fcntl = None
 
 from .config_paths import resolve_blob_storage_path
 from .task_utils import create_logged_task
@@ -76,6 +80,9 @@ class FilesystemBlobStorage(BlobStorage):
 
     @contextmanager
     def _usage_lock(self):
+        if fcntl is None:
+            yield
+            return
         self._usage_lock_file.touch(exist_ok=True)
         with open(self._usage_lock_file, "a+b") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -224,12 +231,13 @@ class FilesystemBlobStorage(BlobStorage):
         blob_path = self._get_blob_path(key, record_id)
 
         try:
-            if blob_path.exists():
-                blob_size = blob_path.stat().st_size
-                blob_path.unlink()
-                self._adjust_usage_bytes(-blob_size)
-                logger.debug(f"Deleted blob {key}")
-                return True
+            blob_size = blob_path.stat().st_size
+            blob_path.unlink()
+            self._adjust_usage_bytes(-blob_size)
+            logger.debug(f"Deleted blob {key}")
+            return True
+        except FileNotFoundError:
+            return False
         except Exception as e:
             logger.error(f"Failed to delete blob {key}: {e}")
 
@@ -251,14 +259,17 @@ class FilesystemBlobStorage(BlobStorage):
 
         try:
             for blob_file in self.base_path.rglob(BLOB_FILE_GLOB):
-                if blob_file.stat().st_mtime < cutoff_time:
-                    try:
-                        blob_size = blob_file.stat().st_size
-                        blob_file.unlink()
-                        deleted_count += 1
-                        deleted_bytes += blob_size
-                    except Exception as e:
-                        logger.error(f"Failed to delete old blob {blob_file}: {e}")
+                try:
+                    blob_stats = blob_file.stat()
+                    if blob_stats.st_mtime >= cutoff_time:
+                        continue
+                    blob_file.unlink()
+                    deleted_count += 1
+                    deleted_bytes += blob_stats.st_size
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    logger.error(f"Failed to delete old blob {blob_file}: {e}")
 
             # Clean up empty subdirectories
             for subdir in self.base_path.iterdir():
