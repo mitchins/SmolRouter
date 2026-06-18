@@ -8,6 +8,7 @@ AI model serving platforms like Ollama and OpenAI-compatible APIs.
 import logging
 from dataclasses import dataclass
 import httpx
+import os
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -572,6 +573,7 @@ class ProviderFactory:
 
     _LIST_KEY_TYPES = {"google-genai", "anthropic"}
     _SINGLE_KEY_TYPES = {"openai", "zai-coding"}
+    _STRICT_SECRETS_ENV = "SMOLROUTER_REQUIRE_SECRETS"
 
     _provider_classes = {
         "ollama": OllamaProvider,
@@ -589,6 +591,10 @@ class ProviderFactory:
     }
 
     @classmethod
+    def _strict_secret_mode_enabled(cls) -> bool:
+        return os.getenv(cls._STRICT_SECRETS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
     def _apply_secrets_to_provider_config(cls, processed_config: Dict[str, Any]) -> None:
         provider_name = (str(processed_config.get("name") or "")).strip()
         provider_type = str(processed_config.get("type") or "").lower()
@@ -596,28 +602,56 @@ class ProviderFactory:
         if not provider_name:
             return
 
-        provider_keys = get_keys(provider_name)
-        if not provider_keys:
-            return
+        strict_secret_mode = cls._strict_secret_mode_enabled()
+        is_key_sensitive_type = provider_type in cls._LIST_KEY_TYPES | cls._SINGLE_KEY_TYPES
+        has_explicit_openai_bypass = (
+            provider_type == "openai"
+            and "api_key" in processed_config
+            and processed_config.get("api_key") is None
+            and not bool(processed_config.get("api_key_file"))
+        )
 
+        provider_keys = get_keys(provider_name)
         has_inline_keys = False
         if provider_type in cls._LIST_KEY_TYPES:
             has_inline_keys = bool(processed_config.get("api_keys")) or bool(processed_config.get("api_keys_file"))
         elif provider_type in cls._SINGLE_KEY_TYPES:
             has_inline_keys = processed_config.get("api_key") is not None or bool(processed_config.get("api_key_file"))
 
-        if has_inline_keys:
+        if strict_secret_mode and is_key_sensitive_type:
+            if has_inline_keys and not has_explicit_openai_bypass:
+                raise ValueError(
+                    f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) and provider '{provider_name}' "
+                    "has inline key configuration. Move key values into secrets.yaml."
+                )
+
+            if not (provider_keys or (provider_type == "openai" and not has_inline_keys)):
+                raise ValueError(
+                    f"Strict secret mode is enabled ({cls._STRICT_SECRETS_ENV}) but provider '{provider_name}' has no "
+                    f"keys in the secrets store."
+                )
+
+        if not provider_keys:
+            return
+
+        if has_inline_keys and not has_explicit_openai_bypass:
             logger.warning(
                 "Inline keys for provider '%s' are being overridden by the secrets store",
                 provider_name,
             )
 
         if provider_type in cls._LIST_KEY_TYPES:
+            if has_explicit_openai_bypass:
+                return
+
             processed_config["api_keys"] = list(provider_keys)
             processed_config.pop("api_keys_file", None)
             return
 
         if provider_type in cls._SINGLE_KEY_TYPES:
+            if has_explicit_openai_bypass:
+                return
+
             processed_config["api_key"] = provider_keys[0]
             processed_config.pop("api_key_file", None)
             processed_config.pop("api_keys", None)

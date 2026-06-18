@@ -50,7 +50,7 @@ Use SmolRouter when you need to:
 
    client = openai.OpenAI(
        base_url="http://localhost:1234/v1",
-       api_key="local-proxy-key",  # forwarded to your upstreams
+       api_key="local-proxy-key",  # forwarded upstream only for keyless OpenAI BYOK/passthrough providers
    )
 
    response = client.chat.completions.create(
@@ -98,6 +98,8 @@ Use SmolRouter when you need to:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `JWT_SECRET` | _(unset)_ | Enables JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints (some API endpoints like `/api/logs`, `/api/stats` are exempt). Must be ≥32 characters with good entropy. Leave unset for unauthenticated access |
+| `SMOLROUTER_SECRETS` | _(auto-discovered)_ | Explicit path to `secrets.yaml` for provider API keys. If unset, SmolRouter searches `./secrets.yaml`, the user config dir, then the site config dir |
+| `SMOLROUTER_REQUIRE_SECRETS` | `false` | When `true`, key-bearing providers must load keys from `secrets.yaml`; inline `api_key` / `api_keys` fields are rejected, except OpenAI `api_key: null` BYOK passthrough |
 | `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls Web UI/dashboard access policy independently of API authentication: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
 | `ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD` | `false` | Set `true` only on trusted LANs to allow unauthenticated access to `/api/errors/*`. Enables stack traces and exception metadata without auth checks. |
 | `WEBUI_ALLOWED_ORIGINS` | _(unset)_ | Comma-separated list of origins allowed to access the dashboard |
@@ -141,25 +143,36 @@ providers:
   - name: "google-prod"
     type: "google-genai"
     enabled: true
-    api_keys:
-      - "YOUR_GOOGLE_API_KEY_1"
-      - "YOUR_GOOGLE_API_KEY_2"  # Multiple keys for rotation
     max_requests_per_day: 1500  # Tune this to your quota plan
 ```
 
+Store provider keys in `secrets.yaml`:
+```yaml
+google-prod:
+  - "YOUR_GOOGLE_API_KEY_1"
+  - "YOUR_GOOGLE_API_KEY_2"
+```
+
+If you already have inline or file-based keys in an existing routes config, `python -m smolrouter.migrate_secrets` will consolidate them into `secrets.yaml`.
+
 Google GenAI models are discovered live from the provider. Use the provider and system dashboards to inspect configured backends, quotas, and proxy status.
 
-OpenAI-compatible providers can also point at vendor-prefixed API bases such as `/openai/v1` or `/zen/go/v1`. When a vendor does not expose a usable `/v1/models` listing, set `static_models` explicitly in YAML:
+OpenAI-compatible providers can also point at vendor-prefixed API bases such as `/openai/v1` or `/zen/go/v1`. When a vendor does not expose a usable `/v1/models` listing, set `static_models` explicitly in YAML and keep the provider key in `secrets.yaml`:
 
 ```yaml
 providers:
   - name: "groq-scout"
     type: "openai"
     url: "https://api.groq.com/openai/v1"
-    api_key: "YOUR_GROQ_KEY"
     static_models:
       - "meta-llama/llama-4-scout-17b-16e-instruct"
 ```
+
+```yaml
+groq-scout: "YOUR_GROQ_KEY"
+```
+
+For OpenAI-compatible providers, a configured provider `api_key` takes precedence over the client's `Authorization` header. Client `Authorization` is only forwarded upstream when that provider is intentionally keyless (`api_key: null` / BYOK passthrough).
 
 ## Features
 
@@ -186,7 +199,7 @@ providers:
 **Deployment:**
 - Run behind a trusted reverse proxy (nginx, Caddy, Cloudflare) and publish only HTTPS endpoints
 - Bind to `127.0.0.1` by default; switch to `0.0.0.0` only when the proxy handles TLS and authentication
-- Keep provider API keys and upstream URLs in environment variables or a secret manager
+- Keep provider API keys in `secrets.yaml` (or an external secret manager that renders it), and keep routing/provider topology in `routes.yaml`
 
 **Authentication:**
 1. Set `JWT_SECRET` to a 32+ character random value to enable JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints. Weak secrets are rejected during startup
@@ -209,6 +222,7 @@ providers:
 
 **Path guidance:**
 - Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
+- Use `SMOLROUTER_SECRETS` for deterministic secrets file selection; otherwise SmolRouter searches `./secrets.yaml`, the user config dir, then the site config dir.
 - Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
 - For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
 - `docker-compose.yml` mounts `./logs:/app/logs`, so rotated ERROR logs persist across container restarts.
