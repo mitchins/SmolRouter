@@ -249,6 +249,27 @@ class FilesystemBlobStorage(BlobStorage):
             return False
         return self._get_blob_path(key, record_id).exists()
 
+    def _delete_blob_if_old(self, blob_file: Path, cutoff_time: float) -> int:
+        try:
+            blob_stats = blob_file.stat()
+            if blob_stats.st_mtime >= cutoff_time:
+                return 0
+            blob_file.unlink()
+            return blob_stats.st_size
+        except FileNotFoundError:
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to delete old blob {blob_file}: {e}")
+            return 0
+
+    def _cleanup_empty_subdirectories(self) -> None:
+        for subdir in self.base_path.iterdir():
+            if subdir.is_dir() and not any(subdir.iterdir()):
+                try:
+                    subdir.rmdir()
+                except Exception:
+                    pass  # Ignore errors removing empty dirs
+
     def cleanup_old(self, max_age_days: int) -> int:
         """Remove blobs older than max_age_days"""
         import time
@@ -259,25 +280,13 @@ class FilesystemBlobStorage(BlobStorage):
 
         try:
             for blob_file in self.base_path.rglob(BLOB_FILE_GLOB):
-                try:
-                    blob_stats = blob_file.stat()
-                    if blob_stats.st_mtime >= cutoff_time:
-                        continue
-                    blob_file.unlink()
-                    deleted_count += 1
-                    deleted_bytes += blob_stats.st_size
-                except FileNotFoundError:
+                deleted_size = self._delete_blob_if_old(blob_file, cutoff_time)
+                if deleted_size <= 0:
                     continue
-                except Exception as e:
-                    logger.error(f"Failed to delete old blob {blob_file}: {e}")
+                deleted_count += 1
+                deleted_bytes += deleted_size
 
-            # Clean up empty subdirectories
-            for subdir in self.base_path.iterdir():
-                if subdir.is_dir() and not any(subdir.iterdir()):
-                    try:
-                        subdir.rmdir()
-                    except Exception:
-                        pass  # Ignore errors removing empty dirs
+            self._cleanup_empty_subdirectories()
 
             if deleted_count > 0:
                 self._adjust_usage_bytes(-deleted_bytes)
