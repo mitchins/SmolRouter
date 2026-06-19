@@ -158,11 +158,17 @@ async def app_lifespan(app: FastAPI):
         logger.critical(f"❌ FATAL: Cannot start server - Lua script initialization failed: {e}")
         raise
 
-    await _initialize_request_logging_system()
-    _initialize_blob_storage_strict()
+    try:
+        await _initialize_request_logging_system()
+        _initialize_blob_storage_strict()
 
-    # Initialize new architecture container
-    await init_new_architecture()
+        # Initialize new architecture container
+        await init_new_architecture()
+    except Exception:
+        await _shutdown_proxy_health_monitors(container)
+        _stop_logging_cleanup_if_enabled()
+        await drain_background_tasks()
+        raise
     logger.info("✅ All critical systems initialized (lifespan)")
 
     # Yield to run the app

@@ -93,6 +93,96 @@ def test_usage_lock_gracefully_skips_when_fcntl_is_unavailable(tmp_path, monkeyp
     assert storage._read_usage_bytes() == 7
 
 
+def test_cleanup_old_tolerates_disappearing_blob(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    class _MissingBlob:
+        def stat(self):
+            raise FileNotFoundError
+
+        def unlink(self):
+            raise AssertionError("unlink should not be reached")
+
+    class _FakeBasePath:
+        def rglob(self, _pattern):
+            return [_MissingBlob()]
+
+        def iterdir(self):
+            return []
+
+    monkeypatch.setattr(storage, "base_path", _FakeBasePath())
+
+    assert storage.cleanup_old(1) == 0
+
+
+def test_start_janitor_without_running_loop_is_harmless(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    monkeypatch.setattr(storage_module.asyncio, "get_running_loop", lambda: (_ for _ in ()).throw(RuntimeError()))
+
+    storage.start_janitor()
+
+    assert storage._janitor_task is None
+
+
+def test_adjust_usage_underflow_resets_counter_to_zero(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    storage._write_usage_bytes_locked(3)
+
+    assert storage._adjust_usage_bytes(-10) == 0
+    assert storage._total_size_bytes() == 0
+
+
+def test_cleanup_for_space_requests_janitor(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    janitor_calls = []
+    monkeypatch.setattr(storage, "_trigger_janitor", lambda: janitor_calls.append(True))
+
+    storage._cleanup_for_space(5)
+
+    assert janitor_calls == [True]
+
+
+def test_trigger_janitor_wakes_registered_event_loop(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    called = []
+
+    class _Loop:
+        def call_soon_threadsafe(self, callback):
+            called.append("wake")
+            callback()
+
+    event = asyncio.Event()
+    storage._janitor_loop_ref = _Loop()
+    storage._janitor_wakeup = event
+
+    storage._trigger_janitor()
+
+    assert called == ["wake"]
+    assert event.is_set() is True
+
+
+def test_stop_janitor_cancels_active_task(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    class _Task:
+        def __init__(self):
+            self.cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+    task = _Task()
+    storage._janitor_task = task
+
+    storage.stop_janitor()
+
+    assert task.cancelled is True
+    assert storage._janitor_task is None
+
+
 def test_usage_counter_rebuilds_once_then_store_stays_incremental(tmp_path, monkeypatch):
     storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
     storage.store(b"aa")
