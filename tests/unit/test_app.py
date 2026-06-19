@@ -747,6 +747,37 @@ async def test_app_lifespan_drains_background_tasks(monkeypatch):
     assert task not in task_utils._background_tasks
 
 
+@pytest.mark.asyncio
+async def test_app_lifespan_rolls_back_logging_cleanup_when_startup_fails(monkeypatch):
+    stop_calls = []
+    shutdown_calls = []
+    drain_calls = []
+
+    monkeypatch.setattr(app_module, "_initialize_lua_scripting", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_request_logging_system", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_blob_storage_strict", Mock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(app_module, "init_new_architecture", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_stop_logging_cleanup_if_enabled", lambda: stop_calls.append("stopped"))
+    monkeypatch.setattr(
+        app_module,
+        "_shutdown_proxy_health_monitors",
+        AsyncMock(side_effect=lambda *_args, **_kwargs: shutdown_calls.append("shutdown")),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "drain_background_tasks",
+        AsyncMock(side_effect=lambda: drain_calls.append("drained")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        async with app_module.app_lifespan(app):
+            await asyncio.sleep(0)
+
+    assert stop_calls == ["stopped"]
+    assert shutdown_calls == ["shutdown"]
+    assert drain_calls == ["drained"]
+
+
 def test_rewrite_model_exact_match():
     original_model_map = MODEL_MAP.copy()
     MODEL_MAP.update({"old-model": "new-model"})

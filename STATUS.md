@@ -5,18 +5,29 @@
 - 🟡 Ensure Consistent Information Architecture
     Google GenAI provider has extra features like key status tracking and exhaustion detection. Need to ensure consistent IA across all providers (OpenAI, Anthropic, Ollama). Consider: Should other providers have similar detailed status tracking? Location: Provider interfaces and dashboard consistency.
 
+- 🔵 Add Client Class-based Priority Injection (TODO - unstarted)
+    SmolRouter should own request class policy (`interactive` / `background` / `best-effort`), inject upstream `priority`, strip raw client priority unless trusted, and apply class-based token/prompt caps. Default unknown clients to background/normal (not interactive). Route/model alias should resolve to explicit model + injected `priority` only.
+
 - 🟡 Token/Request Counting for All API Keys
-    Google GenAI has comprehensive token/request counting with quota tracking. OpenAI and Anthropic providers need similar request/token counting against their API keys. All keys should have consistent metrics regardless of provider type. Google can keep extra features (exhaustion status, least-used key selection) as provider-specific enhancements. Files: `openai_provider.py`, `anthropic_provider.py`, `database.py`
-
-## Medium Priority
-
-- 🔵 API Key Storage Security Analysis
-    Current: API keys stored in app config, hashed in database for tracking. Question: Should we store full keys in DB or just hashes for identification? Analyze best practices: keys needed for actual API calls but DB tracking could use hashes. Current approach uses `ApiKeyQuota.hash_api_key()` for DB records. Consider: Security vs functionality tradeoffs. Files: `database.py`, provider configs
+    Google GenAI has comprehensive token/request counting with quota tracking. OpenAI and Anthropic providers need similar request/token counting against their API keys. All keys should have consistent metrics regardless of provider type. Google can keep extra features (exhaustion status, least-used key selection) as provider-specific enhancements. Files: `providers.py` (OpenAI path), `anthropic_provider.py`, `database.py`
 
 ## Low Priority
 
 - 🔵 Move from Static Pages to Dynamic API
     Current dashboard uses server-side rendered HTML templates. Move to SPA (Single Page App) with separate API endpoints. Benefits: Better UX, real-time updates, easier testing. Templates to migrate: `templates/index.html`, `templates/system.html`, etc. New endpoints needed: `/api/dashboard`, `/api/providers`, `/api/stats`
+    Current dashboard uses server-side rendered templates with API-backed data fetching. Most main pages are API-driven but render via Jinja templates (`templates/index.html`, `providers.html`, `performance.html`). Core dashboard data endpoints exist (`/api/dashboard`, `/api/stats`), and provider list data is currently exposed via `/api/upstreams` (not `/api/providers`).
+
+- 🔵 Improve JSON formatting + raw copy for request/body views (TODO - unstarted)
+    Request and response payload blocks in web detail views should be consistently pretty-printed with a dedicated raw-copy action, including request and body payloads.
+
+- 🔵 Treat facade API keys as routing/analytics/QoS identity (TODO - unstarted)
+    Document and enforce that facade API keys are first-class credentials but are primarily used for request routing, usage attribution, and QoS policy, not for direct provider security semantics.
+
+- 🔵 Clean up BYOK and upstream auth precedence (TODO - unstarted)
+    Simplify and standardize auth precedence so BYOK/passthrough behavior is obvious and consistent instead of provider-specific and surprising.
+
+- 🔵 Add segment/block blob storage backend (TODO - unstarted)
+    Add a future blob backend that appends payloads into bounded segment files with offset-based lookup, reducing inode count and making retention pruning whole-segment and O(1).
 
 ## Completed
 
@@ -43,6 +54,9 @@
 
 - 🟢 Security Hardening
     JWT validation, stricter rate-limiting primitives, and explicit environment toggles
+
+- 🟢 API Key Storage Security Policy
+    Enforced that key-bearing providers pull API keys from `secrets.yaml` when `SMOLROUTER_REQUIRE_SECRETS=true`; inline key fields are rejected in strict mode, while `api_key: null` still supports OpenAI BYOK passthrough.
 
 ## Architecture Notes
 

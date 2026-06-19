@@ -21,6 +21,8 @@ async def test_filesystem_janitor_prunes_when_over_capacity(tmp_path, monkeypatc
     await storage._run_janitor_once()
 
     assert storage._total_size_bytes() <= int(storage_module.MAX_TOTAL_STORAGE_SIZE * storage_module.WATERMARK_FRACTION)
+    actual_size = sum(blob_file.stat().st_size for blob_file in storage.base_path.rglob(storage_module.BLOB_FILE_GLOB))
+    assert storage._total_size_bytes() == actual_size
 
 
 @pytest.mark.asyncio
@@ -36,19 +38,169 @@ async def test_janitor_loop_reraises_cancelled_error(tmp_path, monkeypatch):
         await task
 
 
-def test_filesystem_store_triggers_sync_cleanup_when_projected_size_exceeds_cap(tmp_path, monkeypatch):
+def test_filesystem_store_uses_incremental_usage_counter_and_triggers_janitor(tmp_path, monkeypatch):
     monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 10)
 
     storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
-    cleanup_calls = []
+    janitor_calls = []
+    scan_calls = []
 
-    monkeypatch.setattr(storage, "_total_size_bytes", lambda: 9)
+    real_dir_size_bytes = storage._dir_size_bytes
 
-    def _fake_cleanup(needed_bytes=0):
-        cleanup_calls.append(needed_bytes)
+    def tracked_dir_size(path):
+        scan_calls.append(path)
+        return real_dir_size_bytes(path)
 
-    monkeypatch.setattr(storage, "_cleanup_for_space", _fake_cleanup)
+    monkeypatch.setattr(storage, "_dir_size_bytes", tracked_dir_size)
+    monkeypatch.setattr(storage, "_trigger_janitor", lambda: janitor_calls.append(True))
+    storage._adjust_usage_bytes(9)
 
     storage.store(b"12345")
 
-    assert cleanup_calls == [4]
+    assert janitor_calls == [True]
+    assert storage._total_size_bytes() == 14
+    assert scan_calls == []
+
+
+def test_filesystem_delete_decrements_usage_counter(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    key = storage.store(b"abc")
+
+    assert storage._total_size_bytes() == 3
+    assert storage.delete(key) is True
+    assert storage._total_size_bytes() == 0
+    assert storage.delete(key) is False
+    assert storage._total_size_bytes() == 0
+
+
+def test_filesystem_delete_returns_false_when_blob_was_removed_elsewhere(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    key = storage.store(b"abc")
+
+    storage._get_blob_path(key).unlink()
+
+    assert storage.delete(key) is False
+
+
+def test_usage_lock_gracefully_skips_when_fcntl_is_unavailable(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    monkeypatch.setattr(storage_module, "fcntl", None)
+
+    with storage._usage_lock():
+        storage._write_usage_bytes_locked(7)
+
+    assert storage._read_usage_bytes() == 7
+
+
+def test_cleanup_old_tolerates_disappearing_blob(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    class _MissingBlob:
+        def stat(self):
+            raise FileNotFoundError
+
+        def unlink(self):
+            raise AssertionError("unlink should not be reached")
+
+    class _FakeBasePath:
+        def rglob(self, _pattern):
+            return [_MissingBlob()]
+
+        def iterdir(self):
+            return []
+
+    monkeypatch.setattr(storage, "base_path", _FakeBasePath())
+
+    assert storage.cleanup_old(1) == 0
+
+
+def test_start_janitor_without_running_loop_is_harmless(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    monkeypatch.setattr(storage_module.asyncio, "get_running_loop", lambda: (_ for _ in ()).throw(RuntimeError()))
+
+    storage.start_janitor()
+
+    assert storage._janitor_task is None
+
+
+def test_adjust_usage_underflow_resets_counter_to_zero(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    storage._write_usage_bytes_locked(3)
+
+    assert storage._adjust_usage_bytes(-10) == 0
+    assert storage._total_size_bytes() == 0
+
+
+def test_cleanup_for_space_requests_janitor(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    janitor_calls = []
+    monkeypatch.setattr(storage, "_trigger_janitor", lambda: janitor_calls.append(True))
+
+    storage._cleanup_for_space(5)
+
+    assert janitor_calls == [True]
+
+
+def test_trigger_janitor_wakes_registered_event_loop(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    called = []
+
+    class _Loop:
+        def call_soon_threadsafe(self, callback):
+            called.append("wake")
+            callback()
+
+    event = asyncio.Event()
+    storage._janitor_loop_ref = _Loop()
+    storage._janitor_wakeup = event
+
+    storage._trigger_janitor()
+
+    assert called == ["wake"]
+    assert event.is_set() is True
+
+
+def test_stop_janitor_cancels_active_task(tmp_path):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    class _Task:
+        def __init__(self):
+            self.cancelled = False
+
+        def done(self):
+            return False
+
+        def cancel(self):
+            self.cancelled = True
+
+    task = _Task()
+    storage._janitor_task = task
+
+    storage.stop_janitor()
+
+    assert task.cancelled is True
+    assert storage._janitor_task is None
+
+
+def test_usage_counter_rebuilds_once_then_store_stays_incremental(tmp_path, monkeypatch):
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    storage.store(b"aa")
+    storage._usage_file.write_text("not-a-number\n", encoding="utf-8")
+
+    scan_calls = []
+    real_dir_size_bytes = storage._dir_size_bytes
+
+    def tracked_dir_size(path):
+        scan_calls.append(path)
+        return real_dir_size_bytes(path)
+
+    monkeypatch.setattr(storage, "_dir_size_bytes", tracked_dir_size)
+
+    assert storage._total_size_bytes() == 2
+    assert len(scan_calls) == 1
+
+    storage.store(b"bbb")
+
+    assert len(scan_calls) == 1
+    assert storage._total_size_bytes() == 5

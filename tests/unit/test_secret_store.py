@@ -173,6 +173,63 @@ def test_openai_bypass_remains_keyless_when_store_has_no_keys(monkeypatch):
     assert providers[0].config.api_key is None
 
 
+def test_strict_secrets_mode_rejects_inline_keys(monkeypatch):
+    monkeypatch.setattr("smolrouter.providers.get_keys", lambda _name: [])
+    monkeypatch.setenv("SMOLROUTER_REQUIRE_SECRETS", "1")
+
+    with pytest.raises(ValueError, match="inline key configuration"):
+        ProviderFactory._apply_secrets_to_provider_config(
+            {
+                "name": "google",
+                "type": "google-genai",
+                "api_keys": ["inline-google"],
+            }
+        )
+
+
+def test_strict_secrets_mode_allows_openai_bypass(monkeypatch):
+    monkeypatch.setattr("smolrouter.providers.get_keys", lambda _name: [])
+    monkeypatch.setenv("SMOLROUTER_REQUIRE_SECRETS", "1")
+
+    processed = {"name": "openai", "type": "openai", "url": "http://localhost:8000", "api_key": None}
+    ProviderFactory._apply_secrets_to_provider_config(processed)
+
+    assert processed["api_key"] is None
+
+
+def test_strict_secrets_mode_rejects_openai_without_explicit_null(monkeypatch):
+    monkeypatch.setattr("smolrouter.providers.get_keys", lambda _name: [])
+    monkeypatch.setenv("SMOLROUTER_REQUIRE_SECRETS", "1")
+
+    with pytest.raises(ValueError, match="has no keys in the secrets store"):
+        ProviderFactory._apply_secrets_to_provider_config(
+            {
+                "name": "openai",
+                "type": "openai",
+                "url": "http://localhost:8000",
+            }
+        )
+
+
+def test_strict_secrets_mode_ignores_non_sensitive_provider(monkeypatch):
+    monkeypatch.setattr("smolrouter.providers.get_keys", lambda _name: [])
+    monkeypatch.setenv("SMOLROUTER_REQUIRE_SECRETS", "1")
+
+    processed = {"name": "dummy", "type": "dummy", "url": "http://localhost:8000"}
+    ProviderFactory._apply_secrets_to_provider_config(processed)
+
+    assert processed["type"] == "dummy"
+
+
+def test_openai_bypass_stays_keyless_even_when_secrets_exist(monkeypatch):
+    monkeypatch.setattr("smolrouter.providers.get_keys", lambda _name: ["secret-key"])
+
+    processed = {"name": "openai", "type": "openai", "url": "http://localhost:8000", "api_key": None}
+    ProviderFactory._apply_secrets_to_provider_config(processed)
+
+    assert processed["api_key"] is None
+
+
 def test_google_config_error_includes_secret_search_paths(monkeypatch, configured_dirs):
     _cwd, _user, _site = configured_dirs
 
