@@ -56,8 +56,8 @@ class BaseModelProvider(IModelProvider):
                 headers = self._get_headers()
                 response = await client.get(health_url, headers=headers)
                 return response.status_code == 200
-        except Exception:
-            logger.exception("Health check failed for %s", self.get_provider_id())
+        except Exception as exc:
+            logger.debug("Health check failed for %s: %s", self.get_provider_id(), exc)
             return False
 
     def _get_health_check_url(self) -> str:
@@ -731,8 +731,8 @@ class ProviderFactory:
                     logger.info(f"Created provider: {config.name} ({config.type}) -> {getattr(config, 'url', 'N/A')}")
                 else:
                     logger.info(f"Skipping disabled provider: {config.name}")
-        except Exception:
-            logger.exception("Failed to create provider from config")
+            except Exception:
+                logger.exception("Failed to create provider from config: %s", provider_config)
 
         # Sort providers by priority (lower numbers first)
         providers.sort(key=lambda p: p.config.priority)

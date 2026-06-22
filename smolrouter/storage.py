@@ -377,8 +377,8 @@ class FilesystemBlobStorage(BlobStorage):
                 await asyncio.to_thread(shutil.rmtree, bucket, True)
                 current_size = await asyncio.to_thread(self._adjust_usage_bytes, -bucket_size)
                 logger.info(f"Deleted bucket {bucket} (freed {bucket_size} bytes)")
-        except Exception:
-            logger.exception("Failed to delete bucket %s", bucket)
+            except Exception:
+                logger.exception("Failed to delete bucket %s", bucket)
         return current_size
 
     def _prune_bucket_files(self, bucket: Path, current_size: int, target: int) -> int:
@@ -612,9 +612,9 @@ def init_blob_storage():
     storage = get_blob_storage()
     logger.info(f"Blob storage initialized: {type(storage).__name__}")
     # Start janitor for filesystem storage
-        if isinstance(storage, FilesystemBlobStorage):
-            try:
-                storage.start_janitor()
+    if isinstance(storage, FilesystemBlobStorage):
+        try:
+            storage.start_janitor()
         except Exception:
             logger.exception("Failed to start blob janitor")
     return storage

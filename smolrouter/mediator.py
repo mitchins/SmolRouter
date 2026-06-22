@@ -451,7 +451,7 @@ class ModelMediator:
                 f"dummy:{resolved_model.provider_id}",
                 self._attach_lb_instance(lb_instance, None),
             )
-        except Exception:
+        except Exception as e:
             logger.exception("Dummy provider error for %s", resolved_model.provider_id)
             return (
                 {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},

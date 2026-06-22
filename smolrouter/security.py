@@ -72,7 +72,7 @@ class WebUISecurityManager:
         from smolrouter.auth import _validate_jwt_secret
 
         if not _validate_jwt_secret(jwt_secret):
-            logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
+            logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is invalid!")
             logger.error("WebUI will be inaccessible due to invalid JWT_SECRET.")
             return False
 

@@ -363,7 +363,7 @@ async def _check_and_queue_duplicate_request_body(
     try:
         existing_count = await client.scard(set_key)
     except Exception:
-        logger.exception("Failed to get duplicate count for %s", set_key)
+        logger.debug("Failed to get duplicate count for %s", set_key)
         existing_count = 0
 
     pipe.hset(
@@ -704,7 +704,7 @@ class RedisRequestLog:
                 results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
                 return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
             except Exception:
-                logger.exception("Redis Lua get_recent failed; falling back to pipeline path")
+                logger.warning("Redis Lua get_recent failed; falling back to pipeline path")
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)

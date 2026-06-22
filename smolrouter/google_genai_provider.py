@@ -197,9 +197,9 @@ class GoogleGenAIConfig(ProviderConfig):
                 )
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
-        except Exception:
-            logger.exception("Failed to load API keys from %s", self.api_keys_file)
-            raise
+            except Exception:
+                logger.exception("Failed to load API keys from %s", self.api_keys_file)
+                raise
 
         if not self.api_keys:
             raise ValueError("No valid API keys found")
@@ -458,8 +458,8 @@ class GoogleGenAIProvider(IModelProvider):
                 return
             try:
                 done_task.result()
-            except Exception:
-                logger.exception("Proxy health probe failed for %s", self._mask_proxy_url(url))
+            except Exception as exc:
+                logger.debug("Proxy health probe failed for %s: %s", self._mask_proxy_url(url), exc)
 
         task = create_logged_task(
             self._probe_proxy_url(proxy_url),
@@ -931,7 +931,7 @@ class GoogleGenAIProvider(IModelProvider):
         try:
             quota_exhausted_pacific = _to_pacific_datetime(quota.quota_exhausted_at, assume_utc=True)
         except (ValueError, TypeError, AttributeError):
-            logger.exception("API key %s has malformed quota_exhausted_at, allowing", redact_secret(key))
+            logger.warning("API key %s has malformed quota_exhausted_at, allowing", redact_secret(key))
             return False
 
         exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
@@ -1283,8 +1283,8 @@ class GoogleGenAIProvider(IModelProvider):
             try:
                 if await self._health_check_api_key(api_key):
                     return True
-            except Exception:
-                logger.exception("Health check failed for key %s", redact_secret(api_key))
+            except Exception as exc:
+                logger.debug("Health check failed for key %s: %s", redact_secret(api_key), exc)
                 continue
         return False
 
@@ -1305,8 +1305,8 @@ class GoogleGenAIProvider(IModelProvider):
 
                 return models
 
-            except Exception:
-                logger.exception("Error discovering models with API key %s", redact_secret(api_key))
+            except Exception as exc:
+                logger.debug("Error discovering models with API key %s: %s", redact_secret(api_key), exc)
                 continue
 
         # All API keys failed - fall back to static model list
@@ -1424,8 +1424,8 @@ class GoogleGenAIProvider(IModelProvider):
                     header, base64_data = image_url.split(",", 1)
                     mime_type = header.split(":")[1].split(";")[0]
                     parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
-                except Exception:
-                    logger.exception("Failed to parse data URI")
+                except Exception as exc:
+                    logger.warning("Failed to parse data URI: %s", exc)
             else:
                 logger.warning(
                     f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."

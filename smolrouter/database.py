@@ -1224,9 +1224,10 @@ async def background_cleanup_task():
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
             raise
-    except Exception:
-        logger.exception("Error in background cleanup")
-        # Continue running despite errors
+        except Exception:
+            logger.exception("Error in background cleanup")
+            # Continue running despite errors
+            continue
 
 
 def start_background_cleanup():

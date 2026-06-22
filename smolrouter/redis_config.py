@@ -216,14 +216,14 @@ async def redis_startup_check(client: Any, is_fake: bool):
     except RedisError:
         logger.exception("❌ Redis startup check failed")
         if _env() == "prod":
-            logger.exception("Exiting due to Redis failure in production")
+            logger.error("Exiting due to Redis failure in production")
             sys.exit(1)
         raise
 
     except Exception:
         logger.exception("❌ Unexpected error during Redis startup check")
         if _env() == "prod":
-            logger.exception("Exiting due to Redis failure in production")
+            logger.error("Exiting due to Redis failure in production")
             sys.exit(1)
         raise
 

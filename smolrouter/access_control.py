@@ -283,7 +283,11 @@ class AuthBasedAccessControl(IAccessControl):
         """Check if a single pattern matches any identifier"""
         is_regex = pattern.startswith("/") and pattern.endswith("/")
         if is_regex:
-            regex = re.compile(pattern[1:-1])
+            try:
+                regex = re.compile(pattern[1:-1])
+            except re.error:
+                logger.warning("Invalid regex pattern: %s", pattern)
+                return False
             for identifier in identifiers:
                 if regex.match(identifier):
                     return True
