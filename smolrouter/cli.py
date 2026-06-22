@@ -19,6 +19,10 @@ def main(argv=None):
     if args.routes_config:
         os.environ["ROUTES_CONFIG"] = args.routes_config
 
+    from smolrouter.app import app, configure_logging
+
+    configure_logging()
+
     os.environ["LISTEN_HOST"] = args.host
     os.environ["LISTEN_PORT"] = str(args.port)
     if args.reload:
@@ -28,7 +32,5 @@ def main(argv=None):
     if app_target is not None:
         uvicorn.run(app_target, host=args.host, port=args.port, reload=True)
         return
-
-    from smolrouter.app import app
 
     uvicorn.run(app, host=args.host, port=args.port)

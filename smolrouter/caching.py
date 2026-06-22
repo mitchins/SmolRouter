@@ -345,7 +345,7 @@ class ModelAggregator:
             if isinstance(result, list):
                 all_models.extend(result)
 
-        logger.info(f"Aggregated {len(all_models)} models from {len(providers_to_query)} providers")
+        logger.debug(f"Aggregated {len(all_models)} models from {len(providers_to_query)} providers")
         return all_models
 
     def _is_provider_queryable(self, provider) -> bool:

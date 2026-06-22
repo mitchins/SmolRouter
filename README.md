@@ -74,6 +74,7 @@ Use SmolRouter when you need to:
 | `ROUTES_CONFIG` | `config/routes.yaml` | Path to YAML or JSON smart-routing configuration. Relative paths are resolved from the current working directory when explicitly set; the default is the repo-local `config/routes.yaml` |
 | `REQUEST_TIMEOUT` | `3000.0` | Upstream timeout in seconds |
 | `ENABLE_LOGGING` | `true` | Toggle request logging, database writes, and the Web UI dashboard |
+| `LOG_LEVEL` | `INFO` | Global logging verbosity (`DEBUG`, `INFO`, `WARNING`, etc.) |
 
 **Feature Flags:**
 
@@ -214,7 +215,7 @@ For OpenAI-compatible providers, a configured provider `api_key` takes precedenc
 - `ENABLE_LOGGING=false` disables request dashboard persistence and Redis request/audit writes; it does **not** disable ERROR file logging, which remains enabled independently.
 - Request metadata uses the Redis-backed request/audit path (`REDIS_URL`) for searchable diagnostics and route-level summary.
 - Request and response payloads use blob storage (`BLOB_STORAGE_PATH`) for larger bodies outside Redis.
-- Stdout/stderr continue to mirror application logs and are useful for live inspection during LAN soaks.
+- Stdout/stderr mirror application logs. Defaults are compact at `INFO`; set `LOG_LEVEL=DEBUG` to include detailed routing and provider selection diagnostics such as provider dispatch, proxy selection, and ground-truth verification.
 - Persisted ERROR logs are written to `ERROR_LOG_FILE` with rotation (`ERROR_LOG_MAX_BYTES`, `ERROR_LOG_BACKUP_COUNT`), which is recommended for post-restart forensics.
 - Set `LOG_DIR` to a writable folder whenever running outside Docker; `/app/logs` is container-oriented and may be unwritable on host shells unless overridden.
 - Adjust `MAX_LOG_AGE_DAYS`, `MAX_BLOB_SIZE`, and `MAX_TOTAL_STORAGE_SIZE` to control cost and retention

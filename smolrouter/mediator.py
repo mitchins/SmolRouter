@@ -90,7 +90,7 @@ class ModelMediator:
         # Step 3: Apply access control filtering
         filtered_models = await self.access_control.filter_models(transformed_models, client)
 
-        logger.info(
+        logger.debug(
             f"Returning {len(filtered_models)} models to client {client.ip} (filtered from {len(all_models)} total)"
         )
 
@@ -124,7 +124,7 @@ class ModelMediator:
         if not instance:
             return None
 
-        logger.info(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
+        logger.debug(f"Load balancer selected instance: {instance.model_id} for request: {requested_model}")
 
         for model in available_models:
             if model.name == instance.model_id and model.endpoint == instance.provider_url:
@@ -203,7 +203,7 @@ class ModelMediator:
             logger.warning(f"Access denied to resolved model '{resolved_model.id}' for client {client.ip}")
             return None
 
-        logger.info(f"Resolved '{requested_model}' -> '{resolved_model.id}' for client {client.ip}")
+        logger.debug(f"Resolved '{requested_model}' -> '{resolved_model.id}' for client {client.ip}")
         return resolved_model
 
     async def get_model_by_id(self, model_id: str, client: ClientContext) -> Optional[ModelInfo]:
@@ -356,7 +356,7 @@ class ModelMediator:
         if hasattr(resolved_model, "_lb_selected_instance") and "model" in request_payload:
             original_model = request_payload["model"]
             request_payload["model"] = resolved_model._lb_selected_instance
-            logger.info(
+            logger.debug(
                 f"Load balancer: mutated request model '{original_model}' -> '{resolved_model._lb_selected_instance}'"
             )
             return

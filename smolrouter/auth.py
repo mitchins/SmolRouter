@@ -58,6 +58,9 @@ class JWTAuth:
 
 # Global auth instance
 _jwt_auth: Optional[JWTAuth] = None
+_jwt_auth_initialized = False
+_jwt_auth_cached_secret: Optional[str] = None
+_jwt_auth_cached_state: str = "uninitialized"
 
 
 def _validate_jwt_secret(secret: str) -> bool:
@@ -103,18 +106,34 @@ def _validate_jwt_secret(secret: str) -> bool:
 
 def get_jwt_auth() -> Optional[JWTAuth]:
     """Get JWT auth instance if enabled"""
-    global _jwt_auth
+    global _jwt_auth, _jwt_auth_initialized, _jwt_auth_cached_secret, _jwt_auth_cached_state
 
-    if _jwt_auth is None:
-        jwt_secret = os.getenv("JWT_SECRET")
-        if jwt_secret and _validate_jwt_secret(jwt_secret):
-            _jwt_auth = JWTAuth(jwt_secret.strip())
-            logger.info("JWT authentication enabled with validated secret")
-        elif jwt_secret:
-            logger.error("JWT authentication disabled due to invalid JWT_SECRET")
-            _jwt_auth = None
+    jwt_secret = os.getenv("JWT_SECRET")
+    normalized_secret = jwt_secret.strip() if jwt_secret else None
+
+    if _jwt_auth_initialized and normalized_secret == _jwt_auth_cached_secret:
+        if _jwt_auth_cached_state == "enabled":
+            if _jwt_auth is not None:
+                return _jwt_auth
+            # If _jwt_auth was manually reset during tests, rebuild the auth object.
         else:
-            logger.info("JWT authentication disabled (no JWT_SECRET provided)")
+            return None
+
+    _jwt_auth_initialized = True
+    _jwt_auth_cached_secret = normalized_secret
+
+    if normalized_secret and _validate_jwt_secret(normalized_secret):
+        _jwt_auth = JWTAuth(normalized_secret)
+        _jwt_auth_cached_state = "enabled"
+        logger.info("JWT authentication enabled with validated secret")
+    elif normalized_secret:
+        _jwt_auth_cached_state = "disabled_invalid_secret"
+        _jwt_auth = None
+        logger.error("JWT authentication disabled due to invalid JWT_SECRET")
+    else:
+        _jwt_auth_cached_state = "disabled_no_secret"
+        _jwt_auth = None
+        logger.info("JWT authentication disabled (no JWT_SECRET provided)")
 
     return _jwt_auth
 
