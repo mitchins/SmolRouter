@@ -142,7 +142,7 @@ class OllamaProvider(BaseModelProvider):
                 logger.info(f"Discovered {len(models)} models from Ollama provider {self.get_provider_id()}")
                 return models
 
-        except httpx.HTTPStatusError as e:
+        except httpx.HTTPStatusError:
             logger.exception("HTTP error discovering Ollama models")
             return []
         except Exception:

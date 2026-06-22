@@ -1143,13 +1143,13 @@ async def _safe_increment_usage(
         _circuit_breaker.record_success()
         return result
 
-    except (ConnectionError, TimeoutError) as e:
+    except (ConnectionError, TimeoutError):
         # Record failure and re-raise - this is a critical error
         _circuit_breaker.record_failure()
         logger.exception("Redis quota increment FAILED")
         raise
 
-    except Exception as e:
+    except Exception:
         # Unexpected errors - log and re-raise
         logger.exception("Unexpected Redis error during quota increment")
         raise
