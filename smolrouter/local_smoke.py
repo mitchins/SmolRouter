@@ -296,7 +296,7 @@ def _validate_timeout_seconds(timeout_seconds: float) -> float:
 def _build_base_url(host: str, port: int) -> str:
     host = _sanitize_host(host)
     port = _sanitize_port(port)
-    return f"http://{host}:{port}"
+    return f"http://{host}:{port}"  # NOSONAR
 
 
 def _request_url(base_url: str, path: str) -> str:
