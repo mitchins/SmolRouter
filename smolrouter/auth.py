@@ -58,6 +58,7 @@ class JWTAuth:
 
 # Global auth instance
 _jwt_auth: Optional[JWTAuth] = None
+_jwt_auth_initialized = False
 
 
 def _validate_jwt_secret(secret: str) -> bool:
@@ -103,18 +104,21 @@ def _validate_jwt_secret(secret: str) -> bool:
 
 def get_jwt_auth() -> Optional[JWTAuth]:
     """Get JWT auth instance if enabled"""
-    global _jwt_auth
+    global _jwt_auth, _jwt_auth_initialized
 
-    if _jwt_auth is None:
-        jwt_secret = os.getenv("JWT_SECRET")
-        if jwt_secret and _validate_jwt_secret(jwt_secret):
-            _jwt_auth = JWTAuth(jwt_secret.strip())
-            logger.info("JWT authentication enabled with validated secret")
-        elif jwt_secret:
-            logger.error("JWT authentication disabled due to invalid JWT_SECRET")
-            _jwt_auth = None
-        else:
-            logger.info("JWT authentication disabled (no JWT_SECRET provided)")
+    if _jwt_auth_initialized:
+        return _jwt_auth
+
+    _jwt_auth_initialized = True
+    jwt_secret = os.getenv("JWT_SECRET")
+    if jwt_secret and _validate_jwt_secret(jwt_secret):
+        _jwt_auth = JWTAuth(jwt_secret.strip())
+        logger.info("JWT authentication enabled with validated secret")
+    elif jwt_secret:
+        logger.error("JWT authentication disabled due to invalid JWT_SECRET")
+        _jwt_auth = None
+    else:
+        logger.info("JWT authentication disabled (no JWT_SECRET provided)")
 
     return _jwt_auth
 

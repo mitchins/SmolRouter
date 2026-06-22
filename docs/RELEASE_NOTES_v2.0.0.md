@@ -13,7 +13,7 @@ SmolRouter 2.0.0 focuses on turning the project into a production-ready AI gatew
 
 - `MODEL_MAP` behaves exactly as it did in 1.x (exact keys or regex patterns). Existing remapping files continue to work.
 - OpenAI-compatible paths (`/v1/chat/completions`, `/v1/completions`) and Ollama endpoints remain unchanged.
-- Default environment values are identical to 1.x. The only additions are new optional knobs for quotas and blob storage sizing.
+- Added `LOG_LEVEL` (default `INFO`) for global log verbosity control alongside existing environment defaults; request visibility now defaults to concise INFO request lifecycle lines while richer routing/provider details are moved to DEBUG.
 
 ## Dependency updates
 

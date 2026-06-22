@@ -87,8 +87,20 @@ def configure_error_file_logging() -> None:
 
 
 # Basic logging setup
-logging.basicConfig(level=logging.INFO)
-configure_error_file_logging()
+def configure_logging() -> None:
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging_level = getattr(logging, log_level, logging.INFO)
+    if not isinstance(logging_level, int):
+        logging_level = logging.INFO
+
+    logging.basicConfig(level=logging_level)
+    for noisy_logger in ("httpx", "google_genai.models", "uvicorn.access"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
+    configure_error_file_logging()
+
+
+configure_logging()
 logger = logging.getLogger("model-rerouter")
 
 
@@ -864,7 +876,7 @@ async def start_request_log(
         request.state.request_log_entry = log_entry
 
         # Log request start with traceability info (reduced verbosity)
-        logger.debug(
+        logger.info(
             f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "
             f"(user: {auth_user or 'anonymous'}, model: {original_model})"
         )
@@ -1089,7 +1101,7 @@ def complete_request_log(
         log_entry.save()
 
         request_id = _broadcast_request_completion(log_entry)
-        logger.debug(
+        logger.info(
             f"[{request_id}] Request completed: {duration_ms}ms, {status_code} status, "
             f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}"
         )

@@ -752,7 +752,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         if config_to_use and config_to_use.to_httpx_proxy():
             proxy_url = config_to_use.to_httpx_proxy()
-            logger.info(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
+            logger.debug(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
 
             # Create base transports with proxy
             base_sync_transport = httpx.HTTPTransport(proxy=proxy_url)
@@ -1004,7 +1004,7 @@ class GoogleGenAIProvider(IModelProvider):
                 token_count=tokens,
             )
             quota.mark_request_success(tokens=tokens)
-            logger.info(
+            logger.debug(
                 "API key %s successful request for %s: %s/%s RPD, %s tokens",
                 redact_secret(api_key),
                 model_name,
@@ -1543,7 +1543,7 @@ class GoogleGenAIProvider(IModelProvider):
         )
 
         key_position_str = f" key #{context.api_key_index}/{context.api_key_total}" if context.api_key_index else ""
-        logger.info(
+        logger.debug(
             f"🚀 Outbound request: model={context.model_name}, api_key={context.api_key_suffix}{key_position_str}, "
             f"proxy={context.proxy_info or 'direct'}{context.pool_info} [obs={context.observation_id}]"
         )
@@ -1644,7 +1644,7 @@ class GoogleGenAIProvider(IModelProvider):
             elif not context.proxy_info:
                 proxy_verified = True
 
-            logger.info(
+            logger.debug(
                 f"✅ GROUND TRUTH: key=...{actual_key_suffix} (verified={key_verified}), proxy={actual_proxy or 'NONE'} (verified={proxy_verified})"
             )
         else:
