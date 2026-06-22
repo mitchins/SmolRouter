@@ -7,6 +7,7 @@ clients can see and access based on IP address, authentication, or other criteri
 
 import re
 import logging
+import fnmatch
 from typing import List, Dict, Any, Optional
 
 from .interfaces import IAccessControl, ModelInfo, ClientContext
@@ -259,49 +260,43 @@ class AuthBasedAccessControl(IAccessControl):
         if allow_all:
             return True
 
-        if not patterns:
-            return False
-
-        model_identifiers = [model.id, model.name, model.display_name] + model.aliases
-
-        for pattern in patterns:
-            if pattern.startswith("/") and pattern.endswith("/"):
-                # Regex pattern
-                regex = re.compile(pattern[1:-1])
-                for identifier in model_identifiers:
-                    if regex.match(identifier):
-                        return True
-            else:
-                # Wildcard match
-                import fnmatch
-
-                for identifier in model_identifiers:
-                    if fnmatch.fnmatch(identifier, pattern):
-                        return True
-
-        return False
+        return self._matches_any_pattern(model, patterns)
 
     def _is_model_denied_by_patterns(self, model: ModelInfo, patterns: List[str]) -> bool:
         """Check if model is denied by patterns"""
+        return self._matches_any_pattern(model, patterns)
+
+    def _matches_any_pattern(self, model: ModelInfo, patterns: List[str]) -> bool:
+        """Check if any pattern matches any model identifier"""
         if not patterns:
             return False
 
         model_identifiers = [model.id, model.name, model.display_name] + model.aliases
 
         for pattern in patterns:
-            if pattern.startswith("/") and pattern.endswith("/"):
-                # Regex pattern
-                regex = re.compile(pattern[1:-1])
-                for identifier in model_identifiers:
-                    if regex.match(identifier):
-                        return True
-            else:
-                # Wildcard match
-                import fnmatch
+            if self._matches_pattern(pattern, model_identifiers):
+                return True
 
-                for identifier in model_identifiers:
-                    if fnmatch.fnmatch(identifier, pattern):
-                        return True
+        return False
+
+    def _matches_pattern(self, pattern: str, identifiers: List[str]) -> bool:
+        """Check if a single pattern matches any identifier"""
+        is_regex = pattern.startswith("/") and pattern.endswith("/")
+        if is_regex:
+            try:
+                regex = re.compile(pattern[1:-1])
+            except re.error:
+                logger.warning("Invalid regex pattern: %s", pattern)
+                return False
+            for identifier in identifiers:
+                if regex.match(identifier):
+                    return True
+
+            return False
+
+        for identifier in identifiers:
+            if fnmatch.fnmatch(identifier, pattern):
+                return True
 
         return False
 

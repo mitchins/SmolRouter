@@ -438,8 +438,8 @@ async def record_exception_event(
                 "",
             )
             return await get_exception_signature_detail(signature)
-        except Exception as e:
-            logger.warning("Failed atomic exception aggregation for %s: %s", signature, e)
+        except Exception:
+            logger.exception("Failed atomic exception aggregation for %s", signature)
             signature_data = await _record_exception_event_non_atomic(
                 event_id=event_id,
                 now=now,
@@ -776,23 +776,21 @@ class RequestLogEntry:
             blob_storage = get_blob_storage()
             try:
                 request_body_key = await self._store_request_body_if_needed(blob_storage)
-            except Exception as e:
-                logger.warning(f"Request body storage failed for request {self.request_id}: {e}")
+            except Exception:
+                logger.exception("Request body storage failed for request %s", self.request_id)
 
             try:
                 response_body_key = await self._store_response_body_if_present(blob_storage)
-            except Exception as e:
-                logger.warning(f"Response body storage failed for request {self.request_id}: {e}")
+            except Exception:
+                logger.exception("Response body storage failed for request %s", self.request_id)
 
             await RedisRequestLog.update_body_keys(
                 request_id=self.request_id,
                 request_body_key=request_body_key,
                 response_body_key=response_body_key,
             )
-        except Exception as e:
-            logger.warning(
-                f"Body storage failed for request {self.request_id} after completion persisted: {e}"
-            )
+        except Exception:
+            logger.exception("Body storage failed for request %s after completion persisted", self.request_id)
 
     def _schedule_body_archival(self) -> None:
         if self._body_archival_scheduled or not self._needs_body_archival():
@@ -851,8 +849,8 @@ class RequestLogEntry:
         # No event loop running - run synchronously (tests/CLI)
         try:
             asyncio.run(self._run_completion_update(run_archival_inline=True))
-        except Exception as e:
-            logger.error(f"Failed to run async store/update: {e}")
+        except Exception:
+            logger.exception("Failed to run async store/update")
 
     def save(self):
         """Update Redis with completion data when request is finished"""
@@ -1112,8 +1110,8 @@ async def cleanup_old_logs_async(max_age_days: int | None = None) -> int:
         deleted += error_deleted
         await _cleanup_orphaned_error_signatures(client, signatures_touched)
         return deleted
-    except Exception as e:
-        logger.error(f"Error during cleanup_old_logs_async: {e}")
+    except Exception:
+        logger.exception("Error during cleanup_old_logs_async")
         return 0
 
 
@@ -1226,9 +1224,10 @@ async def background_cleanup_task():
         except asyncio.CancelledError:
             logger.info("Background cleanup task cancelled")
             raise
-        except Exception as e:
-            logger.error(f"Error in background cleanup: {e}")
+        except Exception:
+            logger.exception("Error in background cleanup")
             # Continue running despite errors
+            continue
 
 
 def start_background_cleanup():
@@ -1305,8 +1304,8 @@ async def get_log_stats():
             "exception_signatures": error_summary.get("signature_count", 0),
             "exceptions_total": error_summary.get("total_exceptions", 0),
         }
-    except Exception as e:
-        logger.error(f"Error getting log stats: {e}")
+    except Exception:
+        logger.exception("Error getting log stats")
         return {"total_requests": 0, "completed_requests": 0, "pending_requests": 0, "service_types": {}}
 
 
@@ -1330,8 +1329,8 @@ async def get_inflight_requests(recent_logs=None):
             and getattr(log, "timestamp", datetime.now()) >= cutoff_time
         ]
         return inflight
-    except Exception as e:
-        logger.error(f"Error getting inflight requests: {e}")
+    except Exception:
+        logger.exception("Error getting inflight requests")
         return []
 
 

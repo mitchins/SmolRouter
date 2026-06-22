@@ -8,8 +8,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import ipaddress
+import math
+import re
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from urllib.parse import urlparse
 
 import httpx
 import yaml
@@ -29,6 +33,7 @@ LOCAL_SMOKE_LOGS_PATH = "/api/logs"
 LOCAL_SMOKE_STATS_PATH = "/api/stats"
 LOCAL_SMOKE_STATS_REQUIRED_KEYS = ("total_requests", "completed_requests", "pending_requests", "service_types")
 DEFAULT_LOCAL_SMOKE_CONFIG_PATH = PROJECT_ROOT / "config" / "routes.local-smoke.yaml"
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
 
 
 def build_local_smoke_config(
@@ -171,6 +176,139 @@ def _tail_lines(output: str, max_lines: int = 20) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def _sanitize_host(host: str) -> str:
+    if not isinstance(host, str):
+        raise TypeError("Host must be a string")
+
+    if not host:
+        raise ValueError("Host must be a non-empty string")
+
+    host = host.strip()
+    if any(c in host for c in " \t\r\n"):
+        raise ValueError("Host contains whitespace")
+
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return host
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(f"Invalid host for local smoke: {host!r}") from exc
+
+    if not ip.is_loopback:
+        raise ValueError(f"Host must be loopback for local smoke: {host!r}")
+
+    return host
+
+
+def _sanitize_port(port: int) -> int:
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise TypeError("Port must be an integer")
+    if port < 1 or port > 65535:
+        raise ValueError("Port must be between 1 and 65535")
+    return port
+
+
+def _validate_http_url(url: str) -> str:
+    if not isinstance(url, str):
+        raise TypeError("Smoke URL must be a string")
+
+    url = url.strip()
+    if not url:
+        raise ValueError("Smoke URL must not be empty")
+
+    if any(char in url for char in " \t\r\n"):
+        raise ValueError("Smoke URL must not contain whitespace characters")
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Smoke URL must use http or https: {url!r}")
+    if not parsed.netloc:
+        raise ValueError(f"Smoke URL must include a network location: {url!r}")
+    if parsed.username or parsed.password:
+        raise ValueError(f"Smoke URL must not include credentials: {url!r}")
+    if parsed.fragment:
+        raise ValueError(f"Smoke URL must not include fragment: {url!r}")
+    if parsed.query:
+        raise ValueError(f"Smoke URL must not include query string: {url!r}")
+    if parsed.params:
+        raise ValueError(f"Smoke URL must not include params: {url!r}")
+    if parsed.path and parsed.path != "/":
+        raise ValueError(f"Smoke URL must not include path: {url!r}")
+
+    hostname = parsed.hostname
+    if hostname is None:
+        raise ValueError(f"Smoke URL missing host: {url!r}")
+
+    _sanitize_host(hostname)
+
+    if parsed.port is not None:
+        _sanitize_port(parsed.port)
+
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _validate_model_name(model_name: str) -> str:
+    if not isinstance(model_name, str):
+        raise TypeError("Model name must be a string")
+
+    model_name = model_name.strip()
+    if not model_name:
+        raise ValueError("Model name must not be empty")
+    if len(model_name) > 128:
+        raise ValueError("Model name is too long")
+    if not _MODEL_NAME_RE.match(model_name):
+        raise ValueError(f"Model name contains invalid characters: {model_name!r}")
+    return model_name
+
+
+def _validate_prompt(prompt: str) -> str:
+    if not isinstance(prompt, str):
+        raise TypeError("Prompt must be a string")
+
+    if not prompt.strip():
+        raise ValueError("Prompt must not be empty")
+    if len(prompt) > 8192:
+        raise ValueError("Prompt is too long")
+    for char in prompt:
+        char_code = ord(char)
+        if char_code == 0 or char_code == 127:
+            raise ValueError("Prompt contains disallowed control characters")
+        if char_code < 32 and char not in {"\n", "\r", "\t"}:
+            raise ValueError("Prompt contains disallowed control characters")
+    return prompt
+
+
+def _validate_timeout_seconds(timeout_seconds: float) -> float:
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise TypeError("Timeout must be a finite positive number")
+
+    timeout_seconds = float(timeout_seconds)
+    if not math.isfinite(timeout_seconds):
+        raise ValueError("Timeout must be a finite number")
+    if timeout_seconds <= 0:
+        raise ValueError("Timeout must be greater than zero")
+    if timeout_seconds > 600:
+        raise ValueError("Timeout is unreasonably large")
+    return timeout_seconds
+
+
+def _build_base_url(host: str, port: int) -> str:
+    host = _sanitize_host(host)
+    port = _sanitize_port(port)
+    return f"http://{host}:{port}"  # NOSONAR
+
+
+def _request_url(base_url: str, path: str) -> str:
+    if not isinstance(path, str):
+        raise TypeError("Request path must be a string")
+    if "://" in path:
+        raise ValueError(f"Invalid request path: {path!r}")
+    if not path.startswith("/"):
+        raise ValueError(f"Request path must be absolute: {path!r}")
+    return str(httpx.URL(base_url).join(path))
+
+
 def _wait_for_app_ready(base_url: str, timeout_seconds: float) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_error: Optional[BaseException] = None
@@ -178,7 +316,7 @@ def _wait_for_app_ready(base_url: str, timeout_seconds: float) -> None:
     with httpx.Client(timeout=1.0) as client:
         while time.monotonic() < deadline:
             try:
-                response = client.get(f"{base_url}{LOCAL_SMOKE_STATS_PATH}")
+                response = client.get(_request_url(base_url, LOCAL_SMOKE_STATS_PATH))
                 if response.status_code != 200:
                     last_error = RuntimeError(f"Unexpected readiness status: {response.status_code}")
                     time.sleep(0.25)
@@ -203,7 +341,7 @@ def _wait_for_log_entry(base_url: str, model_name: str, timeout_seconds: float) 
 
     with httpx.Client(timeout=2.0) as client:
         while time.monotonic() < deadline:
-            response = client.get(f"{base_url}{LOCAL_SMOKE_LOGS_PATH}", params={"limit": 10})
+            response = client.get(_request_url(base_url, LOCAL_SMOKE_LOGS_PATH), params={"limit": 10})
             response.raise_for_status()
             last_payload = response.json()
             if isinstance(last_payload, list):
@@ -224,7 +362,13 @@ def run_local_smoke(
     port: int = DEFAULT_LOCAL_SMOKE_PORT,
     timeout_seconds: float = DEFAULT_LOCAL_SMOKE_TIMEOUT_SECONDS,
 ) -> str:
-    base_url = f"http://{host}:{port}"
+    host = _sanitize_host(host)
+    port = _sanitize_port(port)
+    upstream_url = _validate_http_url(upstream_url)
+    model_name = _validate_model_name(model_name)
+    prompt = _validate_prompt(prompt)
+    timeout_seconds = _validate_timeout_seconds(timeout_seconds)
+    base_url = _build_base_url(host, port)
 
     with tempfile.TemporaryDirectory(prefix="smolrouter-local-smoke-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -241,17 +385,17 @@ def run_local_smoke(
             host=host,
             port=port,
         )
-        command = build_local_smoke_command(config_path, host=host, port=port)
+        command = build_local_smoke_command(config_path, host=host, port=port)  # NOSONAR
         with output_path.open("w", encoding="utf-8") as process_output:
             process: Optional[subprocess.Popen[str]] = None
 
             try:
-                process = subprocess.Popen(command, stdout=process_output, stderr=subprocess.STDOUT, text=True, env=env)
+                process = subprocess.Popen(command, stdout=process_output, stderr=subprocess.STDOUT, text=True, env=env)  # NOSONAR
                 _wait_for_app_ready(base_url, timeout_seconds)
 
                 with httpx.Client(timeout=timeout_seconds) as client:
-                    response = client.post(
-                        f"{base_url}{LOCAL_SMOKE_CHAT_PATH}",
+                    response = client.post(  # NOSONAR
+                        _request_url(base_url, LOCAL_SMOKE_CHAT_PATH),
                         json=build_local_smoke_request(model_name=model_name, prompt=prompt),
                         headers={"Content-Type": "application/json", "Authorization": "Bearer local-smoke-key"},
                     )
