@@ -218,8 +218,8 @@ class FilesystemBlobStorage(BlobStorage):
                     data = f.read()
                 logger.debug(f"Retrieved blob {key} ({len(data)} bytes)")
                 return data
-        except Exception as e:
-            logger.error(f"Failed to retrieve blob {key}: {e}")
+        except Exception:
+            logger.exception("Failed to retrieve blob %s", key)
 
         return None
 
@@ -238,8 +238,8 @@ class FilesystemBlobStorage(BlobStorage):
             return True
         except FileNotFoundError:
             return False
-        except Exception as e:
-            logger.error(f"Failed to delete blob {key}: {e}")
+        except Exception:
+            logger.exception("Failed to delete blob %s", key)
 
         return False
 
@@ -258,8 +258,8 @@ class FilesystemBlobStorage(BlobStorage):
             return blob_stats.st_size
         except FileNotFoundError:
             return 0
-        except Exception as e:
-            logger.error(f"Failed to delete old blob {blob_file}: {e}")
+        except Exception:
+            logger.exception("Failed to delete old blob %s", blob_file)
             return 0
 
     def _cleanup_empty_subdirectories(self) -> None:
@@ -292,8 +292,8 @@ class FilesystemBlobStorage(BlobStorage):
                 self._adjust_usage_bytes(-deleted_bytes)
                 logger.info(f"Cleaned up {deleted_count} old blob files")
 
-        except Exception as e:
-            logger.error(f"Failed to cleanup old blobs: {e}")
+        except Exception:
+            logger.exception("Failed to cleanup old blobs")
 
         return deleted_count
 
@@ -303,8 +303,8 @@ class FilesystemBlobStorage(BlobStorage):
         try:
             current_size = self._read_usage_bytes()
             return (current_size + additional_bytes) <= MAX_TOTAL_STORAGE_SIZE
-        except Exception as e:
-            logger.error(f"Failed to check storage limit: {e}")
+        except Exception:
+            logger.exception("Failed to check storage limit")
             return True  # Allow storage if we can't check
 
     def _cleanup_for_space(self, needed_bytes: int = 0):
@@ -324,8 +324,8 @@ class FilesystemBlobStorage(BlobStorage):
                     for day_dir in sorted(p for p in month_dir.iterdir() if p.is_dir()):
                         for hour_dir in sorted(p for p in day_dir.iterdir() if p.is_dir()):
                             buckets.append(hour_dir)
-        except Exception as e:
-            logger.error(f"Failed to list hour buckets: {e}")
+        except Exception:
+            logger.exception("Failed to list hour buckets")
         return buckets
 
     def _bucket_epoch(self, bucket: Path) -> int:
@@ -377,8 +377,8 @@ class FilesystemBlobStorage(BlobStorage):
                 await asyncio.to_thread(shutil.rmtree, bucket, True)
                 current_size = await asyncio.to_thread(self._adjust_usage_bytes, -bucket_size)
                 logger.info(f"Deleted bucket {bucket} (freed {bucket_size} bytes)")
-            except Exception as e:
-                logger.error(f"Failed to delete bucket {bucket}: {e}")
+        except Exception:
+            logger.exception("Failed to delete bucket %s", bucket)
         return current_size
 
     def _prune_bucket_files(self, bucket: Path, current_size: int, target: int) -> int:
@@ -407,8 +407,8 @@ class FilesystemBlobStorage(BlobStorage):
             if removed_bytes > 0:
                 current_size = self._adjust_usage_bytes(-removed_bytes)
             logger.info(f"Pruned files in {bucket} to reach target; now {current_size} bytes")
-        except Exception as e:
-            logger.error(f"Failed pruning files in {bucket}: {e}")
+        except Exception:
+            logger.exception("Failed pruning files in %s", bucket)
         return current_size
 
     async def _run_janitor_once(self):
@@ -431,8 +431,8 @@ class FilesystemBlobStorage(BlobStorage):
                 oldest = self._select_oldest_bucket(prune_candidates, buckets)
                 if oldest and oldest.exists():
                     current_size = await asyncio.to_thread(self._prune_bucket_files, oldest, current_size, target)
-        except Exception as e:
-            logger.error(f"Janitor cycle failed: {e}")
+        except Exception:
+            logger.exception("Janitor cycle failed")
 
     async def _janitor_loop(self):
         logger.info(
@@ -451,8 +451,8 @@ class FilesystemBlobStorage(BlobStorage):
         except asyncio.CancelledError:
             logger.info("Blob janitor cancelled")
             raise
-        except Exception as e:
-            logger.error(f"Blob janitor error: {e}")
+        except Exception:
+            logger.exception("Blob janitor error")
         finally:
             self._janitor_wakeup = None
             self._janitor_loop_ref = None
@@ -612,9 +612,9 @@ def init_blob_storage():
     storage = get_blob_storage()
     logger.info(f"Blob storage initialized: {type(storage).__name__}")
     # Start janitor for filesystem storage
-    if isinstance(storage, FilesystemBlobStorage):
-        try:
-            storage.start_janitor()
-        except Exception as e:
-            logger.error(f"Failed to start blob janitor: {e}")
+        if isinstance(storage, FilesystemBlobStorage):
+            try:
+                storage.start_janitor()
+        except Exception:
+            logger.exception("Failed to start blob janitor")
     return storage

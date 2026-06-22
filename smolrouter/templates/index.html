@@ -19,6 +19,18 @@
             font-size: 0.85rem;
         }
 
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
         .filter-toolbar {
             display: flex;
             align-items: center;
@@ -225,6 +237,7 @@
             <form class="filter-toolbar dashboard-filter-toolbar" id="filter-form">
                 <div class="filter-input-wrapper">
                     <span class="material-icons">filter_alt</span>
+                    <label for="dashboard-query" class="sr-only">Dashboard query filter</label>
                     <input
                         class="filter-input"
                         id="dashboard-query"

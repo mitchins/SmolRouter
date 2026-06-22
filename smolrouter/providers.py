@@ -56,8 +56,8 @@ class BaseModelProvider(IModelProvider):
                 headers = self._get_headers()
                 response = await client.get(health_url, headers=headers)
                 return response.status_code == 200
-        except Exception as e:
-            logger.debug(f"Health check failed for {self.get_provider_id()}: {e}")
+        except Exception:
+            logger.exception("Health check failed for %s", self.get_provider_id())
             return False
 
     def _get_health_check_url(self) -> str:
@@ -143,10 +143,10 @@ class OllamaProvider(BaseModelProvider):
                 return models
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error discovering Ollama models from {self.get_provider_id()}: {e}")
+            logger.exception("HTTP error discovering Ollama models")
             return []
-        except Exception as e:
-            logger.error(f"Error discovering Ollama models from {self.get_provider_id()}: {e}")
+        except Exception:
+            logger.exception("Error discovering Ollama models from %s", self.get_provider_id())
             return []
 
 class OpenAIProvider(BaseModelProvider):
@@ -267,10 +267,10 @@ class OpenAIProvider(BaseModelProvider):
             if e.response.status_code == 401:
                 logger.info("OpenAI API authentication failed, falling back to static model list")
                 return self._get_static_openai_models()
-            logger.error(f"HTTP error discovering OpenAI models from {self.get_provider_id()}: {e}")
+            logger.exception("HTTP error discovering OpenAI models from %s", self.get_provider_id())
             return self._get_static_openai_models()
-        except Exception as e:
-            logger.error(f"Error discovering OpenAI models from {self.get_provider_id()}: {e}")
+        except Exception:
+            logger.exception("Error discovering OpenAI models from %s", self.get_provider_id())
             return self._get_static_openai_models()
 
     def _get_configured_static_models(self) -> List[ModelInfo]:
@@ -328,8 +328,8 @@ class OpenAIProvider(BaseModelProvider):
             )
             return models
 
-        except Exception as e:
-            logger.error(f"Error loading static OpenAI models file: {e}, falling back to minimal set")
+        except Exception:
+            logger.exception("Error loading static OpenAI models file, falling back to minimal set")
             return self._get_fallback_models()
 
     def _get_fallback_models(self) -> List[ModelInfo]:
@@ -731,8 +731,8 @@ class ProviderFactory:
                     logger.info(f"Created provider: {config.name} ({config.type}) -> {getattr(config, 'url', 'N/A')}")
                 else:
                     logger.info(f"Skipping disabled provider: {config.name}")
-            except Exception as e:
-                logger.error(f"Failed to create provider from config {provider_config}: {e}")
+        except Exception:
+            logger.exception("Failed to create provider from config")
 
         # Sort providers by priority (lower numbers first)
         providers.sort(key=lambda p: p.config.priority)

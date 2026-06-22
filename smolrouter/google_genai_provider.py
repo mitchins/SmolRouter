@@ -197,9 +197,9 @@ class GoogleGenAIConfig(ProviderConfig):
                 )
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
-            except Exception as e:
-                logger.error(f"Failed to load API keys from {self.api_keys_file}: {e}")
-                raise
+        except Exception:
+            logger.exception("Failed to load API keys from %s", self.api_keys_file)
+            raise
 
         if not self.api_keys:
             raise ValueError("No valid API keys found")
@@ -458,8 +458,8 @@ class GoogleGenAIProvider(IModelProvider):
                 return
             try:
                 done_task.result()
-            except Exception as exc:
-                logger.debug(f"Proxy health probe failed for {self._mask_proxy_url(url)}: {exc}")
+            except Exception:
+                logger.exception("Proxy health probe failed for %s", self._mask_proxy_url(url))
 
         task = create_logged_task(
             self._probe_proxy_url(proxy_url),
@@ -486,8 +486,8 @@ class GoogleGenAIProvider(IModelProvider):
                 await asyncio.sleep(self.PROXY_HEALTH_CHECK_INTERVAL_SECONDS)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.warning(f"Proxy health monitor stopped unexpectedly for {self.config.name}: {exc}")
+        except Exception:
+            logger.exception("Proxy health monitor stopped unexpectedly for %s", self.config.name)
 
     def start_proxy_health_monitor(self):
         if not self._configured_proxy_urls():
@@ -930,8 +930,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         try:
             quota_exhausted_pacific = _to_pacific_datetime(quota.quota_exhausted_at, assume_utc=True)
-        except (ValueError, TypeError, AttributeError) as e:
-            logger.warning(f"API key {redact_secret(key)} has malformed quota_exhausted_at, allowing: {e}")
+        except (ValueError, TypeError, AttributeError):
+            logger.exception("API key %s has malformed quota_exhausted_at, allowing", redact_secret(key))
             return False
 
         exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
@@ -1014,7 +1014,9 @@ class GoogleGenAIProvider(IModelProvider):
                 tokens,
             )
         except Exception:
-            logger.exception(f"❌ CRITICAL: Failed to update quota for {redact_secret(api_key)} / {model_name}")
+            logger.exception(
+                "❌ CRITICAL: Failed to update quota for %s / %s", redact_secret(api_key), model_name
+            )
             logger.error("⚠️  Quota tracking broken - key rotation will not work correctly!")
             quota.mark_request_success(tokens=tokens)
 
@@ -1033,11 +1035,8 @@ class GoogleGenAIProvider(IModelProvider):
                 )
             except ValueError:
                 pass
-        except Exception as e:
-            logger.error(f"❌ Failed to mark API key as invalid: {e}")
-            import traceback
-
-            logger.error(traceback.format_exc())
+        except Exception:
+            logger.exception("❌ Failed to mark API key as invalid")
 
     async def _record_quota_exhaustion(
         self,
@@ -1051,8 +1050,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         try:
             await quota_backend.mark_quota_exhausted(api_key, self.config.name, model_name, error_message)
-        except Exception as e:
-            logger.error(f"Failed to persist quota exhaustion to Redis: {e}")
+        except Exception:
+            logger.exception("Failed to persist quota exhaustion to Redis")
 
         logger.error(f"🚫 API key {redact_secret(api_key)} QUOTA EXHAUSTED (429) for {model_name}: Hard marked as depleted")
 
@@ -1075,8 +1074,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         try:
             await quota_backend.mark_error(api_key, self.config.name, model_name, error_message)
-        except Exception as e:
-            logger.error(f"❌ Failed to persist error to Redis: {e}")
+        except Exception:
+            logger.exception("Failed to persist error to Redis")
 
         if status_code == 403:
             logger.warning(f"⚠️  403 error but not marked invalid - status={status_code}, error={error_message!r}")
@@ -1284,8 +1283,8 @@ class GoogleGenAIProvider(IModelProvider):
             try:
                 if await self._health_check_api_key(api_key):
                     return True
-            except Exception as e:
-                logger.debug(f"Health check failed for key {redact_secret(api_key)}: {e}")
+            except Exception:
+                logger.exception("Health check failed for key %s", redact_secret(api_key))
                 continue
         return False
 
@@ -1307,7 +1306,7 @@ class GoogleGenAIProvider(IModelProvider):
                 return models
 
             except Exception:
-                logger.exception(f"Error discovering models with API key {redact_secret(api_key)}")
+                logger.exception("Error discovering models with API key %s", redact_secret(api_key))
                 continue
 
         # All API keys failed - fall back to static model list
@@ -1348,8 +1347,8 @@ class GoogleGenAIProvider(IModelProvider):
             logger.info(f"Loaded {len(models)} static models for Google GenAI provider {self.get_provider_id()}")
             return models
 
-        except Exception as e:
-            logger.error(f"Error loading static Google GenAI models: {e}")
+        except Exception:
+            logger.exception("Error loading static Google GenAI models")
             return []
 
     def _convert_openai_to_genai_request(self, openai_request: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -1425,8 +1424,8 @@ class GoogleGenAIProvider(IModelProvider):
                     header, base64_data = image_url.split(",", 1)
                     mime_type = header.split(":")[1].split(";")[0]
                     parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
-                except Exception as e:
-                    logger.warning(f"Failed to parse data URI: {e}")
+                except Exception:
+                    logger.exception("Failed to parse data URI")
             else:
                 logger.warning(
                     f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."
@@ -1454,8 +1453,8 @@ class GoogleGenAIProvider(IModelProvider):
 
             return openai_response
 
-        except Exception as e:
-            logger.error(f"Error converting GenAI response to OpenAI format: {e}")
+        except Exception:
+            logger.exception("Error converting GenAI response to OpenAI format")
             raise
 
     def _extract_genai_text(self, genai_response: Any) -> str:

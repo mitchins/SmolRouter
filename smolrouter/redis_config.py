@@ -148,10 +148,10 @@ def create_redis_client(
         try:
             return _create_real_redis_client(redis_url), False
 
-        except Exception as e:
-            logger.error(f"Failed to create real Redis client: {e}")
+        except Exception:
+            logger.exception("Failed to create real Redis client")
             if env == "prod":
-                logger.error("Redis: Cannot fallback to FakeRedis in production")
+                logger.exception("Redis: Cannot fallback to FakeRedis in production")
                 sys.exit(1)
             # Fall through to fake Redis in dev/ci
 
@@ -213,16 +213,17 @@ async def redis_startup_check(client: Any, is_fake: bool):
 
         logger.info("✅ Redis startup check passed")
 
-    except RedisError as e:
-        logger.error(f"❌ Redis startup check failed: {e}")
+    except RedisError:
+        logger.exception("❌ Redis startup check failed")
         if _env() == "prod":
-            logger.error("Exiting due to Redis failure in production")
+            logger.exception("Exiting due to Redis failure in production")
             sys.exit(1)
         raise
 
-    except Exception as e:
-        logger.error(f"❌ Unexpected error during Redis startup check: {e}")
+    except Exception:
+        logger.exception("❌ Unexpected error during Redis startup check")
         if _env() == "prod":
+            logger.exception("Exiting due to Redis failure in production")
             sys.exit(1)
         raise
 

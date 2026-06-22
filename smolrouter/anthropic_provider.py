@@ -45,7 +45,7 @@ class AnthropicConfig(ProviderConfig):
                 self.api_keys.extend(file_keys)
                 logger.info(f"Loaded {len(file_keys)} API keys from {self.api_keys_file}")
             except Exception as e:
-                logger.error(f"Failed to load API keys from {self.api_keys_file}: {e}")
+                logger.exception("Failed to load API keys from %s", self.api_keys_file)
                 raise
 
 
@@ -111,7 +111,7 @@ class AnthropicProvider(IModelProvider):
             # Anthropic doesn't have a health endpoint, so we'll just check if the base URL is reachable
             return response.status_code in [200, 404]  # 404 is expected for /health
         except Exception as e:
-            logger.warning(f"Anthropic health check failed: {e}")
+            logger.exception("Anthropic health check failed")
             return False
 
     async def make_request(self, request_data: dict, client_headers: dict) -> dict:

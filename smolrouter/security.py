@@ -1,7 +1,7 @@
 import os
 import logging
 from enum import Enum
-from typing import Optional
+from typing import Optional, Callable
 from fastapi import Request, HTTPException, status
 
 logger = logging.getLogger("model-rerouter")
@@ -21,15 +21,7 @@ class WebUISecurityManager:
     def __init__(self):
         # Parse security policy from environment
         policy_str = os.getenv("WEBUI_SECURITY", "AUTH_WHEN_PROXIED").upper()
-
-        try:
-            self.policy = SecurityPolicy(policy_str)
-        except ValueError:
-            logger.error(
-                f"Invalid WEBUI_SECURITY value: {policy_str}. Must be one of: NONE, AUTH_WHEN_PROXIED, ALWAYS_AUTH"
-            )
-            logger.error("Falling back to AUTH_WHEN_PROXIED for security")
-            self.policy = SecurityPolicy.AUTH_WHEN_PROXIED
+        self.policy = self._resolve_policy(policy_str)
 
         # Common reverse proxy headers (as set for O(1) lookup)
         self.proxy_headers_set = {
@@ -43,45 +35,77 @@ class WebUISecurityManager:
 
         # Check if JWT is configured and valid when required (only for ALWAYS_AUTH now)
         jwt_secret = os.getenv("JWT_SECRET")
-        jwt_configured = False
-
-        if self.policy == SecurityPolicy.ALWAYS_AUTH:
-            if not jwt_secret:
-                logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
-                logger.error("WebUI will be inaccessible. Either:")
-                logger.error("  1. Set JWT_SECRET environment variable, or")
-                logger.error("  2. Set WEBUI_SECURITY=NONE (NOT recommended for production)")
-            else:
-                # Validate JWT secret strength
-                from smolrouter.auth import _validate_jwt_secret
-
-                if not _validate_jwt_secret(jwt_secret):
-                    logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
-                    logger.error("WebUI will be inaccessible due to invalid JWT_SECRET.")
-                else:
-                    jwt_configured = True
+        jwt_configured = self._is_jwt_configured(self.policy, jwt_secret)
 
         # Pre-import auth verification function to avoid circular imports during request processing
-        self._verify_request_auth = None
-        if self.policy == SecurityPolicy.ALWAYS_AUTH and jwt_configured:
-            try:
-                from smolrouter.auth import verify_request_auth
-
-                self._verify_request_auth = verify_request_auth
-                logger.debug("Pre-loaded JWT verification function")
-            except ImportError as e:
-                logger.error(f"Failed to import JWT verification: {e}")
+        self._verify_request_auth = self._load_request_auth(self.policy, jwt_configured)
 
         logger.info(f"WebUI Security Policy: {self.policy.value}")
-        if self.policy == SecurityPolicy.ALWAYS_AUTH:
+        self._log_jwt_status(self.policy, jwt_secret, jwt_configured)
+
+    @staticmethod
+    def _resolve_policy(policy_str: str) -> SecurityPolicy:
+        """Resolve policy string to enum with safe fallback."""
+        try:
+            return SecurityPolicy(policy_str)
+        except ValueError:
+            logger.exception(
+                "Invalid WEBUI_SECURITY value: %s. Must be one of: NONE, AUTH_WHEN_PROXIED, ALWAYS_AUTH",
+                policy_str,
+            )
+            logger.error("Falling back to AUTH_WHEN_PROXIED for security")
+            return SecurityPolicy.AUTH_WHEN_PROXIED
+
+    def _is_jwt_configured(self, policy: SecurityPolicy, jwt_secret: Optional[str]) -> bool:
+        """Return whether JWT authentication can be considered configured."""
+        if policy != SecurityPolicy.ALWAYS_AUTH:
+            return bool(jwt_secret)
+
+        if not jwt_secret:
+            logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
+            logger.error("WebUI will be inaccessible. Either:")
+            logger.error("  1. Set JWT_SECRET environment variable, or")
+            logger.error("  2. Set WEBUI_SECURITY=NONE (NOT recommended for production)")
+            return False
+
+        # Validate JWT secret strength
+        from smolrouter.auth import _validate_jwt_secret
+
+        if not _validate_jwt_secret(jwt_secret):
+            logger.error("WEBUI_SECURITY is set to ALWAYS_AUTH but JWT_SECRET is not configured!")
+            logger.error("WebUI will be inaccessible due to invalid JWT_SECRET.")
+            return False
+
+        return True
+
+    def _load_request_auth(self, policy: SecurityPolicy, jwt_configured: bool) -> Optional[Callable]:
+        """Load the request auth verifier when the policy requires it."""
+        if policy != SecurityPolicy.ALWAYS_AUTH or not jwt_configured:
+            return None
+
+        try:
+            from smolrouter.auth import verify_request_auth
+
+            logger.debug("Pre-loaded JWT verification function")
+            return verify_request_auth
+        except ImportError:
+            logger.exception("Failed to import JWT verification")
+            return None
+
+    def _log_jwt_status(self, policy: SecurityPolicy, jwt_secret: Optional[str], jwt_configured: bool) -> None:
+        """Log JWT status summary after resolving policy."""
+        if policy == SecurityPolicy.ALWAYS_AUTH:
             if jwt_configured:
                 logger.info("JWT authentication is configured and valid")
             else:
                 logger.warning("JWT authentication is NOT properly configured")
-        elif jwt_secret:
+            return
+
+        if jwt_secret:
             logger.info("JWT authentication is available")
-        else:
-            logger.warning("JWT authentication is NOT configured")
+            return
+
+        logger.warning("JWT authentication is NOT configured")
 
     def _is_proxied_request(self, request: Request) -> bool:
         """Case-insensitive check if request is coming through a reverse proxy.

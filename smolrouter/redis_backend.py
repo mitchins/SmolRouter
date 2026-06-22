@@ -362,8 +362,8 @@ async def _check_and_queue_duplicate_request_body(
     set_key = f"requests:by_body:{request_body_hash}"
     try:
         existing_count = await client.scard(set_key)
-    except Exception as exc:
-        logger.debug("Failed to get duplicate count for %s: %s", set_key, exc)
+    except Exception:
+        logger.exception("Failed to get duplicate count for %s", set_key)
         existing_count = 0
 
     pipe.hset(
@@ -703,8 +703,8 @@ class RedisRequestLog:
             try:
                 results = await client.eval(_GET_RECENT_LUA_SCRIPT, 1, REDIS_REQUESTS_BY_TIME_KEY, str(limit))
                 return [LogRecord(_flat_pairs_to_dict(data)) for data in results if data]
-            except Exception as exc:
-                logger.warning("Redis Lua get_recent failed; falling back to pipeline path: %s", exc)
+            except Exception:
+                logger.exception("Redis Lua get_recent failed; falling back to pipeline path")
 
         # Get recent request IDs from sorted set
         request_ids = await client.zrevrange(REDIS_REQUESTS_BY_TIME_KEY, 0, limit - 1)
@@ -843,7 +843,7 @@ class RedisApiKeyQuota:
             cls._script_initialized = True
             logger.info(f"✅ Lua script loaded successfully: {cls._script_sha}")
         except Exception as e:
-            logger.critical(f"❌ FATAL: Failed to load Lua script into Redis: {e}")
+            logger.exception("❌ FATAL: Failed to load Lua script into Redis")
             logger.critical("⚠️  Server CANNOT start without functional quota tracking")
             raise RuntimeError(f"Cannot start - Lua script loading failed: {e}") from e
 
@@ -995,9 +995,9 @@ class RedisApiKeyQuota:
                 )
             else:
                 # NO OTHER FALLBACKS - if script fails in production, CRASH LOUDLY
-                logger.critical(f"❌ FATAL: Lua script execution failed: {e}")
-                logger.critical(f"⚠️  Script SHA: {cls._script_sha}")
-                logger.critical(f"⚠️  Quota key: {quota_key}")
+                logger.exception("❌ FATAL: Lua script execution failed")
+                logger.critical("⚠️  Script SHA: %s", cls._script_sha)
+                logger.critical("⚠️  Quota key: %s", quota_key)
                 raise RuntimeError(f"Quota tracking BROKEN - Lua script failed: {e}") from e
 
         # Get full quota data for return
@@ -1146,12 +1146,12 @@ async def _safe_increment_usage(
     except (ConnectionError, TimeoutError) as e:
         # Record failure and re-raise - this is a critical error
         _circuit_breaker.record_failure()
-        logger.error(f"Redis quota increment FAILED: {e}")
+        logger.exception("Redis quota increment FAILED")
         raise
 
     except Exception as e:
         # Unexpected errors - log and re-raise
-        logger.error(f"Unexpected Redis error during quota increment: {e}")
+        logger.exception("Unexpected Redis error during quota increment")
         raise
 
 

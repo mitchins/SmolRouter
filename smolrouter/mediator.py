@@ -339,7 +339,7 @@ class ModelMediator:
 
         except Exception as e:
             result["errors"].append(f"Validation error: {str(e)}")
-            logger.error(f"Error validating model request: {e}")
+            logger.exception("Error validating model request")
 
         return result
 
@@ -427,7 +427,7 @@ class ModelMediator:
                 self._attach_lb_instance(lb_instance, base_metadata),
             )
         except Exception as e:
-            logger.error(f"{resolved_model.provider_type} provider error: {e}")
+            logger.exception("Error handling %s provider request", resolved_model.provider_type)
             return (
                 {"error": {"type": "api_error", "message": str(e), "provider": resolved_model.provider_type}},
                 500,
@@ -451,8 +451,8 @@ class ModelMediator:
                 f"dummy:{resolved_model.provider_id}",
                 self._attach_lb_instance(lb_instance, None),
             )
-        except Exception as e:
-            logger.error(f"Dummy provider error: {e}")
+        except Exception:
+            logger.exception("Dummy provider error for %s", resolved_model.provider_id)
             return (
                 {"error": {"type": "api_error", "message": str(e), "provider": "dummy"}},
                 500,
@@ -588,7 +588,7 @@ class ModelMediator:
             raise
 
         except TimeoutError:
-            logger.error(f"Request timeout while routing model '{model}'")
+            logger.exception("Request timeout while routing model '%s'", model)
             return (
                 {"error": {"type": "timeout_error", "message": "Request timed out"}},
                 504,
@@ -596,8 +596,8 @@ class ModelMediator:
                 self._attach_lb_instance(lb_instance, None),
             )
 
-        except Exception as e:
-            logger.error(f"Error routing request: {e}")
+        except Exception:
+            logger.exception("Error routing request for model '%s'", model)
             return (
                 {"error": {"type": "internal_server_error", "message": "Request routing failed"}},
                 500,
