@@ -94,13 +94,16 @@ def configure_logging() -> None:
         logging_level = logging.INFO
 
     logging.basicConfig(level=logging_level)
+    logging.getLogger().setLevel(logging_level)
     for noisy_logger in ("httpx", "google_genai.models", "uvicorn.access"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     configure_error_file_logging()
 
 
-configure_logging()
+# Logger is intentionally initialized here but not configured at import time.
+# configure_logging() is called by the CLI entrypoint (`smolrouter/cli.py`) so
+# logging handlers/levels are installed before uvicorn configures its own logging.
 logger = logging.getLogger("model-rerouter")
 
 
@@ -877,8 +880,10 @@ async def start_request_log(
 
         # Log request start with traceability info (reduced verbosity)
         logger.info(
-            f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip} "
-            f"(user: {auth_user or 'anonymous'}, model: {original_model})"
+            f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip}"
+        )
+        logger.debug(
+            f"[{request_id}] Request details: user={auth_user or 'anonymous'}, model={original_model}, upstream={upstream_url}"
         )
 
         # Broadcast new request event (fire and forget)
@@ -1102,6 +1107,9 @@ def complete_request_log(
 
         request_id = _broadcast_request_completion(log_entry)
         logger.info(
+            f"[{request_id}] Request completed in {duration_ms}ms: {status_code} status"
+        )
+        logger.debug(
             f"[{request_id}] Request completed: {duration_ms}ms, {status_code} status, "
             f"{prompt_tokens} prompt tokens, {completion_tokens} completion tokens, upstream: {log_entry.upstream_url}"
         )
@@ -3517,4 +3525,5 @@ async def websocket_client_dashboard(websocket: WebSocket, client_ip: str):
 if __name__ == "__main__":
     import uvicorn
 
+    configure_logging()
     uvicorn.run("app:app", host=LISTEN_HOST, port=LISTEN_PORT)

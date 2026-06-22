@@ -96,7 +96,7 @@ counter so segments sort by age lexically.
 
 ### On-disk layout
 
-```
+```text
 blob_storage/
   segments/
     0000000123.seg        # bounded append-only file (e.g. 64–256 MB)

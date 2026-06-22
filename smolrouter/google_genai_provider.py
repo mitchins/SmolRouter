@@ -752,7 +752,8 @@ class GoogleGenAIProvider(IModelProvider):
 
         if config_to_use and config_to_use.to_httpx_proxy():
             proxy_url = config_to_use.to_httpx_proxy()
-            logger.debug(f"🔀 Using proxy URL for Google GenAI: {proxy_url}")
+            masked_proxy_url = self._mask_proxy_url(proxy_url) or proxy_url
+            logger.debug(f"🔀 Using proxy URL for Google GenAI: {masked_proxy_url}")
 
             # Create base transports with proxy
             base_sync_transport = httpx.HTTPTransport(proxy=proxy_url)
@@ -1542,10 +1543,11 @@ class GoogleGenAIProvider(IModelProvider):
             context.api_key, context.sync_transport, context.async_transport
         )
 
+        proxy_label = self._mask_proxy_url(context.proxy_url) if context.proxy_url else "direct"
         key_position_str = f" key #{context.api_key_index}/{context.api_key_total}" if context.api_key_index else ""
         logger.debug(
             f"🚀 Outbound request: model={context.model_name}, api_key={context.api_key_suffix}{key_position_str}, "
-            f"proxy={context.proxy_info or 'direct'}{context.pool_info} [obs={context.observation_id}]"
+            f"proxy={proxy_label}{context.pool_info} [obs={context.observation_id}]"
         )
 
         return context
@@ -1639,7 +1641,7 @@ class GoogleGenAIProvider(IModelProvider):
                 key_verified = True
 
             if observation.proxy_url:
-                actual_proxy = observation.proxy_url
+                actual_proxy = self._mask_proxy_url(observation.proxy_url) or observation.proxy_url
                 proxy_verified = True
             elif not context.proxy_info:
                 proxy_verified = True

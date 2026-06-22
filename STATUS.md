@@ -29,6 +29,9 @@
 - 🔵 Clean up BYOK and upstream auth precedence (TODO - unstarted)
     Simplify and standardize auth precedence so BYOK/passthrough behavior is obvious and consistent instead of provider-specific and surprising.
 
+- 🔵 Separate dashboard auth from request auth headers (TODO - unstarted)
+    Keep request API and model-routing auth using existing `Authorization` behavior while decoupling dashboard/session security to avoid header collisions (for example via `X-Auth-Bearer` or cookie/session-based auth). This supports the future state of API keys for LAN quota/monitoring and stronger dashboard auth without competing transport semantics.
+
 - 🔵 Fix duplicate-panel recency windowing (TODO - unstarted)
     The request detail "duplicates" list silently empties once siblings age past the global 1000-most-recent window. `get_recent_duplicate_request_ids` (`smolrouter/redis_backend.py`) intersects the body-hash set with `ZREVRANGE requests:by_time 0..max_scan-1` (max_scan=1000), so under load (thousands of requests/hour) real duplicates drop out of view even though the records and their status are intact. Not data loss — a display artifact. Fix: order/filter duplicates without capping on the global recency window (e.g. score the by-body set members directly, or raise/remove max_scan with a bounded fallback).
 

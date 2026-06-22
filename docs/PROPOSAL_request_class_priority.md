@@ -8,7 +8,7 @@ an explicit upstream **`priority`** value and injects it into the OpenAI-compati
 request body before it reaches vLLM. Background services should not have to know or
 set priority — the router owns the contract.
 
-```
+```text
 client declares intent  →  SmolRouter classifies + clamps  →  vLLM gets explicit priority
 ```
 
@@ -22,7 +22,7 @@ consistently and on purpose.
 The target deployment is **one RTX 3090 dedicated to one model** (`gpt-oss-20b`)
 served by vLLM with the priority scheduler:
 
-```
+```bash
 --scheduling-policy priority      # lower numeric priority runs earlier; arrival breaks ties
 --max-model-len 20000
 --max-num-seqs 6
@@ -53,7 +53,7 @@ part is setting it *consistently and trustworthily*, which is a router concern.
 
 ## Key insight
 
-**A router is exactly where request-class policy belongs.** SmolRouter already sits
+**A router is the ideal place for request-class policy.** SmolRouter already sits
 in front of vLLM, already resolves model aliases, already has facade-key identity
 and per-key/per-model accounting. Adding "what service class is this, and what
 priority does that map to" reuses all of that and gives a *single* enforcement
@@ -94,7 +94,7 @@ In rough precedence order (router resolves the first that applies):
 
 1. **Model alias** — the cleanest, since SmolRouter already does alias→model
    resolution. e.g.
-   ```
+   ```text
    gpt-oss-20b-human  → model openai/gpt-oss-20b, priority 0
    gpt-oss-20b        → model openai/gpt-oss-20b, priority 50
    gpt-oss-20b-batch  → model openai/gpt-oss-20b, priority 100

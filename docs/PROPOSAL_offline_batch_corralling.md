@@ -46,11 +46,11 @@ downloaded file), plus per-provider status vocabularies.
 | Provider | Endpoint(s) | Input shape | Result retrieval | Discount | Notes |
 |---|---|---|---|---|---|
 | **Anthropic** | `POST /v1/messages/batches` | **Inline** array of `{custom_id, params}` where `params` is a full Messages request (≤100k reqs / 256MB) | Stream JSONL via `batches.results(id)`; results kept **29 days** | 50% | `processing_status`: `in_progress`→`ended`/`canceling`; `request_counts.{processing,succeeded,errored,canceled,expired}`. Most finish < 1h, max 24h. Supports all Messages features incl. prompt caching, tools, vision. |
-| **OpenAI** | `POST /v1/batches` (+ Files API) | **File**: upload JSONL (`purpose="batch"`) of `{custom_id, method, url, body}`, reference `input_file_id` | Download `output_file_id` / `error_file_id` (JSONL) | 50% | `endpoint` ∈ `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/completions`; `completion_window="24h"`; status `validating`→`in_progress`→`finalizing`→`completed`/`failed`/`expired`/`cancelled`. |
+| **OpenAI** | `POST /v1/batches` (+ Files API) | **File**: upload JSONL (`purpose="batch"`) of `{custom_id, method, url, body}`, reference `input_file_id` | Download `output_file_id` / `error_file_id` (JSONL) | 50% | `endpoint` ∈ `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/completions`; `completion_window="24h"`; status `validating`→`in_progress`→`finalizing`→`completed`/`failed`/`expired`/`canceled`. |
 | **Google Gemini** | Batch Mode (GenAI SDK `batches`) | **File or inline** GenerateContent requests | Download / inline results keyed by request key | ~50% | Also Vertex AI batch prediction (GCS/BigQuery in+out) for the cloud-native path. |
 | **Azure OpenAI** | Global Batch | File (JSONL) | File | 50% | OpenAI shape with Azure deployment names. |
 | **AWS Bedrock** | Batch inference | S3 JSONL in | S3 JSONL out | ~50% | Model-arn addressed; IAM/S3 plumbing. |
-| **xAI (Grok)** | `POST /v1/batches` (+ Files API) **and** incremental `POST /v1/batches/{id}/requests` | **File or inline**: JSONL of `{custom_id, method, url, body}`, or SDK `batch.add()` (≤200MB / 50k reqs / 25MB per request) | Paginated `GET /v1/batches/{id}/results` (`limit`+`pagination_token`), **available per-item as each request completes** | Reduced (batch tier) | `custom_id`→`batch_request_id`; batch counters `num_{pending,success,error,cancelled}`, item states `pending/succeeded/failed/cancelled`; cancel via `:cancel`. Supports **multimodal** batch endpoints — `/v1/chat/completions`, `/v1/responses`, images, videos. Signed image/video result URLs expire after **1h** — download promptly. |
+| **xAI (Grok)** | `POST /v1/batches` (+ Files API) **and** incremental `POST /v1/batches/{id}/requests` | **File or inline**: JSONL of `{custom_id, method, url, body}`, or SDK `batch.add()` (≤200MB / 50k reqs / 25MB per request) | Paginated `GET /v1/batches/{id}/results` (`limit`+`pagination_token`), **available per-item as each request completes** | Reduced (batch tier) | `custom_id`→`batch_request_id`; batch counters `num_{pending,success,error,canceled}`, item states `pending/succeeded/failed/canceled`; cancel via `:cancel`. Supports **multimodal** batch endpoints — `/v1/chat/completions`, `/v1/responses`, images, videos. Signed image/video result URLs expire after **1h** — download promptly. |
 | **Mistral / Together / Groq** | Batch API | File (JSONL, OpenAI-ish) | File | ~50% | Converging on the OpenAI file shape. |
 
 **The normalizable core** every one of these shares:
@@ -107,7 +107,7 @@ A normalized batch envelope. Each item is a request SmolRouter already
 understands (a `/v1/chat/completions`, `/v1/responses`, or `/v1/completions`
 body), wrapped with a `custom_id`:
 
-```
+```json
 POST /v1/batches            (facade key in Authorization)
 {
   "completion_window": "24h",
@@ -141,7 +141,7 @@ downstream batches (one per provider) and re-aggregate results under the origina
 
 ### 3.3 Internal architecture
 
-```
+```text
 client ──facade key──▶ /v1/batches
                           │
                           ▼
@@ -275,9 +275,9 @@ Deliberately incremental; each phase is independently useful.
 
 ## 5. Non-goals (for now)
 
-- Not a job scheduler / cron (out of scope; this is submit-and-poll).
-- Not real-time/streaming — that's the existing sync path.
-- Not embeddings-specific tooling beyond passing them through where a provider's
+- Not a job scheduler or cron (out of scope; this is submit-and-poll).
+- Real-time/streaming is out of scope; that's the existing sync path.
+- Embeddings-specific tooling is out of scope beyond passing them through where a provider's
   batch endpoint supports the endpoint type.
 - No new auth model — batch uses the **existing facade-key identity** for
   attribution and policy; provider security semantics stay server-side.
@@ -297,4 +297,3 @@ Deliberately incremental; each phase is independently useful.
    and a webhook/notification at the same time?
 5. **Pricing source of truth:** hand-maintained table vs. pulling from a provider
    pricing feed; how to handle unpriced/new models beyond "tokens only".
-```

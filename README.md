@@ -82,7 +82,6 @@ Use SmolRouter when you need to:
 | --- | --- | --- |
 | `STRIP_THINKING` | `false` | Remove `<think>...</think>` blocks before returning responses |
 | `STRIP_JSON_MARKDOWN` | `false` | Convert fenced JSON markdown into raw JSON payloads |
-| `LOG_LEVEL` | `INFO` | Global logging verbosity (`DEBUG`, `INFO`, `WARNING`, etc.). Set to `DEBUG` to see routing/proxy/ground-truth diagnostic logs. |
 | `DISABLE_THINKING` | `false` | Append `/no_think` hints to prompts for providers that respect it |
 | `MAX_LOG_AGE_DAYS` | `7` | Retention window for automatic log cleanup |
 | `BLOB_STORAGE_TYPE` | `filesystem` | Storage backend for request/response bodies (`filesystem` or `memory`) |

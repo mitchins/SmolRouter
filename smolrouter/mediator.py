@@ -203,7 +203,7 @@ class ModelMediator:
             logger.warning(f"Access denied to resolved model '{resolved_model.id}' for client {client.ip}")
             return None
 
-        logger.info(f"Resolved '{requested_model}' -> '{resolved_model.id}' for client {client.ip}")
+        logger.debug(f"Resolved '{requested_model}' -> '{resolved_model.id}' for client {client.ip}")
         return resolved_model
 
     async def get_model_by_id(self, model_id: str, client: ClientContext) -> Optional[ModelInfo]:
