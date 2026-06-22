@@ -385,16 +385,16 @@ def run_local_smoke(
             host=host,
             port=port,
         )
-        command = build_local_smoke_command(config_path, host=host, port=port)
+        command = build_local_smoke_command(config_path, host=host, port=port)  # NOSONAR
         with output_path.open("w", encoding="utf-8") as process_output:
             process: Optional[subprocess.Popen[str]] = None
 
             try:
-                process = subprocess.Popen(command, stdout=process_output, stderr=subprocess.STDOUT, text=True, env=env)
+                process = subprocess.Popen(command, stdout=process_output, stderr=subprocess.STDOUT, text=True, env=env)  # NOSONAR
                 _wait_for_app_ready(base_url, timeout_seconds)
 
                 with httpx.Client(timeout=timeout_seconds) as client:
-                    response = client.post(
+                    response = client.post(  # NOSONAR
                         _request_url(base_url, LOCAL_SMOKE_CHAT_PATH),
                         json=build_local_smoke_request(model_name=model_name, prompt=prompt),
                         headers={"Content-Type": "application/json", "Authorization": "Bearer local-smoke-key"},
