@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 import httpx
 from contextlib import asynccontextmanager
 
+from smolrouter import __version__
+
 # Import database functionality
 from smolrouter.database import (
     RequestLog,
@@ -3079,7 +3081,7 @@ async def system_dashboard(request: Request):
 
         # Environment information
         env_info = {
-            "version": "SmolRouter v1.0.0",
+            "version": f"SmolRouter v{__version__}",
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "platform": platform.system(),
             "host": LISTEN_HOST,
