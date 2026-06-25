@@ -216,10 +216,18 @@ async def test_middleware_allows_api_when_auth_disabled():
 
 
 @pytest.mark.asyncio
-async def test_middleware_blocks_api_without_token(monkeypatch):
+async def test_middleware_allows_openai_write_routes_without_jwt(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
     mw = _build_middleware()
-    response = await mw.dispatch(_MiddlewareRequest("/v1/chat/completions"), _call_next_sentinel)
+    result = await mw.dispatch(_MiddlewareRequest("/v1/chat/completions"), _call_next_sentinel)
+    assert result == "passed-through"
+
+
+@pytest.mark.asyncio
+async def test_middleware_blocks_other_api_without_token(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    mw = _build_middleware()
+    response = await mw.dispatch(_MiddlewareRequest("/api/stats-protected"), _call_next_sentinel)
     # Returns a JSONResponse (not the sentinel) with 401
     assert response.status_code == 401
 

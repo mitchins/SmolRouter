@@ -20,6 +20,7 @@ from .redis_backend import (
     RequestLog as RedisRequestLog,
     ApiKeyQuota as RedisApiKeyQuota,
     INFLIGHT_SET_KEY,
+    REDIS_REQUEST_IDENTITY_KEY_PREFIX,
     init_redis_db,
     close_redis_db,
     get_redis_stats,
@@ -693,6 +694,9 @@ class RequestLogEntry:
         self.total_tokens = None
         self.completed_at = kwargs.get("completed_at")
         self.auth_user = kwargs.get("auth_user")
+        self.identity_kind = kwargs.get("identity_kind")
+        self.identity_subject_id = kwargs.get("identity_subject_id")
+        self.identity_display_name = kwargs.get("identity_display_name")
         self.request_body_key = None
         self.response_body_key = None
         self.api_key_suffix = kwargs.get("api_key_suffix")  # pragma: allowlist secret
@@ -898,6 +902,9 @@ class RequestLog:
             "request_id": "request_id",
             "user_agent": "user_agent",
             "auth_user": "auth_user",
+            "identity_kind": "identity_kind",
+            "identity_subject_id": "identity_subject_id",
+            "identity_display_name": "identity_display_name",
             "request_size": "request_size",
             "request_body_hash": "request_body_hash",
             # Optional completion/test fields
@@ -931,6 +938,11 @@ class RequestLog:
     async def get_recent(limit: int = 100):
         """Get recent requests"""
         return await RedisRequestLog.get_recent(limit)
+
+    @staticmethod
+    async def get_by_identity(identity_kind: str, identity_subject_id: str, limit: int | None = None):
+        """Get requests for a specific identity ordered by recency."""
+        return await RedisRequestLog.get_by_identity(identity_kind, identity_subject_id, limit=limit)
 
     @staticmethod
     async def get_by_source_ip(source_ip: str, limit: int | None = None):
@@ -1122,8 +1134,15 @@ async def _cleanup_old_request_logs(client, cutoff_ts: float) -> int:
         key = f"request:{request_id}"
         data = await client.hgetall(key)
         source_ip = data.get("source_ip") if data else None
+        identity_kind = data.get("identity_kind") if data else None
+        identity_subject_id = data.get("identity_subject_id") if data else None
+
         if source_ip:
             await client.srem(f"requests:by_ip:{source_ip}", request_id)
+
+        if identity_kind and identity_subject_id:
+            await client.zrem(f"{REDIS_REQUEST_IDENTITY_KEY_PREFIX}:{_to_str(identity_kind)}:{_to_str(identity_subject_id)}", request_id)
+
         await client.srem(INFLIGHT_SET_KEY, request_id)
         await client.delete(key)
         await client.zrem("requests:by_time", request_id)

@@ -10,10 +10,11 @@ import inspect
 import yaml
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
@@ -46,6 +47,7 @@ from smolrouter.auth import create_auth_middleware, setup_rate_limiting, verify_
 from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
+from smolrouter.facade_keys import RequestIdentity
 from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
 from smolrouter.task_utils import create_logged_task, drain_background_tasks
 
@@ -107,6 +109,32 @@ def configure_logging() -> None:
 # configure_logging() is called by the CLI entrypoint (`smolrouter/cli.py`) so
 # logging handlers/levels are installed before uvicorn configures its own logging.
 logger = logging.getLogger("model-rerouter")
+
+FACADE_KEY_HEADER = "X-SmolRouter-Key"
+FACADE_KEY_PREFIX = "srk-"
+
+
+class FacadeKeySecurityPolicy(Enum):
+    """Policy hook for future facade-key enforcement.
+
+    Current behavior is intentionally permissive for requests that do not
+    present a SmolRouter-owned local key: they may proceed anonymously or with
+    upstream/BYOK authorization. Requests that *do* present a local-looking key
+    (`srk-...`) still fail closed if the key does not resolve.
+
+    The intended enforcement target is SmolRouter-managed wrapped access, where
+    a local facade key stands in front of embedded/router-managed downstream
+    credentials and policy. It is not a statement that every inference caller
+    must authenticate to SmolRouter before they can hit an API route at all:
+    callers supplying their own upstream/BYOK credentials may still proceed
+    without a local identity unless a stricter route policy is enabled later.
+    """
+
+    WARN_ON_MISSING_OR_NONLOCAL = "warn_on_missing_or_nonlocal"
+    REQUIRE_VALID_LOCAL_KEY = "require_valid_local_key"
+
+
+CURRENT_FACADE_KEY_SECURITY_POLICY = FacadeKeySecurityPolicy.WARN_ON_MISSING_OR_NONLOCAL
 
 
 async def _initialize_lua_scripting() -> None:
@@ -303,6 +331,7 @@ if jwt_secret:
 script_dir = os.path.dirname(os.path.abspath(__file__))
 templates_dir = os.path.join(script_dir, "templates")
 templates = Jinja2Templates(directory=templates_dir)
+templates.env.filters["pathencode"] = lambda value: quote(str(value), safe="")
 
 # Static assets (self-hosted fonts/icons) served locally so the Web UI makes
 # no external browser requests and works fully offline / on isolated LANs.
@@ -829,6 +858,7 @@ async def start_request_log(
     mapped_model: Optional[str] = None,
     auth_payload: Optional[Dict[str, Any]] = None,
     request_body: Optional[bytes] = None,
+    identity: Optional[RequestIdentity] = None,
 ):
     """Create initial log entry for inflight tracking"""
     if not ENABLE_LOGGING:
@@ -873,6 +903,9 @@ async def start_request_log(
             request_id=request_id,
             user_agent=user_agent,
             auth_user=auth_user,
+            identity_kind=identity.kind if identity else None,
+            identity_subject_id=identity.subject_id if identity else None,
+            identity_display_name=identity.display_name if identity else None,
             request_size=request_size,
             request_body_hash=request_body_hash,
         )
@@ -885,7 +918,9 @@ async def start_request_log(
             f"[{request_id}] Request started: {request.method} {request.url.path} from {source_ip}"
         )
         logger.debug(
-            f"[{request_id}] Request details: user={auth_user or 'anonymous'}, model={original_model}, upstream={upstream_url}"
+            f"[{request_id}] Request details: user={auth_user or 'anonymous'}, "
+            f"identity={identity.kind + ':' + identity.subject_id if identity else 'none'}, "
+            f"model={original_model}, upstream={upstream_url}"
         )
 
         # Broadcast new request event (fire and forget)
@@ -1140,13 +1175,14 @@ async def _parse_openai_request_payload(
     request: Request,
     start_time: float,
     auth_payload: Optional[Dict[str, Any]],
+    identity: Optional[RequestIdentity] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[bytes], Optional[JSONResponse]]:
     try:
         payload = await request.json()
         return payload, json.dumps(payload).encode("utf-8"), None
     except Exception as e:
         logger.warning(f"Failed to parse request JSON: {e}")
-        log_entry = await start_request_log(request, "openai", DEFAULT_UPSTREAM, None, None, auth_payload, None)
+        log_entry = await start_request_log(request, "openai", "pending", None, None, auth_payload, None, identity)
         complete_request_log(log_entry, start_time, {"status_code": 400, "error_message": INVALID_JSON_REQUEST_ERROR})
         return None, None, JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
@@ -1181,6 +1217,7 @@ async def _start_openai_request_log(
     mapped_model: Optional[str],
     auth_payload: Optional[Dict[str, Any]],
     request_body_bytes: Optional[bytes],
+    identity: Optional[RequestIdentity] = None,
 ):
     log_entry = await start_request_log(
         request,
@@ -1190,6 +1227,7 @@ async def _start_openai_request_log(
         mapped_model,
         auth_payload,
         request_body_bytes,
+        identity,
     )
     _update_log_entry_models(log_entry, original_model, mapped_model)
     return log_entry
@@ -1206,8 +1244,200 @@ def _apply_disable_thinking_request_marker(payload: Dict[str, Any]) -> None:
         payload["prompt"] = payload["prompt"].rstrip() + " /no_think"
 
 
-def _build_openai_forward_headers(request: Request) -> Dict[str, str]:
-    return {k: v for k, v in request.headers.items() if k.lower() in ["authorization", "openai-organization"]}
+def _build_openai_forward_headers(request: Request, *, include_authorization: bool = True) -> Dict[str, str]:
+    headers = {k: v for k, v in request.headers.items() if k.lower() in {"authorization", "openai-organization"}}
+    if include_authorization:
+        return headers
+
+    return {k: v for k, v in headers.items() if k.lower() != "authorization"}
+
+
+def _extract_bearer_token(raw_authorization: Optional[str]) -> Optional[str]:
+    if not raw_authorization:
+        return None
+
+    normalized = raw_authorization.strip()
+    if not normalized:
+        return None
+
+    if not normalized.lower().startswith("bearer "):
+        return None
+
+    token = normalized[6:].strip()
+    return token or None
+
+
+def _extract_local_facade_key_from_authorization(request: Request) -> Optional[str]:
+    token = _extract_bearer_token(request.headers.get("authorization"))
+    if token is None:
+        return None
+
+    if token.lower().startswith(FACADE_KEY_PREFIX):
+        return token
+
+    return None
+
+
+def _get_presented_facade_key(request: Request) -> Optional[str]:
+    header_value = request.headers.get(FACADE_KEY_HEADER)
+    if not header_value:
+        return None
+
+    normalized_value = header_value.strip()
+    return normalized_value or None
+
+
+def _invalid_local_facade_key_detail() -> str:
+    return "Invalid SmolRouter facade key"
+
+
+def _required_local_facade_key_detail() -> str:
+    return "SmolRouter facade key required by current policy"
+
+
+def _facade_key_error_response(status_code: int, detail: str) -> JSONResponse:
+    return JSONResponse(content={"error": "facade_key_auth_failed", "detail": detail}, status_code=status_code)
+
+
+async def _reject_openai_request(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+    status_code: int,
+    detail: str,
+    identity: Optional[RequestIdentity] = None,
+) -> JSONResponse:
+    log_entry = await start_request_log(
+        request,
+        "openai",
+        "pending",
+        None,
+        None,
+        auth_payload,
+        None,
+        identity,
+    )
+    complete_request_log(log_entry, start_time, {"status_code": status_code, "error_message": detail})
+    return _facade_key_error_response(status_code, detail)
+
+
+async def _handle_request_without_local_facade_key(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+    reason: str,
+) -> Optional[JSONResponse]:
+    # This branch is intentionally permissive today. Future enforcement here is
+    # meant to protect SmolRouter-managed wrapped credentials/policy boundaries,
+    # not to imply that every inference request must present a local facade key.
+    # Requests using caller-supplied upstream/BYOK credentials can still
+    # proceed without a local identity subject under the current policy.
+    if CURRENT_FACADE_KEY_SECURITY_POLICY == FacadeKeySecurityPolicy.WARN_ON_MISSING_OR_NONLOCAL:
+        logger.debug("Allowing request without local facade key due to current policy: %s", reason)
+        return None
+
+    return await _reject_openai_request(
+        request,
+        start_time,
+        auth_payload,
+        401,
+        _required_local_facade_key_detail(),
+    )
+
+
+def _resolve_request_identity(
+    active_container: Any,
+    request: Request,
+    presented_key: Optional[str] = None,
+) -> Optional[RequestIdentity]:
+    presented_key = presented_key or _get_presented_facade_key(request)
+    if not presented_key:
+        return None
+
+    registry = active_container.get_facade_key_registry()
+    resolved = registry.resolve_secret(presented_key)
+    if resolved is None or resolved.identity is None:
+        raise HTTPException(status_code=401, detail=_invalid_local_facade_key_detail())
+
+    request.state.request_identity = resolved.identity
+    return resolved.identity
+
+
+def _build_request_client_context(
+    active_container: Any,
+    source_ip: str,
+    headers: Dict[str, str],
+    identity: Optional[RequestIdentity] = None,
+):
+    return active_container.create_client_context(
+        ip=source_ip,
+        headers=headers,
+        identity=identity,
+    )
+
+
+def _build_project_inventory_entry(project_id: str, config: Any = None, secret_count: int = 0) -> dict[str, Any]:
+    if config is None:
+        display_name = None
+        enabled = False
+        tags: tuple[str, ...] = ()
+        default_class = None
+        quota_payload = None
+    else:
+        display_name = config.display_name
+        enabled = bool(config.enabled)
+        tags = getattr(config, "tags", ())
+        default_class = config.default_class
+        quota_policy = getattr(config, "quota", None)
+        quota_payload = quota_policy.to_dict() if quota_policy is not None else None
+
+    return {
+        "id": project_id,
+        "identity": {
+            "kind": "facade_key",
+            "subject_id": project_id,
+            "canonical": f"facade_key:{project_id}",
+            "display_name": display_name,
+        },
+        "enabled": enabled,
+        "display_name": display_name,
+        "secret_count": int(secret_count),
+        "default_class": default_class,
+        "tags": list(tags),
+        "quota": quota_payload,
+        "configured": config is not None,
+    }
+
+
+async def _get_facade_key_registry_data() -> dict[str, Any]:
+    active_container = await _get_active_container(False)
+    if active_container is None:
+        return {}
+
+    registry = active_container.get_facade_key_registry()
+
+    return {
+        key_id: {
+            "config": config,
+            "secret_count": len(registry.get_secrets(key_id)),
+        }
+        for key_id, config in registry.configs.items()
+    }
+
+
+async def _load_facade_key_inventory() -> dict[str, dict[str, Any]]:
+    registry_data = await _get_facade_key_registry_data()
+    if not registry_data:
+        return {}
+
+    return {
+        project_id: _build_project_inventory_entry(
+            project_id=project_id,
+            config=entry["config"],
+            secret_count=entry["secret_count"],
+        )
+        for project_id, entry in sorted(registry_data.items(), key=lambda item: item[0])
+    }
 
 
 def _is_legacy_proxy_mode() -> bool:
@@ -1247,15 +1477,16 @@ async def _execute_container_proxy_request(
     path: str,
     headers: Dict[str, str],
     is_streaming: bool,
+    client_context: Optional[Any] = None,
 ) -> RoutedRequestResult:
     if is_streaming:
         data, status_code, upstream_used, metadata = await active_container.route_streaming_request(
-            source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+            source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT, client_context=client_context
         )
         return RoutedRequestResult(data, status_code, upstream_used, metadata, is_streaming=True)
 
     data, status_code, upstream_used, metadata = await active_container.route_request(
-        source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT
+        source_ip, actual_model, payload, path, headers, REQUEST_TIMEOUT, client_context=client_context
     )
     return RoutedRequestResult(data, status_code, upstream_used, metadata)
 
@@ -1268,13 +1499,15 @@ async def _route_openai_request(
     headers: Dict[str, str],
     is_streaming: bool,
     legacy_proxy: bool,
+    active_container: Any = None,
+    client_context: Optional[Any] = None,
 ) -> RoutedRequestResult:
     if legacy_proxy:
         payload["model"] = _normalize_openai_model_name(model_name)
         _normalize_openai_request_payload(payload)
         return await _execute_legacy_proxy_request(path, payload, headers)
 
-    active_container = await _get_active_container(False)
+    active_container = active_container or await _get_active_container(False)
     if active_container is None:
         raise RuntimeError("Provider architecture not available")
 
@@ -1282,14 +1515,41 @@ async def _route_openai_request(
     payload["model"] = actual_model
 
     if not is_streaming:
-        return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, False)
+        return await _execute_container_proxy_request(
+            active_container,
+            source_ip,
+            actual_model,
+            payload,
+            path,
+            headers,
+            False,
+            client_context=client_context,
+        )
 
     try:
-        return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, True)
+        return await _execute_container_proxy_request(
+            active_container,
+            source_ip,
+            actual_model,
+            payload,
+            path,
+            headers,
+            True,
+            client_context=client_context,
+        )
     except Exception as e:
         logger.warning(f"Streaming not supported by provider architecture, falling back to non-streaming: {e}")
         try:
-            return await _execute_container_proxy_request(active_container, source_ip, actual_model, payload, path, headers, False)
+            return await _execute_container_proxy_request(
+                active_container,
+                source_ip,
+                actual_model,
+                payload,
+                path,
+                headers,
+                False,
+                client_context=client_context,
+            )
         except Exception as fallback_error:
             logger.exception(f"Both streaming and non-streaming failed: {fallback_error}")
             raise fallback_error
@@ -1366,19 +1626,94 @@ async def proxy_request(path: str, request: Request):
     start_time = time.time()
     source_ip = _get_request_source_ip(request)
     auth_payload = _get_request_auth_payload(request)
-    payload, request_body_bytes, error_response = await _parse_openai_request_payload(request, start_time, auth_payload)
+    legacy_proxy = _is_legacy_proxy_mode()
+    presented_facade_key = _get_presented_facade_key(request)
+    presented_bearer_token = _extract_bearer_token(request.headers.get("authorization"))
+    presented_authorization_facade_key = _extract_local_facade_key_from_authorization(request)
+    received_local_authorization = presented_authorization_facade_key is not None
+    if (
+        presented_facade_key
+        and presented_authorization_facade_key
+        and presented_facade_key != presented_authorization_facade_key
+    ):
+        return await _reject_openai_request(
+            request,
+            start_time,
+            auth_payload,
+            401,
+            "Mismatched local facade key values",
+        )
+
+    resolved_facade_key = presented_authorization_facade_key or presented_facade_key
+    headers = _build_openai_forward_headers(
+        request,
+        include_authorization=not received_local_authorization,
+    )
+
+    active_container = None
+    client_context = None
+    identity = None
+    if not resolved_facade_key:
+        missing_or_nonlocal_response = await _handle_request_without_local_facade_key(
+            request,
+            start_time,
+            auth_payload,
+            "nonlocal_bearer_token" if presented_bearer_token else "missing_local_facade_key",
+        )
+        if missing_or_nonlocal_response is not None:
+            return missing_or_nonlocal_response
+
+    if resolved_facade_key:
+        if legacy_proxy:
+            return await _reject_openai_request(
+                request,
+                start_time,
+                auth_payload,
+                503,
+                f"{FACADE_KEY_HEADER} is unavailable in legacy proxy mode",
+            )
+
+        active_container = await _get_active_container(False)
+        if active_container is None:
+            return await _reject_openai_request(
+                request,
+                start_time,
+                auth_payload,
+                503,
+                "Provider architecture unavailable for facade-key identity",
+            )
+
+        try:
+            identity = _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
+            client_context = _build_request_client_context(active_container, source_ip, headers, identity)
+        except HTTPException as exc:
+            return await _reject_openai_request(
+                request,
+                start_time,
+                auth_payload,
+                exc.status_code,
+                exc.detail,
+            )
+
+    payload, request_body_bytes, error_response = await _parse_openai_request_payload(
+        request, start_time, auth_payload, identity
+    )
     if error_response is not None:
         return error_response
     if payload is None:
         return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
     original_model, mapped_model = _apply_openai_model_mapping(payload)
-    log_entry = await _start_openai_request_log(request, original_model, mapped_model, auth_payload, request_body_bytes)
+    log_entry = await _start_openai_request_log(
+        request,
+        original_model,
+        mapped_model,
+        auth_payload,
+        request_body_bytes,
+        identity,
+    )
     _apply_disable_thinking_request_marker(payload)
-
-    headers = _build_openai_forward_headers(request)
     is_streaming = bool(payload.get("stream", False))
-    legacy_proxy = _is_legacy_proxy_mode()
     model_name = mapped_model or original_model or "unknown"
 
     # `completed` guards the single completion of the log entry. Every normal
@@ -1389,7 +1724,17 @@ async def proxy_request(path: str, request: Request):
     completed = False
     try:
         try:
-            route_result = await _route_openai_request(source_ip, model_name, payload, path, headers, is_streaming, legacy_proxy)
+            route_result = await _route_openai_request(
+                source_ip,
+                model_name,
+                payload,
+                path,
+                headers,
+                is_streaming,
+                legacy_proxy,
+                active_container=active_container,
+                client_context=client_context,
+            )
         except Exception as e:
             logger.exception(f"Provider architecture failed: {e}")
             completed = True
@@ -2038,6 +2383,104 @@ async def performance_dashboard(request: Request):
         return HTMLResponse(content="<h1>Error loading performance dashboard</h1>", status_code=500)
 
 
+def _normalize_project_limit(raw_limit: int | None) -> int:
+    if raw_limit is None:
+        return 100
+    if raw_limit <= 0:
+        return 100
+    return min(raw_limit, 500)
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def projects_page(request: Request):
+    """Read-only project inventory page."""
+    get_webui_security().check_webui_access(request)
+
+    try:
+        projects = await _load_facade_key_inventory()
+        return templates.TemplateResponse(
+            request,
+            "projects.html",
+            {
+                "projects": sorted(projects.values(), key=lambda item: item["id"]),
+                "current_page": "projects",
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Error rendering projects page: {e}")
+        return HTMLResponse(content="<h1>Error loading projects</h1>", status_code=500)
+
+
+@app.get("/projects/{project_id:path}", response_class=HTMLResponse)
+async def project_detail_page(request: Request, project_id: str):
+    """Read-only project drilldown page."""
+    get_webui_security().check_webui_access(request)
+
+    try:
+        project_id_clean = (project_id or "").strip()
+        if not project_id_clean:
+            return HTMLResponse(content="<h1>Project Not Found</h1>", status_code=404)
+
+        inventory = await _load_facade_key_inventory()
+        project = inventory.get(project_id_clean) or _build_project_inventory_entry(project_id_clean, None, 0)
+
+        logs = await RequestLog.get_by_identity("facade_key", project_id_clean, limit=100)
+        if not logs and not project["configured"]:
+            return HTMLResponse(content="<h1>Project Not Found</h1>", status_code=404)
+
+        return templates.TemplateResponse(
+            request,
+            "project_detail.html",
+            {
+                "project": project,
+                "logs": [_serialize_request_log(log) for log in logs],
+                "current_page": "projects",
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Error rendering project detail page: {e}")
+        return HTMLResponse(content="<h1>Error loading project detail</h1>", status_code=500)
+
+
+@app.get("/api/projects")
+async def api_projects(request: Request):
+    get_webui_security().check_webui_access(request)
+    try:
+        projects = await _load_facade_key_inventory()
+        items = [projects[key] for key in sorted(projects)]
+        return {
+            "projects": items,
+            "count": len(items),
+        }
+    except Exception:
+        logger.exception("Error loading project inventory")
+        raise HTTPException(status_code=500, detail="Failed to load project inventory")
+
+
+@app.get("/api/projects/{project_id:path}")
+async def api_project_detail(request: Request, project_id: str, limit: int = 100):
+    get_webui_security().check_webui_access(request)
+
+    project_id_clean = (project_id or "").strip()
+    if not project_id_clean:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_limit = _normalize_project_limit(limit)
+    inventory = await _load_facade_key_inventory()
+    project = inventory.get(project_id_clean) or _build_project_inventory_entry(project_id_clean, None, 0)
+
+    logs = await RequestLog.get_by_identity("facade_key", project_id_clean, limit=project_limit)
+    if not logs and not project["configured"]:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return {
+        "project": project,
+        "logs": [_serialize_request_log(log) for log in logs],
+        "limit": project_limit,
+        "logs_returned": len(logs),
+    }
+
+
 def _invalid_dashboard_filter_response(error: DashboardFilterError) -> JSONResponse:
     return JSONResponse(
         content={
@@ -2060,6 +2503,9 @@ REQUEST_DETAIL_RESPONSE_FIELDS = (
     "timestamp",
     "source_ip",
     "path",
+    "identity_kind",
+    "identity_subject_id",
+    "identity_display_name",
     "original_model",
     "mapped_model",
     "service_type",
@@ -2091,6 +2537,9 @@ def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
         "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else None,
         "source_ip": getattr(log_entry, "source_ip", None),
         "path": getattr(log_entry, "path", None),
+        "identity_kind": getattr(log_entry, "identity_kind", None),
+        "identity_subject_id": getattr(log_entry, "identity_subject_id", None),
+        "identity_display_name": getattr(log_entry, "identity_display_name", None),
         "service_type": getattr(log_entry, "service_type", None),
         "original_model": getattr(log_entry, "original_model", None),
         "mapped_model": getattr(log_entry, "mapped_model", None),
@@ -2118,6 +2567,36 @@ def _serialize_request_log(log_entry) -> dict[str, Any]:
         "is_duplicate": getattr(log_entry, "is_duplicate", False),
         "duplicate_count": getattr(log_entry, "duplicate_count", 0),
     }
+
+
+def _get_request_identity(log_entry: Any) -> dict[str, str | None] | None:
+    identity_kind = getattr(log_entry, "identity_kind", None)
+    identity_subject_id = getattr(log_entry, "identity_subject_id", None)
+    if not identity_subject_id:
+        return None
+
+    display_name = getattr(log_entry, "identity_display_name", None)
+    canonical = (
+        f"{identity_kind}:{identity_subject_id}" if identity_kind else str(identity_subject_id)
+    )
+    return {
+        "kind": identity_kind,
+        "subject_id": str(identity_subject_id),
+        "canonical": canonical,
+        "display_name": display_name,
+    }
+
+
+def _build_request_identity_label(log_entry: Any) -> str | None:
+    identity = _get_request_identity(log_entry)
+    if identity is None:
+        return None
+
+    canonical = identity.get("canonical") or ""
+    display_name = identity.get("display_name")
+    if display_name:
+        return f"{canonical} ({display_name})"
+    return canonical
 
 
 def _decode_log_body(body: Any) -> Optional[str]:
@@ -3160,6 +3639,7 @@ async def request_detail(request_id: str, request: Request):
             "request_detail.html",
             {
                 "log": log_entry,
+                "request_identity": _get_request_identity(log_entry),
                 "elapsed_ms": elapsed_ms,
                 "request_body_str": getattr(log_entry, "request_body", b"").decode("utf-8")
                 if getattr(log_entry, "request_body", None)

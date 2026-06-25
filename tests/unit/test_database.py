@@ -181,10 +181,18 @@ async def test_cleanup_old_logs_async_removes_stale_error_artifacts_and_orphans(
     old_request_id = "req-old"
     old_source_ip = "10.0.0.1"
 
-    await database.redis_client.hset(f"request:{old_request_id}", mapping={"source_ip": old_source_ip})
+    await database.redis_client.hset(
+        f"request:{old_request_id}",
+        mapping={
+            "source_ip": old_source_ip,
+            "identity_kind": "facade_key",
+            "identity_subject_id": "project-a",
+        },
+    )
     await database.redis_client.zadd("requests:by_time", {old_request_id: old_ts})
     await database.redis_client.sadd(f"requests:by_ip:{old_source_ip}", old_request_id)
     await database.redis_client.sadd(database.INFLIGHT_SET_KEY, old_request_id)
+    await database.redis_client.zadd("requests:by_identity:facade_key:project-a", {old_request_id: old_ts})
 
     signature = "sig-old"
     signature_key = f"{database.ERROR_SIGNATURE_KEY_PREFIX}{signature}"
@@ -233,6 +241,7 @@ async def test_cleanup_old_logs_async_removes_stale_error_artifacts_and_orphans(
     assert not await database.redis_client.exists(signature_request_ids_key)
     assert not await database.redis_client.exists(signature_events_key)
     assert not await database.redis_client.exists(f"{database.ERROR_SIGNATURE_KEY_PREFIX}{orphan_signature}")
+    assert await database.redis_client.zcard("requests:by_identity:facade_key:project-a") == 0
 
 def test_estimate_tokens_from_request_counts_chat_messages():
     request_data = {

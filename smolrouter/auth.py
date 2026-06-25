@@ -183,6 +183,11 @@ def create_auth_middleware():
                 "/api/inflight",
                 "/api/performance",
             }
+            self.inference_auth_paths = {
+                "/v1/chat/completions",
+                "/v1/completions",
+                "/v1/responses",
+            }
 
         async def dispatch(self, request: Request, call_next):
             # Skip auth for exempt paths and static files
@@ -191,6 +196,9 @@ def create_auth_middleware():
                 or request.url.path.startswith("/static/")
                 or request.url.path.startswith("/request/")
             ):
+                return await call_next(request)
+
+            if request.url.path in self.inference_auth_paths:
                 return await call_next(request)
 
             allow_error_dashboard_without_auth = os.getenv(

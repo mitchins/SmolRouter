@@ -6,10 +6,17 @@ Secrets are loaded from a YAML file with the following shape::
       - key
 
 Values may be a scalar string (treated as a single-item list) or a list.
+
+Facade keys may also be stored under an optional nested mapping::
+
+    facade_keys:
+      project-a:
+        - srk-project-a
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,7 +26,13 @@ from platformdirs import site_config_dir, user_config_dir
 
 APP = "smolrouter"
 
-_CACHED_SECRETS: Optional[Dict[str, List[str]]] = None
+@dataclass(frozen=True)
+class SecretStoreData:
+    provider_keys: Dict[str, List[str]]
+    facade_keys: Dict[str, List[str]]
+
+
+_CACHED_SECRETS: Optional[SecretStoreData] = None
 _LAST_SECRETS_PATHS: List[Path] = []
 
 
@@ -92,13 +105,60 @@ def _normalize_provider_values(values: object) -> List[str]:
     return normalized
 
 
-def load_secrets() -> Dict[str, List[str]]:
-    """Load consolidated secrets file -> provider_name->[keys]."""
+def _copy_secret_mapping(mapping: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    return {name: keys[:] for name, keys in mapping.items()}
+
+
+def _parse_facade_key_values(values: object, path: Path) -> Dict[str, List[str]]:
+    if values in (None, "", []):
+        return {}
+    if not isinstance(values, dict):
+        raise ValueError(
+            f"Facade key secrets must be a mapping of logical id -> key/list at {path}, got {type(values).__name__}"
+        )
+
+    parsed: Dict[str, List[str]] = {}
+    for facade_key_id, facade_values in values.items():
+        if facade_values not in (None, "") and not isinstance(facade_values, (str, list)):
+            raise ValueError(
+                f"Facade key secret entry '{facade_key_id}' must be a scalar string or list at {path}, "
+                f"got {type(facade_values).__name__}"
+            )
+        normalized = _normalize_provider_values(facade_values)
+        if not normalized:
+            continue
+        parsed[str(facade_key_id)] = normalized
+    return parsed
+
+
+def _parse_secrets_payload(parsed: Dict[object, object], path: Path) -> SecretStoreData:
+    provider_keys: Dict[str, List[str]] = {}
+    facade_keys: Dict[str, List[str]] = {}
+
+    for entry_name, values in parsed.items():
+        normalized_name = str(entry_name)
+        if normalized_name == "facade_keys" and isinstance(values, dict):
+            facade_keys = _parse_facade_key_values(values, path)
+            continue
+
+        normalized = _normalize_provider_values(values)
+        if not normalized:
+            continue
+        provider_keys[normalized_name] = normalized
+
+    return SecretStoreData(provider_keys=provider_keys, facade_keys=facade_keys)
+
+
+def _load_secret_store_data() -> SecretStoreData:
+    """Load and cache both provider and facade-key secret material."""
 
     global _CACHED_SECRETS
 
     if _CACHED_SECRETS is not None:
-        return {name: keys[:] for name, keys in _CACHED_SECRETS.items()}
+        return SecretStoreData(
+            provider_keys=_copy_secret_mapping(_CACHED_SECRETS.provider_keys),
+            facade_keys=_copy_secret_mapping(_CACHED_SECRETS.facade_keys),
+        )
 
     env_value = os.getenv("SMOLROUTER_SECRETS")
     path = resolve_config_file("secrets.yaml", "SMOLROUTER_SECRETS")
@@ -107,8 +167,8 @@ def load_secrets() -> Dict[str, List[str]]:
         raise FileNotFoundError(f"Secrets file not found at explicit override SMOLROUTER_SECRETS={path}")
 
     if path is None or not path.is_file():
-        _CACHED_SECRETS = {}
-        return {}
+        _CACHED_SECRETS = SecretStoreData(provider_keys={}, facade_keys={})
+        return SecretStoreData(provider_keys={}, facade_keys={})
 
     raw = path.read_text(encoding="utf-8")
     try:
@@ -117,21 +177,27 @@ def load_secrets() -> Dict[str, List[str]]:
         raise ValueError(f"Failed to parse secrets YAML at {path}: {exc}") from exc
 
     if not parsed:
-        _CACHED_SECRETS = {}
-        return {}
+        _CACHED_SECRETS = SecretStoreData(provider_keys={}, facade_keys={})
+        return SecretStoreData(provider_keys={}, facade_keys={})
 
     if not isinstance(parsed, dict):
         raise ValueError(f"Secrets file must be a mapping, got {type(parsed).__name__}: {path}")
 
-    secrets: Dict[str, List[str]] = {}
-    for provider_name, values in parsed.items():
-        normalized = _normalize_provider_values(values)
-        if not normalized:
-            continue
-        secrets[str(provider_name)] = normalized
+    _CACHED_SECRETS = _parse_secrets_payload(parsed, path)
+    return SecretStoreData(
+        provider_keys=_copy_secret_mapping(_CACHED_SECRETS.provider_keys),
+        facade_keys=_copy_secret_mapping(_CACHED_SECRETS.facade_keys),
+    )
 
-    _CACHED_SECRETS = secrets
-    return {name: keys[:] for name, keys in secrets.items()}
+
+def load_secrets() -> Dict[str, List[str]]:
+    """Load consolidated secrets file -> provider_name->[keys]."""
+    return _load_secret_store_data().provider_keys
+
+
+def load_facade_key_secrets() -> Dict[str, List[str]]:
+    """Load consolidated secrets file -> facade_key_id->[keys]."""
+    return _load_secret_store_data().facade_keys
 
 
 def reload_secrets() -> None:
@@ -142,6 +208,10 @@ def reload_secrets() -> None:
 
 def get_keys(provider_name: str) -> List[str]:
     return list((load_secrets() if provider_name else {}).get(provider_name, []))
+
+
+def get_facade_key_secrets(facade_key_id: str) -> List[str]:
+    return list((load_facade_key_secrets() if facade_key_id else {}).get(facade_key_id, []))
 
 
 def redact_secret(value: str | None) -> str:

@@ -5,12 +5,17 @@ This module defines the contracts for model providers, strategies, and access co
 following SOLID principles for clean, extensible architecture.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import ipaddress
 import socket
-from typing import List, Dict, Any, Optional, Mapping
+from typing import List, Dict, Any, Optional, Mapping, TYPE_CHECKING
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from .facade_keys import RequestIdentity
 
 
 @dataclass
@@ -57,6 +62,7 @@ class ClientContext:
     auth_payload: Optional[Dict[str, Any]] = None
     user_agent: Optional[str] = None
     headers: Optional[Dict[str, str]] = None
+    identity: Optional[RequestIdentity] = None
 
     def __post_init__(self):
         if self.headers is None:

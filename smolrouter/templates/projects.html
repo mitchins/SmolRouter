@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Projects - SmolRouter</title>
+    <link href="/static/fonts/fonts.css" rel="stylesheet">
+    <link href="/static/css/dashboard.css" rel="stylesheet">
+    <style>
+        .projects-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e0e0e0;
+            background: #fff;
+            flex-wrap: wrap;
+        }
+
+        .projects-toolbar h2 {
+            margin: 0;
+        }
+
+        .quota-value {
+            color: #555;
+            font-size: 0.9rem;
+        }
+
+        .project-identity {
+            font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+            font-size: 0.8rem;
+            color: #333;
+            margin-top: 0.3rem;
+        }
+
+        .identity-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.2rem 0.45rem;
+            border-radius: 99px;
+            border: 1px solid rgba(25, 118, 210, 0.2);
+            color: #0d47a1;
+            background: rgba(13, 71, 161, 0.06);
+            font-size: 0.74rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        }
+
+        .project-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            margin-top: 0.3rem;
+        }
+
+        .project-tag {
+            background: #eef2ff;
+            color: #334155;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            padding: 0.15rem 0.5rem;
+        }
+    </style>
+    {% include 'responsive_shell.html' %}
+</head>
+<body>
+    {% include 'navigation.html' %}
+
+    <div class="container">
+        <div class="stats">
+            <div class="stat-card">
+                <div class="number" style="color: #1976d2;" id="project-count">{{ projects|length }}</div>
+                <div class="label">Configured Projects</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" style="color: #388e3c;" id="enabled-projects">
+                    {{ projects | selectattr('enabled', 'equalto', true) | list | length }}
+                </div>
+                <div class="label">Enabled</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" style="color: #f57c00;" id="total-secrets">
+                    {{ projects | map(attribute='secret_count') | sum }}
+                </div>
+                <div class="label">Total Configured Secrets</div>
+            </div>
+            <div class="stat-card">
+                <div class="number" style="color: #6f42c1;" id="disabled-projects">{{ projects | rejectattr('enabled', 'equalto', true) | list | length }}</div>
+                <div class="label">Disabled Configs</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Facade-Key Projects</h2>
+                <div class="action-buttons">
+                    <a class="action-btn secondary" href="/">Back to Dashboard</a>
+                </div>
+            </div>
+
+            <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
+                This inventory lists configured facade-key identities only. Quota values shown here are configured policy, not live accounting or enforcement. Historical traffic for identities with no current config is reachable from request or project drilldown links, but is not listed in this inventory.
+            </div>
+
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Project</th>
+                            <th>Identity</th>
+                            <th>Tags</th>
+                            <th>Quota</th>
+                            <th>Secrets</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for project in projects %}
+                        <tr onclick="window.location.href='/projects/{{ project.id | pathencode }}'" style="cursor: pointer;">
+                            <td data-label="Project">
+                                <div><strong>{{ project.display_name or project.id }}</strong></div>
+                                <div class="project-identity">{{ project.id }}</div>
+                            </td>
+                            <td data-label="Identity">
+                                <span class="identity-badge">facade_key:{{ project.id }}</span>
+                                {% if project.display_name %}
+                                <div class="project-identity">{{ project.display_name }}</div>
+                                {% endif %}
+                            </td>
+                            <td data-label="Tags">
+                                {% if project.tags %}
+                                <div class="project-tags">
+                                    {% for tag in project.tags %}
+                                    <span class="project-tag">{{ tag }}</span>
+                                    {% endfor %}
+                                </div>
+                                {% else %}
+                                <span style="color:#999;">—</span>
+                                {% endif %}
+                            </td>
+                            <td data-label="Quota">
+                                {% if project.quota %}
+                                <div class="quota-value">Daily requests: {{ project.quota.daily_requests_soft or "—" }}</div>
+                                <div class="quota-value">Daily tokens: {{ project.quota.daily_tokens_soft or "—" }}</div>
+                                {% else %}
+                                <span style="color:#999;">default</span>
+                                {% endif %}
+                            </td>
+                            <td data-label="Secrets">{{ project.secret_count }}</td>
+                            <td data-label="Status">
+                                {% if project.configured %}
+                                    {% if project.enabled %}
+                                    <span class="identity-badge">Enabled</span>
+                                    {% else %}
+                                    <span class="identity-badge" style="border-color:#f8bbd0;color:#b91c1c;background:#fff1f2;">Disabled</span>
+                                    {% endif %}
+                                {% else %}
+                                <span class="identity-badge" style="border-color:#fde68a;color:#92400e;background:#fffbeb;">No current config</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="no-data">No projects are configured</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
