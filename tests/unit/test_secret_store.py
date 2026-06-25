@@ -112,6 +112,19 @@ def test_load_secrets_empty_file_returns_empty(monkeypatch, configured_dirs):
     assert load_secrets() == {}
 
 
+@pytest.mark.parametrize("content", ["[]", "0", "false", "---\n"])
+def test_load_secrets_rejects_non_mapping_yaml(monkeypatch, configured_dirs, content):
+    cwd, _user, _site = configured_dirs
+
+    path = cwd / "secrets.yaml"
+    path.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("SMOLROUTER_SECRETS", str(path))
+    reload_secrets()
+
+    with pytest.raises(ValueError, match="Secrets file must be a mapping"):
+        load_secrets()
+
+
 def test_provider_factory_prefers_secret_store_keys_for_google_and_openai(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(
         "smolrouter.providers.get_keys",

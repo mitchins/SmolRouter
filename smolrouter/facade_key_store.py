@@ -35,9 +35,9 @@ def resolve_facade_key_config_path(explicit_env_var: Optional[str] = None) -> Pa
 
 def _read_yaml_mapping(path: Path) -> Dict[str, object]:
     raw = path.read_text(encoding="utf-8")
-    parsed = yaml.safe_load(raw) if raw else {}
-    if not parsed:
+    if not raw.strip():
         return {}
+    parsed = yaml.safe_load(raw)
     if not isinstance(parsed, dict):
         raise ValueError(f"Facade key secrets source must be a mapping, got {type(parsed).__name__}: {path}")
     return {str(key): value for key, value in parsed.items()}
@@ -187,9 +187,10 @@ def write_facade_key_secret(
     secret: str,
     path: Path,
 ) -> bool:
-    existing = load_facade_key_secrets()
+    existing = load_facade_key_secrets_from_path(path)
     updated, added = append_facade_key_secret(project_id=project_id, secret=secret, facade_key_map=existing)
     if not added:
         return False
     save_facade_key_secrets(path=path, facade_keys=updated)
+    reload_facade_key_secrets()
     return True

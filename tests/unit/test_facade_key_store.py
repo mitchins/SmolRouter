@@ -7,9 +7,11 @@ import pytest
 from smolrouter.facade_key_store import (
     append_facade_key_secret,
     load_facade_key_secrets,
+    load_facade_key_secrets_from_path,
     resolve_facade_key_config_path,
     reload_facade_key_secrets,
     save_facade_key_secrets,
+    write_facade_key_secret,
 )
 
 
@@ -116,3 +118,32 @@ def test_save_facade_key_secrets_writes_atomic_0600(tmp_path, monkeypatch):
     reload_facade_key_secrets()
     loaded = load_facade_key_secrets()
     assert loaded == {"project-a": ["srk-1", "srk-2"]}
+
+
+@pytest.mark.parametrize("content", ["[]", "0", "false", "---\n"])
+def test_load_facade_key_store_rejects_non_mapping_yaml(monkeypatch, configured_dirs, content):
+    cwd, _user, _site = configured_dirs
+    path = cwd / "facade_keys.yaml"
+    path.write_text(content, encoding="utf-8")
+
+    monkeypatch.setenv("SMOLROUTER_FACADE_KEYS", str(path))
+    reload_facade_key_secrets()
+
+    with pytest.raises(ValueError, match="Facade key secrets source must be a mapping"):
+        load_facade_key_secrets()
+
+
+def test_write_facade_key_secret_uses_target_path_and_refreshes_cache(tmp_path, monkeypatch):
+    path = tmp_path / "facade_keys.yaml"
+    path.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("SMOLROUTER_FACADE_KEYS", str(path))
+    reload_facade_key_secrets()
+    assert load_facade_key_secrets() == {}
+
+    assert write_facade_key_secret("project-a", "srk-1", path) is True
+    assert load_facade_key_secrets() == {"project-a": ["srk-1"]}
+
+    assert write_facade_key_secret("project-a", "srk-2", path) is True
+    assert load_facade_key_secrets() == {"project-a": ["srk-1", "srk-2"]}
+    assert load_facade_key_secrets_from_path(path) == {"project-a": ["srk-1", "srk-2"]}

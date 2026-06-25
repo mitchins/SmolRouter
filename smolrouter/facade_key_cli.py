@@ -15,7 +15,6 @@ from .facade_key_store import (
     FACADE_KEY_PREFIX,
     append_facade_key_secret,
     generate_facade_key_secret,
-    load_facade_key_secrets,
     load_facade_key_secrets_from_path,
     reload_facade_key_secrets,
     resolve_facade_key_config_path,

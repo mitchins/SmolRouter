@@ -134,16 +134,19 @@ def _load_secret_store_data() -> SecretStoreData:
 
     raw = path.read_text(encoding="utf-8")
     try:
-        parsed = yaml.safe_load(raw) if raw else {}
+        if not raw.strip():
+            parsed = {}
+        else:
+            parsed = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         raise ValueError(f"Failed to parse secrets YAML at {path}: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Secrets file must be a mapping, got {type(parsed).__name__}: {path}")
 
     if not parsed:
         _CACHED_SECRETS = SecretStoreData(provider_keys={})
         return SecretStoreData(provider_keys={})
-
-    if not isinstance(parsed, dict):
-        raise ValueError(f"Secrets file must be a mapping, got {type(parsed).__name__}: {path}")
 
     _CACHED_SECRETS = _parse_secrets_payload(parsed, path)
     return SecretStoreData(provider_keys=_copy_secret_mapping(_CACHED_SECRETS.provider_keys))
