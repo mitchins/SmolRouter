@@ -765,6 +765,14 @@ class RoutedRequestResult:
     is_streaming: bool = False
 
 
+@dataclass
+class ProxyRequestContext:
+    headers: Dict[str, str]
+    active_container: Any = None
+    client_context: Optional[Any] = None
+    identity: Optional[RequestIdentity] = None
+
+
 def _extract_model_from_provider_url(model_name: str) -> str:
     """Extract the actual model name from provider URL format"""
     # For gemini-* and claude-* models, use as-is
@@ -1628,108 +1636,125 @@ def _build_request_tracking_headers(log_entry: Any) -> Dict[str, str]:
     return headers
 
 
-async def proxy_request(path: str, request: Request):
-    start_time = time.time()
-    source_ip = _get_request_source_ip(request)
-    auth_payload = _get_request_auth_payload(request)
-    legacy_proxy = _is_legacy_proxy_mode()
+def _resolve_presented_facade_identity(
+    active_container: Any,
+    request: Request,
+    presented_facade_key: Optional[str],
+    presented_authorization_facade_key: Optional[str],
+    resolved_facade_key: Optional[str],
+) -> Optional[RequestIdentity]:
+    if presented_facade_key and presented_authorization_facade_key:
+        header_identity = _resolve_request_identity(
+            active_container,
+            request,
+            presented_key=presented_facade_key,
+        )
+        authorization_identity = _resolve_request_identity(
+            active_container,
+            request,
+            presented_key=presented_authorization_facade_key,
+        )
+        if _identity_subject_key(header_identity) != _identity_subject_key(authorization_identity):
+            raise HTTPException(status_code=401, detail="Mismatched local facade key values")
+        return authorization_identity
+
+    return _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
+
+
+async def _prepare_proxy_request_context(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+    source_ip: str,
+    legacy_proxy: bool,
+) -> tuple[Optional[JSONResponse], ProxyRequestContext]:
     presented_facade_key = _get_presented_facade_key(request)
     presented_bearer_token = _extract_bearer_token(request.headers.get("authorization"))
     presented_authorization_facade_key = _extract_local_facade_key_from_authorization(request)
     received_local_authorization = presented_authorization_facade_key is not None
-
     resolved_facade_key = presented_authorization_facade_key or presented_facade_key
-    headers = _build_openai_forward_headers(
-        request,
-        include_authorization=not received_local_authorization,
+    context = ProxyRequestContext(
+        headers=_build_openai_forward_headers(
+            request,
+            include_authorization=not received_local_authorization,
+        )
     )
 
-    active_container = None
-    client_context = None
-    identity = None
     if not resolved_facade_key:
-        missing_or_nonlocal_response = await _handle_request_without_local_facade_key(
+        response = await _handle_request_without_local_facade_key(
             request,
             start_time,
             auth_payload,
             "nonlocal_bearer_token" if presented_bearer_token else "missing_local_facade_key",
         )
-        if missing_or_nonlocal_response is not None:
-            return missing_or_nonlocal_response
+        return response, context
 
-    if resolved_facade_key:
-        if legacy_proxy:
-            return await _reject_openai_request(
+    if legacy_proxy:
+        return (
+            await _reject_openai_request(
                 request,
                 start_time,
                 auth_payload,
                 503,
                 "SmolRouter facade keys are unavailable in legacy proxy mode",
-            )
+            ),
+            context,
+        )
 
-        active_container = await _get_active_container(False)
-        if active_container is None:
-            return await _reject_openai_request(
+    active_container = await _get_active_container(False)
+    if active_container is None:
+        return (
+            await _reject_openai_request(
                 request,
                 start_time,
                 auth_payload,
                 503,
                 "Provider architecture unavailable for facade-key identity",
-            )
+            ),
+            context,
+        )
 
-        try:
-            if presented_facade_key and presented_authorization_facade_key:
-                header_identity = _resolve_request_identity(
-                    active_container,
-                    request,
-                    presented_key=presented_facade_key,
-                )
-                authorization_identity = _resolve_request_identity(
-                    active_container,
-                    request,
-                    presented_key=presented_authorization_facade_key,
-                )
-                if _identity_subject_key(header_identity) != _identity_subject_key(authorization_identity):
-                    raise HTTPException(status_code=401, detail="Mismatched local facade key values")
-                identity = authorization_identity
-            else:
-                identity = _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
-            client_context = _build_request_client_context(active_container, source_ip, headers, identity)
-        except HTTPException as exc:
-            return await _reject_openai_request(
+    try:
+        identity = _resolve_presented_facade_identity(
+            active_container,
+            request,
+            presented_facade_key,
+            presented_authorization_facade_key,
+            resolved_facade_key,
+        )
+        context.active_container = active_container
+        context.identity = identity
+        context.client_context = _build_request_client_context(active_container, source_ip, context.headers, identity)
+    except HTTPException as exc:
+        return (
+            await _reject_openai_request(
                 request,
                 start_time,
                 auth_payload,
                 exc.status_code,
                 exc.detail,
-            )
+            ),
+            context,
+        )
 
-    payload, request_body_bytes, error_response = await _parse_openai_request_payload(
-        request, start_time, auth_payload, identity
-    )
-    if error_response is not None:
-        return error_response
-    if payload is None:
-        return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
+    return None, context
 
-    original_model, mapped_model = _apply_openai_model_mapping(payload)
-    log_entry = await _start_openai_request_log(
-        request,
-        original_model,
-        mapped_model,
-        auth_payload,
-        request_body_bytes,
-        identity,
-    )
-    _apply_disable_thinking_request_marker(payload)
-    is_streaming = bool(payload.get("stream", False))
-    model_name = mapped_model or original_model or "unknown"
 
-    # `completed` guards the single completion of the log entry. Every normal
-    # exit sets it True after logging; the finally finalizes anything else -
-    # most importantly a client disconnect, which raises CancelledError (a
-    # BaseException, so it slips past `except Exception`) and would otherwise
-    # leave the entry "pending" forever (the dashboard's inflight pile).
+async def _execute_openai_route_with_logging(
+    *,
+    source_ip: str,
+    model_name: str,
+    payload: Dict[str, Any],
+    path: str,
+    headers: Dict[str, str],
+    is_streaming: bool,
+    legacy_proxy: bool,
+    active_container: Any,
+    client_context: Optional[Any],
+    log_entry: Any,
+    start_time: float,
+    request_body_bytes: Optional[bytes],
+):
     completed = False
     try:
         try:
@@ -1807,6 +1832,57 @@ async def proxy_request(path: str, request: Request):
                 )
             except Exception:
                 logger.warning("Failed to finalize log for aborted request", exc_info=True)
+
+
+async def proxy_request(path: str, request: Request):
+    start_time = time.time()
+    source_ip = _get_request_source_ip(request)
+    auth_payload = _get_request_auth_payload(request)
+    legacy_proxy = _is_legacy_proxy_mode()
+    early_response, context = await _prepare_proxy_request_context(
+        request,
+        start_time,
+        auth_payload,
+        source_ip,
+        legacy_proxy,
+    )
+    if early_response is not None:
+        return early_response
+
+    payload, request_body_bytes, error_response = await _parse_openai_request_payload(
+        request, start_time, auth_payload, context.identity
+    )
+    if error_response is not None:
+        return error_response
+    if payload is None:
+        return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
+
+    original_model, mapped_model = _apply_openai_model_mapping(payload)
+    log_entry = await _start_openai_request_log(
+        request,
+        original_model,
+        mapped_model,
+        auth_payload,
+        request_body_bytes,
+        context.identity,
+    )
+    _apply_disable_thinking_request_marker(payload)
+    is_streaming = bool(payload.get("stream", False))
+    model_name = mapped_model or original_model or "unknown"
+    return await _execute_openai_route_with_logging(
+        source_ip=source_ip,
+        model_name=model_name,
+        payload=payload,
+        path=path,
+        headers=context.headers,
+        is_streaming=is_streaming,
+        legacy_proxy=legacy_proxy,
+        active_container=context.active_container,
+        client_context=context.client_context,
+        log_entry=log_entry,
+        start_time=start_time,
+        request_body_bytes=request_body_bytes,
+    )
 
 
 async def _parse_ollama_request_payload(
@@ -2150,17 +2226,32 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
                 logger.warning("Failed to finalize Ollama log for aborted request", exc_info=True)
 
 
-@app.post("/v1/chat/completions")
+OPENAI_PROXY_ROUTE_RESPONSES = {
+    400: {"description": "Invalid request payload"},
+    401: {"description": "Invalid or mismatched local facade key"},
+    503: {"description": "Routing unavailable"},
+}
+
+PROJECTS_API_RESPONSES = {
+    500: {"description": "Failed to load project inventory"},
+}
+
+PROJECT_DETAIL_API_RESPONSES = {
+    404: {"description": "Project not found"},
+}
+
+
+@app.post("/v1/chat/completions", responses=OPENAI_PROXY_ROUTE_RESPONSES)
 async def chat_completions(request: Request):
     return await proxy_request("/v1/chat/completions", request)
 
 
-@app.post("/v1/completions")
+@app.post("/v1/completions", responses=OPENAI_PROXY_ROUTE_RESPONSES)
 async def completions(request: Request):
     return await proxy_request("/v1/completions", request)
 
 
-@app.post("/v1/responses")
+@app.post("/v1/responses", responses=OPENAI_PROXY_ROUTE_RESPONSES)
 async def responses(request: Request):
     return await proxy_request("/v1/responses", request)
 
@@ -2451,7 +2542,7 @@ async def project_detail_page(request: Request, project_id: str):
         return HTMLResponse(content="<h1>Error loading project detail</h1>", status_code=500)
 
 
-@app.get("/api/projects")
+@app.get("/api/projects", responses=PROJECTS_API_RESPONSES)
 async def api_projects(request: Request):
     get_webui_security().check_webui_access(request)
     try:
@@ -2466,7 +2557,7 @@ async def api_projects(request: Request):
         raise HTTPException(status_code=500, detail="Failed to load project inventory")
 
 
-@app.get("/api/projects/{project_id:path}")
+@app.get("/api/projects/{project_id:path}", responses=PROJECT_DETAIL_API_RESPONSES)
 async def api_project_detail(request: Request, project_id: str, limit: int = 100):
     get_webui_security().check_webui_access(request)
 

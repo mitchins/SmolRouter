@@ -152,6 +152,38 @@ def _normalize_facade_key_config(key_id: str, raw_config: Any) -> FacadeKeyConfi
     )
 
 
+def _normalize_registry_key(raw_key: Any, *, field_name: str) -> str:
+    normalized_key = str(raw_key).strip()
+    if not normalized_key:
+        raise ValueError(f"Facade key {field_name} cannot be empty")
+    return normalized_key
+
+
+def _normalize_registry_configs(facade_key_configs: Optional[Mapping[str, Any]]) -> Dict[str, FacadeKeyConfig]:
+    normalized_configs: Dict[str, FacadeKeyConfig] = {}
+    for key_id, raw_config in (facade_key_configs or {}).items():
+        normalized_key_id = _normalize_registry_key(key_id, field_name="ids")
+        if normalized_key_id in normalized_configs:
+            raise ValueError(f"Duplicate facade key id after normalization: {normalized_key_id}")
+        normalized_configs[normalized_key_id] = _normalize_facade_key_config(normalized_key_id, raw_config)
+    return normalized_configs
+
+
+def _normalize_registry_secrets(
+    facade_key_secrets: Optional[Mapping[str, Iterable[str]]],
+) -> Dict[str, tuple[str, ...]]:
+    normalized_secrets: Dict[str, tuple[str, ...]] = {}
+    for key_id, raw_secrets in (facade_key_secrets or {}).items():
+        normalized_key_id = _normalize_registry_key(key_id, field_name="secret ids")
+        if normalized_key_id in normalized_secrets:
+            raise ValueError(f"Duplicate facade key secret id after normalization: {normalized_key_id}")
+
+        cleaned = tuple(candidate for secret in raw_secrets if (candidate := str(secret).strip()))
+        if cleaned:
+            normalized_secrets[normalized_key_id] = cleaned
+    return normalized_secrets
+
+
 @dataclass(frozen=True)
 class FacadeKeyRegistry:
     configs: Dict[str, FacadeKeyConfig]
@@ -200,34 +232,10 @@ class FacadeKeyRegistry:
         facade_key_configs: Optional[Mapping[str, Any]] = None,
         facade_key_secrets: Optional[Mapping[str, Iterable[str]]] = None,
     ) -> "FacadeKeyRegistry":
-        normalized_configs: Dict[str, FacadeKeyConfig] = {}
-        for key_id, raw_config in (facade_key_configs or {}).items():
-            normalized_key_id = str(key_id).strip()
-            if not normalized_key_id:
-                raise ValueError("Facade key ids cannot be empty")
-            if normalized_key_id in normalized_configs:
-                raise ValueError(f"Duplicate facade key id after normalization: {normalized_key_id}")
-            normalized_configs[normalized_key_id] = _normalize_facade_key_config(normalized_key_id, raw_config)
-
-        normalized_secrets: Dict[str, tuple[str, ...]] = {}
-        for key_id, raw_secrets in (facade_key_secrets or {}).items():
-            normalized_key_id = str(key_id).strip()
-            if not normalized_key_id:
-                raise ValueError("Facade key secret ids cannot be empty")
-            if normalized_key_id in normalized_secrets:
-                raise ValueError(
-                    f"Duplicate facade key secret id after normalization: {normalized_key_id}"
-                )
-
-            cleaned = []
-            for secret in raw_secrets:
-                candidate = str(secret).strip()
-                if candidate:
-                    cleaned.append(candidate)
-            if cleaned:
-                normalized_secrets[normalized_key_id] = tuple(cleaned)
-
-        return cls(configs=normalized_configs, secrets=normalized_secrets)
+        return cls(
+            configs=_normalize_registry_configs(facade_key_configs),
+            secrets=_normalize_registry_secrets(facade_key_secrets),
+        )
 
     def get_config(self, key_id: str) -> Optional[FacadeKeyConfig]:
         return self.configs.get(key_id)

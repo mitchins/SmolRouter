@@ -1384,6 +1384,22 @@ async def test_project_drilldown_api_uses_identity_index_and_honor_no_config_his
     assert "does not provide quota accounting or enforcement yet" in page.text
 
 
+def test_openapi_documents_proxy_and_project_api_error_responses():
+    app_module.app.openapi_schema = None
+    schema = app_module.app.openapi()
+
+    chat_responses = schema["paths"]["/v1/chat/completions"]["post"]["responses"]
+    assert chat_responses["400"]["description"] == "Invalid request payload"
+    assert chat_responses["401"]["description"] == "Invalid or mismatched local facade key"
+    assert chat_responses["503"]["description"] == "Routing unavailable"
+
+    projects_responses = schema["paths"]["/api/projects"]["get"]["responses"]
+    assert projects_responses["500"]["description"] == "Failed to load project inventory"
+
+    project_detail_responses = schema["paths"]["/api/projects/{project_id}"]["get"]["responses"]
+    assert project_detail_responses["404"]["description"] == "Project not found"
+
+
 @pytest.mark.asyncio
 async def test_project_pages_and_api_support_slash_delimited_logical_ids(async_client, disable_logging):
     project_id = "team/proj"

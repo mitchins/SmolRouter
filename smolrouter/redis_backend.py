@@ -821,6 +821,33 @@ class RedisRequestLog:
         return requests[:limit]
 
     @staticmethod
+    def _normalize_identity_query_limit(limit: int | None) -> int:
+        if limit is None:
+            return 100
+        return limit
+
+    @staticmethod
+    async def _fetch_identity_log_batch(client, request_ids: List[str]) -> tuple[list[LogRecord], list[str]]:
+        pipe = client.pipeline(transaction=False)
+        for request_id in request_ids:
+            pipe.hgetall(_request_hash_key(request_id))
+        results = await pipe.execute()
+
+        logs: list[LogRecord] = []
+        stale_request_ids: list[str] = []
+        for request_id, data in zip(request_ids, results):
+            if not data:
+                stale_request_ids.append(request_id)
+                continue
+            logs.append(LogRecord(_flat_pairs_to_dict(data)))
+
+        return logs, stale_request_ids
+
+    @staticmethod
+    def _request_log_timestamp(log: LogRecord):
+        return getattr(log.timestamp, "timestamp", lambda: 0)()
+
+    @staticmethod
     async def get_by_identity(
         identity_kind: str,
         identity_subject_id: str,
@@ -832,8 +859,7 @@ class RedisRequestLog:
         if not identity_kind or not identity_subject_id:
             return []
 
-        if limit is None:
-            limit = 100
+        limit = RedisRequestLog._normalize_identity_query_limit(limit)
         if limit <= 0:
             return []
 
@@ -847,17 +873,8 @@ class RedisRequestLog:
             if not request_ids:
                 break
 
-            pipe = client.pipeline(transaction=False)
-            for request_id in request_ids:
-                pipe.hgetall(_request_hash_key(request_id))
-            results = await pipe.execute()
-
-            stale_request_ids: list[str] = []
-            for request_id, data in zip(request_ids, results):
-                if not data:
-                    stale_request_ids.append(request_id)
-                    continue
-                logs.append(LogRecord(_flat_pairs_to_dict(data)))
+            batch_logs, stale_request_ids = await RedisRequestLog._fetch_identity_log_batch(client, request_ids)
+            logs.extend(batch_logs)
 
             if stale_request_ids:
                 await client.zrem(index_key, *stale_request_ids)
@@ -866,10 +883,7 @@ class RedisRequestLog:
                 break
             start += len(request_ids) - len(stale_request_ids)
 
-        def _request_timestamp(log: LogRecord):
-            return getattr(log.timestamp, "timestamp", lambda: 0)()
-
-        logs.sort(key=_request_timestamp, reverse=True)
+        logs.sort(key=RedisRequestLog._request_log_timestamp, reverse=True)
         return logs[:limit]
 
     @staticmethod

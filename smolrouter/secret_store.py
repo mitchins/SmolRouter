@@ -100,7 +100,7 @@ def _copy_secret_mapping(mapping: Dict[str, List[str]]) -> Dict[str, List[str]]:
     return {name: keys[:] for name, keys in mapping.items()}
 
 
-def _parse_secrets_payload(parsed: Dict[object, object], path: Path) -> SecretStoreData:
+def _parse_secrets_payload(parsed: Dict[object, object]) -> SecretStoreData:
     provider_keys: Dict[str, List[str]] = {}
     for entry_name, values in parsed.items():
         normalized_name = str(entry_name)
@@ -148,7 +148,7 @@ def _load_secret_store_data() -> SecretStoreData:
         _CACHED_SECRETS = SecretStoreData(provider_keys={})
         return SecretStoreData(provider_keys={})
 
-    _CACHED_SECRETS = _parse_secrets_payload(parsed, path)
+    _CACHED_SECRETS = _parse_secrets_payload(parsed)
     return SecretStoreData(provider_keys=_copy_secret_mapping(_CACHED_SECRETS.provider_keys))
 
 
