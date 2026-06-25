@@ -9,11 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from .secret_store import load_facade_key_secrets
+from .facade_key_store import load_facade_key_secrets
 
 
 DEFAULT_FACADE_KEY_ACTION = "observe"
 DEFAULT_FACADE_KEY_WARN_THRESHOLD = 0.8
+SUPPORTED_FACADE_KEY_ACTIONS = frozenset({"observe", "warn", "reject"})
 
 
 @dataclass(frozen=True)
@@ -103,13 +104,36 @@ def _normalize_quota_policy(value: Any, *, key_id: str) -> FacadeQuotaPolicy:
         return FacadeQuotaPolicy()
     if not isinstance(value, dict):
         raise ValueError(f"Facade key '{key_id}' field 'quota' must be a mapping")
-    action = str(value.get("action", DEFAULT_FACADE_KEY_ACTION)).strip() or DEFAULT_FACADE_KEY_ACTION
+    action = str(value.get("action", DEFAULT_FACADE_KEY_ACTION)).strip().lower() or DEFAULT_FACADE_KEY_ACTION
+    if action not in SUPPORTED_FACADE_KEY_ACTIONS:
+        supported_actions = ", ".join(sorted(SUPPORTED_FACADE_KEY_ACTIONS))
+        raise ValueError(
+            f"Facade key '{key_id}' field 'quota.action' must be one of: {supported_actions}"
+        )
     return FacadeQuotaPolicy(
         daily_requests_soft=_coerce_positive_int(value.get("daily_requests_soft"), field_name="daily_requests_soft", key_id=key_id),
         daily_tokens_soft=_coerce_positive_int(value.get("daily_tokens_soft"), field_name="daily_tokens_soft", key_id=key_id),
         action=action,
         warn_threshold=_coerce_warn_threshold(value.get("warn_threshold"), key_id=key_id),
     )
+
+
+def _coerce_enabled(value: Any, *, key_id: str) -> bool:
+    if value in (None, ""):
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(f"Facade key '{key_id}' field 'enabled' must be a boolean")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(f"Facade key '{key_id}' field 'enabled' must be a boolean")
 
 
 def _normalize_facade_key_config(key_id: str, raw_config: Any) -> FacadeKeyConfig:
@@ -120,7 +144,7 @@ def _normalize_facade_key_config(key_id: str, raw_config: Any) -> FacadeKeyConfi
 
     return FacadeKeyConfig(
         key_id=key_id,
-        enabled=bool(raw_config.get("enabled", True)),
+        enabled=_coerce_enabled(raw_config.get("enabled", True), key_id=key_id),
         display_name=(str(raw_config.get("display_name")).strip() if raw_config.get("display_name") not in (None, "") else None),
         tags=_normalize_tags(raw_config.get("tags"), key_id=key_id),
         default_class=(str(raw_config.get("default_class")).strip() if raw_config.get("default_class") not in (None, "") else None),
@@ -181,6 +205,8 @@ class FacadeKeyRegistry:
             normalized_key_id = str(key_id).strip()
             if not normalized_key_id:
                 raise ValueError("Facade key ids cannot be empty")
+            if normalized_key_id in normalized_configs:
+                raise ValueError(f"Duplicate facade key id after normalization: {normalized_key_id}")
             normalized_configs[normalized_key_id] = _normalize_facade_key_config(normalized_key_id, raw_config)
 
         normalized_secrets: Dict[str, tuple[str, ...]] = {}
@@ -188,6 +214,10 @@ class FacadeKeyRegistry:
             normalized_key_id = str(key_id).strip()
             if not normalized_key_id:
                 raise ValueError("Facade key secret ids cannot be empty")
+            if normalized_key_id in normalized_secrets:
+                raise ValueError(
+                    f"Duplicate facade key secret id after normalization: {normalized_key_id}"
+                )
 
             cleaned = []
             for secret in raw_secrets:

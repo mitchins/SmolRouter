@@ -91,10 +91,7 @@ class SmolRouterContainer:
     def __init__(self, config: Optional[SmolRouterConfig] = None):
         self.config = config or self._create_default_config()
         if self.config.facade_key_registry is None:
-            if self.config.facade_keys:
-                self.config.facade_key_registry = load_facade_key_registry(self.config.facade_keys)
-            else:
-                self.config.facade_key_registry = FacadeKeyRegistry.from_sources()
+            self.config.facade_key_registry = load_facade_key_registry(self.config.facade_keys)
         self._providers = None
         self._mediator = None
         self._cache = None

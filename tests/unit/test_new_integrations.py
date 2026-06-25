@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import socket
 import httpx
 import pytest
@@ -854,6 +855,27 @@ def test_anthropic_discover_models_and_health_check():
     assert health is True
     assert len(models) >= 1
     assert models[0].name == "claude-3-5-sonnet-20241022"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_health_check_logs_warning_without_traceback(caplog):
+    provider = _make_anthropic_provider()
+
+    client = Mock()
+    client.get = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+
+    with patch("smolrouter.anthropic_provider.http_client_factory.get_client_for_model", return_value=client):
+        with caplog.at_level(logging.WARNING, logger="smolrouter.anthropic_provider"):
+            health = await provider.health_check()
+
+    assert health is False
+    warning_records = [record for record in caplog.records if record.name == "smolrouter.anthropic_provider"]
+    assert any(
+        record.levelname == "WARNING"
+        and record.getMessage() == "Provider test-anthropic health check probe failed: ReadTimeout (timed out)"
+        for record in warning_records
+    )
+    assert all(record.exc_info is None for record in warning_records)
 
 
 @pytest.mark.asyncio

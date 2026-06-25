@@ -198,7 +198,7 @@ def create_auth_middleware():
             ):
                 return await call_next(request)
 
-            if request.url.path in self.inference_auth_paths:
+            if request.method == "POST" and request.url.path in self.inference_auth_paths:
                 return await call_next(request)
 
             allow_error_dashboard_without_auth = os.getenv(

@@ -36,6 +36,7 @@ def test_registry_normalizes_config_and_rotation_lists(monkeypatch):
     assert config.default_class == "normal"
     assert config.quota.daily_requests_soft == 100
     assert config.quota.daily_tokens_soft == 2000
+    assert config.quota.action == "observe"
     assert config.quota.warn_threshold == 0.9
     assert registry.get_secrets("project-a") == ("srk-a-v1", "srk-a-v2")
     assert registry.to_dict()["project-a"]["secret_count"] == 2
@@ -76,6 +77,51 @@ def test_registry_rejects_invalid_tags_and_warn_threshold():
         FacadeKeyRegistry.from_sources(
             facade_key_configs={"project-a": {"quota": {"warn_threshold": 2}}},
             facade_key_secrets={},
+        )
+
+
+def test_registry_rejects_invalid_quota_action():
+    with pytest.raises(ValueError, match="quota.action"):
+        FacadeKeyRegistry.from_sources(
+            facade_key_configs={"project-a": {"quota": {"action": "warnn"}}},
+            facade_key_secrets={},
+        )
+
+
+def test_registry_parses_enabled_without_python_truthiness():
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            "project-a": {"enabled": "false"},
+            "project-b": {"enabled": "true"},
+            "project-c": {"enabled": 0},
+            "project-d": {"enabled": 1},
+        },
+        facade_key_secrets={},
+    )
+
+    assert registry.get_config("project-a").enabled is False
+    assert registry.get_config("project-b").enabled is True
+    assert registry.get_config("project-c").enabled is False
+    assert registry.get_config("project-d").enabled is True
+
+    with pytest.raises(ValueError, match="field 'enabled' must be a boolean"):
+        FacadeKeyRegistry.from_sources(
+            facade_key_configs={"project-e": {"enabled": "sometimes"}},
+            facade_key_secrets={},
+        )
+
+
+def test_registry_rejects_duplicate_ids_after_normalization():
+    with pytest.raises(ValueError, match="Duplicate facade key id after normalization"):
+        FacadeKeyRegistry.from_sources(
+            facade_key_configs={"project-a": {}, " project-a ": {}},
+            facade_key_secrets={},
+        )
+
+    with pytest.raises(ValueError, match="Duplicate facade key secret id after normalization"):
+        FacadeKeyRegistry.from_sources(
+            facade_key_configs={"project-a": {}},
+            facade_key_secrets={"project-a": ["srk-a"], " project-a ": ["srk-a-2"]},
         )
 
 

@@ -175,8 +175,8 @@
                     </thead>
                     <tbody>
                         {% for log in logs %}
-                        <tr onclick="window.location.href='/request/{{ log.id }}'" style="cursor: pointer;">
-                            <td data-label="Time">{{ log.timestamp[:19] if log.timestamp else "-" }}</td>
+                        <tr>
+                            <td data-label="Time"><a href="/request/{{ log.id }}">{{ log.timestamp[:19] if log.timestamp else "-" }}</a></td>
                             <td data-label="Source">{{ log.source_ip }}</td>
                             <td data-label="Path">{{ log.path }}</td>
                             <td data-label="Model">{{ log.mapped_model or log.original_model or "-" }}</td>

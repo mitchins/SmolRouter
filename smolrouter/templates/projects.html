@@ -119,9 +119,11 @@
                     </thead>
                     <tbody>
                         {% for project in projects %}
-                        <tr onclick="window.location.href='/projects/{{ project.id | pathencode }}'" style="cursor: pointer;">
+                        <tr>
                             <td data-label="Project">
-                                <div><strong>{{ project.display_name or project.id }}</strong></div>
+                                <div>
+                                    <a href="/projects/{{ project.id | pathencode }}"><strong>{{ project.display_name or project.id }}</strong></a>
+                                </div>
                                 <div class="project-identity">{{ project.id }}</div>
                             </td>
                             <td data-label="Identity">

@@ -100,6 +100,7 @@ Use SmolRouter when you need to:
 | --- | --- | --- |
 | `JWT_SECRET` | _(unset)_ | Enables JWT authentication for `/v1/*` endpoints and most `/api/*` endpoints (some API endpoints like `/api/logs`, `/api/stats` are exempt). Must be ≥32 characters with good entropy. Leave unset for unauthenticated access |
 | `SMOLROUTER_SECRETS` | _(auto-discovered)_ | Explicit path to `secrets.yaml` for provider API keys. If unset, SmolRouter searches `./secrets.yaml`, the user config dir, then the site config dir |
+| `SMOLROUTER_FACADE_KEYS` | _(auto-discovered)_ | Explicit path to `facade_keys.yaml` for router-owned facade keys. If unset, SmolRouter searches `./facade_keys.yaml`, the user config dir, then the site config dir |
 | `SMOLROUTER_REQUIRE_SECRETS` | `false` | When `true`, key-bearing providers must load keys from `secrets.yaml`; inline `api_key` / `api_keys` fields are rejected, except OpenAI `api_key: null` BYOK passthrough |
 | `WEBUI_SECURITY` | `AUTH_WHEN_PROXIED` | Controls Web UI/dashboard access policy independently of API authentication: `NONE`, `AUTH_WHEN_PROXIED`, or `ALWAYS_AUTH` |
 | `ALLOW_UNAUTHENTICATED_ERROR_DASHBOARD` | `false` | Set `true` only on trusted LANs to allow unauthenticated access to `/api/errors/*`. Enables stack traces and exception metadata without auth checks. |
@@ -224,6 +225,8 @@ For OpenAI-compatible providers, a configured provider `api_key` takes precedenc
 **Path guidance:**
 - Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
 - Use `SMOLROUTER_SECRETS` for deterministic secrets file selection; otherwise SmolRouter searches `./secrets.yaml`, the user config dir, then the site config dir.
+- Use `SMOLROUTER_FACADE_KEYS` for dedicated facade-key storage (`./facade_keys.yaml`, user config dir, then site config dir).
+- Provision facade keys with `python -m smolrouter.manage_facade_keys create --project <id> --routes-config <routes.yaml>` (generates `srk-...` secrets; default append behavior avoids clobbering old secrets).
 - Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
 - For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
 - `docker-compose.yml` mounts `./logs:/app/logs`, so rotated ERROR logs persist across container restarts.

@@ -7,9 +7,7 @@ import pytest
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.providers import ProviderFactory
 from smolrouter.secret_store import (
-    get_facade_key_secrets,
     load_secrets,
-    load_facade_key_secrets,
     reload_secrets,
     redact_secret,
     resolve_config_file,
@@ -102,50 +100,6 @@ def test_load_secrets_normalizes_scalar_and_list_values(monkeypatch, configured_
     reload_secrets()
 
     assert load_secrets() == {"google": ["sk-google"], "anthropic": ["sk-ant-1", "sk-ant-2"]}
-
-
-def test_load_secrets_supports_nested_facade_keys_without_affecting_provider_keys(monkeypatch, configured_dirs):
-    cwd, _user, _site = configured_dirs
-
-    (cwd / "secrets.yaml").write_text(
-        "google: sk-google\n"
-        "facade_keys:\n"
-        "  project-a: srk-project-a\n"
-        "  project-b:\n"
-        "    - srk-project-b-1\n"
-        "    - srk-project-b-2\n"
-    )
-    monkeypatch.delenv("SMOLROUTER_SECRETS", raising=False)
-    reload_secrets()
-
-    assert load_secrets() == {"google": ["sk-google"]}
-    assert load_facade_key_secrets() == {
-        "project-a": ["srk-project-a"],
-        "project-b": ["srk-project-b-1", "srk-project-b-2"],
-    }
-    assert get_facade_key_secrets("project-b") == ["srk-project-b-1", "srk-project-b-2"]
-
-
-def test_load_secrets_keeps_legacy_facade_keys_scalar_as_provider_entry(monkeypatch, configured_dirs):
-    cwd, _user, _site = configured_dirs
-
-    (cwd / "secrets.yaml").write_text("facade_keys: legacy-provider-secret\n")
-    monkeypatch.delenv("SMOLROUTER_SECRETS", raising=False)
-    reload_secrets()
-
-    assert load_secrets() == {"facade_keys": ["legacy-provider-secret"]}
-    assert load_facade_key_secrets() == {}
-
-
-def test_load_facade_key_secrets_requires_nested_mapping(monkeypatch, configured_dirs):
-    cwd, _user, _site = configured_dirs
-
-    (cwd / "secrets.yaml").write_text("facade_keys:\n  project-a:\n    nested: bad\n")
-    monkeypatch.delenv("SMOLROUTER_SECRETS", raising=False)
-    reload_secrets()
-
-    with pytest.raises(ValueError, match="Facade key secret entry 'project-a' must be a scalar string or list"):
-        load_facade_key_secrets()
 
 
 def test_load_secrets_empty_file_returns_empty(monkeypatch, configured_dirs):

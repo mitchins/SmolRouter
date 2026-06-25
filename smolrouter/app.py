@@ -1363,6 +1363,12 @@ def _resolve_request_identity(
     return resolved.identity
 
 
+def _identity_subject_key(identity: Optional[RequestIdentity]) -> Optional[tuple[str, str]]:
+    if identity is None:
+        return None
+    return (identity.kind, identity.subject_id)
+
+
 def _build_request_client_context(
     active_container: Any,
     source_ip: str,
@@ -1631,18 +1637,6 @@ async def proxy_request(path: str, request: Request):
     presented_bearer_token = _extract_bearer_token(request.headers.get("authorization"))
     presented_authorization_facade_key = _extract_local_facade_key_from_authorization(request)
     received_local_authorization = presented_authorization_facade_key is not None
-    if (
-        presented_facade_key
-        and presented_authorization_facade_key
-        and presented_facade_key != presented_authorization_facade_key
-    ):
-        return await _reject_openai_request(
-            request,
-            start_time,
-            auth_payload,
-            401,
-            "Mismatched local facade key values",
-        )
 
     resolved_facade_key = presented_authorization_facade_key or presented_facade_key
     headers = _build_openai_forward_headers(
@@ -1670,7 +1664,7 @@ async def proxy_request(path: str, request: Request):
                 start_time,
                 auth_payload,
                 503,
-                f"{FACADE_KEY_HEADER} is unavailable in legacy proxy mode",
+                "SmolRouter facade keys are unavailable in legacy proxy mode",
             )
 
         active_container = await _get_active_container(False)
@@ -1684,7 +1678,22 @@ async def proxy_request(path: str, request: Request):
             )
 
         try:
-            identity = _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
+            if presented_facade_key and presented_authorization_facade_key:
+                header_identity = _resolve_request_identity(
+                    active_container,
+                    request,
+                    presented_key=presented_facade_key,
+                )
+                authorization_identity = _resolve_request_identity(
+                    active_container,
+                    request,
+                    presented_key=presented_authorization_facade_key,
+                )
+                if _identity_subject_key(header_identity) != _identity_subject_key(authorization_identity):
+                    raise HTTPException(status_code=401, detail="Mismatched local facade key values")
+                identity = authorization_identity
+            else:
+                identity = _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
             client_context = _build_request_client_context(active_container, source_ip, headers, identity)
         except HTTPException as exc:
             return await _reject_openai_request(

@@ -8,6 +8,17 @@ from smolrouter.container import SmolRouterConfig, SmolRouterContainer
 from smolrouter.facade_keys import RequestIdentity
 
 
+@pytest.fixture(autouse=True)
+def _stub_facade_key_loader(monkeypatch):
+    monkeypatch.setattr(
+        "smolrouter.container.load_facade_key_registry",
+        lambda facade_key_configs: container_module.FacadeKeyRegistry.from_sources(
+            facade_key_configs=facade_key_configs,
+            facade_key_secrets={},
+        ),
+    )
+
+
 def test_start_background_health_monitoring_uses_logged_task(monkeypatch):
     container = SmolRouterContainer(SmolRouterConfig(providers=[]))
     captured = {}
@@ -45,11 +56,13 @@ def test_container_create_client_context_preserves_identity():
 
 
 def test_container_builds_facade_key_registry_from_config(monkeypatch):
+    captured = []
+
     monkeypatch.setattr(
         "smolrouter.container.load_facade_key_registry",
-        lambda facade_key_configs: container_module.FacadeKeyRegistry.from_sources(
+        lambda facade_key_configs: captured.append(dict(facade_key_configs or {})) or container_module.FacadeKeyRegistry.from_sources(
             facade_key_configs=facade_key_configs,
-            facade_key_secrets={"project-a": ["srk-a"]},
+            facade_key_secrets={"project-a": ["srk-a"]} if facade_key_configs else {},
         ),
     )
 
@@ -63,6 +76,21 @@ def test_container_builds_facade_key_registry_from_config(monkeypatch):
     registry = container.get_facade_key_registry()
     assert registry.get_config("project-a").display_name == "Project A"
     assert registry.get_secrets("project-a") == ("srk-a",)
+    assert captured == [{"project-a": {"display_name": "Project A"}}]
+
+
+def test_container_uses_shared_facade_key_loader_for_empty_config(monkeypatch):
+    captured = []
+
+    monkeypatch.setattr(
+        "smolrouter.container.load_facade_key_registry",
+        lambda facade_key_configs: captured.append(dict(facade_key_configs or {})) or container_module.FacadeKeyRegistry.from_sources(),
+    )
+
+    container = SmolRouterContainer(SmolRouterConfig(providers=[], facade_keys={}))
+
+    assert isinstance(container.get_facade_key_registry(), container_module.FacadeKeyRegistry)
+    assert captured == [{}]
 
 
 @pytest.mark.asyncio
