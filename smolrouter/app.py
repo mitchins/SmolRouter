@@ -2236,8 +2236,10 @@ PROJECTS_API_RESPONSES = {
     500: {"description": "Failed to load project inventory"},
 }
 
+PROJECT_NOT_FOUND_DETAIL = "Project not found"
+
 PROJECT_DETAIL_API_RESPONSES = {
-    404: {"description": "Project not found"},
+    404: {"description": PROJECT_NOT_FOUND_DETAIL},
 }
 
 
@@ -2563,7 +2565,7 @@ async def api_project_detail(request: Request, project_id: str, limit: int = 100
 
     project_id_clean = (project_id or "").strip()
     if not project_id_clean:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=PROJECT_NOT_FOUND_DETAIL)
 
     project_limit = _normalize_project_limit(limit)
     inventory = await _load_facade_key_inventory()
@@ -2571,7 +2573,7 @@ async def api_project_detail(request: Request, project_id: str, limit: int = 100
 
     logs = await RequestLog.get_by_identity("facade_key", project_id_clean, limit=project_limit)
     if not logs and not project["configured"]:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=PROJECT_NOT_FOUND_DETAIL)
 
     return {
         "project": project,

@@ -810,10 +810,7 @@ class RedisRequestLog:
 
         requests = [LogRecord(dict(data)) for data in results if data]
 
-        requests.sort(
-            key=lambda log: getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)(),
-            reverse=True,
-        )
+        requests.sort(key=RedisRequestLog._request_log_timestamp, reverse=True)
 
         if limit is None:
             return requests
@@ -845,7 +842,7 @@ class RedisRequestLog:
 
     @staticmethod
     def _request_log_timestamp(log: LogRecord):
-        return getattr(log.timestamp, "timestamp", lambda: 0)()
+        return getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)()
 
     @staticmethod
     async def get_by_identity(
