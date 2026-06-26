@@ -498,6 +498,7 @@ class QuotaRecord:
         self.invalid_key = _normalize_bool(getattr(self, "invalid_key", False), default=False)
         self.updated_at = _normalize_datetime(getattr(self, "updated_at", None))
         self.quota_exhausted_at = _normalize_datetime(getattr(self, "quota_exhausted_at", None))
+        self.quota_cooldown_until = _normalize_datetime(getattr(self, "quota_cooldown_until", None))
 
     def mark_request_success(self, tokens: int = 0):
         """Update local object state after successful request
@@ -518,6 +519,19 @@ class QuotaRecord:
             self.last_error = error
         if quota_exhausted:
             self.quota_exhausted_at = datetime.now(timezone.utc)
+
+    def mark_rate_limited(self, cooldown_until: datetime, error: Optional[str] = None):
+        """Update local object state after a transient (per-minute) rate limit.
+
+        Unlike mark_request_failure(quota_exhausted=True), this does NOT bench the
+        key for the whole Pacific day. It records a short cooldown window after
+        which the key returns to the selection pool.
+
+        WARNING: This ONLY updates the in-memory object. Persistence must be handled separately.
+        """
+        self.quota_cooldown_until = cooldown_until
+        if error:
+            self.last_error = error
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
@@ -587,6 +601,7 @@ if last_reset ~= today then
     redis.call('HSET', quota_key, 'last_reset', today)
     -- Clear quota exhaustion status on daily reset
     redis.call('HDEL', quota_key, 'quota_exhausted_at')
+    redis.call('HDEL', quota_key, 'quota_cooldown_until')
 end
 
 -- Atomically increment counters
@@ -1031,6 +1046,7 @@ class RedisApiKeyQuota:
                 },
             )
             await client.hdel(quota_key, "quota_exhausted_at")
+            await client.hdel(quota_key, "quota_cooldown_until")
 
         pipe = client.pipeline()
         pipe.hincrby(quota_key, "requests_today", request_count)
@@ -1186,6 +1202,44 @@ class RedisApiKeyQuota:
         await client.hset(quota_key, mapping=updates)
 
         logger.debug(f"Marked quota as exhausted: {quota_key}")
+
+    @staticmethod
+    async def mark_quota_cooldown(
+        api_key: str,
+        provider_id: str,
+        model_name: str,
+        cooldown_until: datetime,
+        error: Optional[str] = None,
+    ) -> None:
+        """Mark a quota entry as rate-limited (transient cooldown) and persist to Redis.
+
+        Used for per-minute (RPM) 429s. The key returns to the selection pool once
+        ``cooldown_until`` passes, rather than being benched until midnight Pacific.
+        Unlike mark_quota_exhausted, this does NOT inflate ``error_count`` toward the
+        error-prone ban threshold, since transient rate limits are expected.
+
+        Args:
+            api_key: The API key
+            provider_id: The provider ID
+            model_name: The model name
+            cooldown_until: UTC timestamp until which the key should be skipped
+            error: Optional error message to store
+        """
+        client = get_redis()
+
+        key_hash = RedisApiKeyQuota.hash_api_key(api_key)
+        quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
+
+        updates = {
+            "quota_cooldown_until": cooldown_until.isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if error:
+            updates["last_error"] = error
+
+        await client.hset(quota_key, mapping=updates)
+
+        logger.debug(f"Marked quota cooldown until {cooldown_until.isoformat()}: {quota_key}")
 
     @staticmethod
     async def mark_error(api_key: str, provider_id: str, model_name: str, error: Optional[str] = None) -> None:

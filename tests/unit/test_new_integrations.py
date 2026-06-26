@@ -780,6 +780,122 @@ async def test_google_genai_select_best_api_key_handles_exhaustion_and_fallback(
     assert await fallback_provider._select_best_api_key("gemini-2.0-flash") == "key-a"
 
 
+# Real per-minute (RPM) 429 body: quotaId says PerMinute and Google supplies a 21s retryDelay.
+_RPM_429_ERROR = (
+    "Google GenAI error: 429 RESOURCE_EXHAUSTED. Quota exceeded for metric: "
+    "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 15. "
+    "Please retry in 21.424365033s. quotaId: GenerateRequestsPerMinutePerProjectPerModel-FreeTier "
+    "retryDelay': '21s'"
+)
+
+
+@pytest.mark.asyncio
+async def test_per_minute_429_sets_cooldown_not_all_day_exhaustion():
+    """An RPM 429 must set a short cooldown, NOT bench the key until midnight Pacific."""
+    provider = _make_google_provider(api_keys=["test-key"])
+    quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    provider._get_quota_record = AsyncMock(return_value=quota)
+
+    api_key_backend = SimpleNamespace(
+        mark_quota_cooldown=AsyncMock(),
+        mark_quota_exhausted=AsyncMock(),
+        mark_error=AsyncMock(),
+        mark_invalid_by_hash=AsyncMock(),
+    )
+
+    with patch("smolrouter.google_genai_provider.ApiKeyQuota", api_key_backend):
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-3.1-flash-lite",
+            success=False,
+            error=_RPM_429_ERROR,
+            status_code=429,
+        )
+
+    # Routed to cooldown, not all-day exhaustion.
+    assert api_key_backend.mark_quota_cooldown.await_count == 1
+    assert api_key_backend.mark_quota_exhausted.await_count == 0
+    # Key is NOT benched for the whole day.
+    assert quota.quota_exhausted_at is None
+    # Cooldown window reflects Google's retryDelay (~21s), not midnight.
+    assert quota.quota_cooldown_until is not None
+    remaining = (quota.quota_cooldown_until - provider._utc_now()).total_seconds()
+    assert 10 < remaining < 120
+
+
+@pytest.mark.asyncio
+async def test_select_best_api_key_skips_cooldown_and_prefers_soonest_recovery():
+    """Cooling-down keys are skipped; when all are cooling down, fall back to the
+    soonest-recovering one instead of always api_keys[0]."""
+    provider = _make_google_provider(api_keys=["key-1", "key-2"], predictive_429_enabled=False)
+    today = provider._get_pacific_date()
+    now = datetime.now(timezone.utc)
+
+    # key-1 cools down for ~5 min; key-2 cools down for ~20s (recovers soonest).
+    key1 = QuotaRecord(
+        {
+            "api_key_hash": "hash-1",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": today,
+            "invalid_key": False,
+            "quota_cooldown_until": now + timedelta(seconds=300),
+        }
+    )
+    key2 = QuotaRecord(
+        {
+            "api_key_hash": "hash-2",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": today,
+            "invalid_key": False,
+            "quota_cooldown_until": now + timedelta(seconds=20),
+        }
+    )
+    provider._get_quota_record = AsyncMock(side_effect=[key1, key2])
+
+    selected = await provider._select_best_api_key("gemini-3.1-flash-lite")
+    # NOT api_keys[0] (key-1) — the soonest-recovering key wins.
+    assert selected == "key-2"
+
+
+@pytest.mark.asyncio
+async def test_select_best_api_key_ignores_expired_cooldown():
+    """A cooldown in the past must not exclude the key from selection."""
+    provider = _make_google_provider(api_keys=["key-1"], predictive_429_enabled=False)
+    today = provider._get_pacific_date()
+    quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-1",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 3,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": today,
+            "invalid_key": False,
+            "quota_cooldown_until": datetime.now(timezone.utc) - timedelta(seconds=5),
+        }
+    )
+    provider._get_quota_record = AsyncMock(return_value=quota)
+
+    assert await provider._select_best_api_key("gemini-3.1-flash-lite") == "key-1"
+
+
 def test_dummy_provider_discover_models_and_stats():
     provider = _make_dummy_provider(response_delay_ms=0, failure_rate=0.0, response_tokens=12)
 

@@ -234,6 +234,58 @@ def test_is_quota_exhausted_error(provider):
     assert provider._is_quota_exhausted_error(None) is False
 
 
+# Real per-minute (RPM) 429 body as returned by Google free tier (gemini-3.1-flash-lite).
+# The quotaMetric is identical for RPM and RPD; only the quotaId distinguishes them.
+RPM_429 = (
+    "Google GenAI error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+    "'You exceeded your current quota. \\n* Quota exceeded for metric: "
+    "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 15, "
+    "model: gemini-3.1-flash-lite\\nPlease retry in 21.424365033s.', 'status': 'RESOURCE_EXHAUSTED', "
+    "'details': [{'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': "
+    "[{'quotaId': 'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', 'quotaValue': '15'}]}, "
+    "{'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '21s'}]}}"
+)
+
+RPD_429 = (
+    "Google GenAI error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+    "'You exceeded your current quota.', 'status': 'RESOURCE_EXHAUSTED', 'details': "
+    "[{'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': "
+    "[{'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaValue': '1500'}]}]}}"
+)
+
+
+def test_is_per_minute_quota_error(provider):
+    assert provider._is_per_minute_quota_error(RPM_429) is True
+    assert provider._is_per_minute_quota_error(RPD_429) is False
+    assert provider._is_per_minute_quota_error("429 quota exceeded retry in 12s") is False
+    assert provider._is_per_minute_quota_error(None) is False
+
+
+def test_is_per_day_quota_error(provider):
+    assert provider._is_per_day_quota_error(RPD_429) is True
+    assert provider._is_per_day_quota_error("requests per day exceeded") is True
+    assert provider._is_per_day_quota_error(RPM_429) is False
+    assert provider._is_per_day_quota_error(None) is False
+
+
+def test_quota_cooldown_seconds_per_minute_uses_retry_delay(provider):
+    # RPM -> honor Google's retryDelay (21s) plus the small buffer.
+    cooldown = provider._quota_cooldown_seconds(RPM_429)
+    assert cooldown == pytest.approx(21.424365033 + provider.RPM_COOLDOWN_BUFFER_SECONDS)
+
+
+def test_quota_cooldown_seconds_per_minute_without_retry_delay(provider):
+    rpm_no_delay = "429 RESOURCE_EXHAUSTED GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+    cooldown = provider._quota_cooldown_seconds(rpm_no_delay)
+    assert cooldown == provider.DEFAULT_RPM_COOLDOWN_SECONDS + provider.RPM_COOLDOWN_BUFFER_SECONDS
+
+
+def test_quota_cooldown_seconds_per_day_is_all_day(provider):
+    # RPD and ambiguous quota errors return None -> caller benches until midnight Pacific.
+    assert provider._quota_cooldown_seconds(RPD_429) is None
+    assert provider._quota_cooldown_seconds("429 quota exceeded retry in 12s") is None
+
+
 def test_is_invalid_key_error(provider):
     assert provider._is_invalid_key_error(status_code=403) is True
     assert provider._is_invalid_key_error("API key not valid") is True
