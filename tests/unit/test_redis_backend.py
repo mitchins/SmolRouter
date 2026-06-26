@@ -507,3 +507,35 @@ async def test_api_key_quota_round_trip_and_usage_markers(monkeypatch):
     assert provider_a_usage[0].quota_exhausted_at is not None
     assert len(provider_b_usage) == 1
     assert provider_b_usage[0].invalid_key is False
+
+
+@pytest.mark.asyncio
+async def test_mark_quota_cooldown_round_trips_and_clears_on_daily_reset(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    await RedisApiKeyQuota.get_or_create_quota("sk-cool", "provider-c", "gemini-3.1-flash-lite")
+
+    cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=21)
+    await RedisApiKeyQuota.mark_quota_cooldown(
+        "sk-cool", "provider-c", "gemini-3.1-flash-lite", cooldown_until, "per-minute limit"
+    )
+
+    usage = await RedisApiKeyQuota.get_provider_usage("provider-c")
+    assert len(usage) == 1
+    assert usage[0].quota_cooldown_until is not None
+    # Transient rate limit must NOT bench the key for the whole day.
+    assert usage[0].quota_exhausted_at is None
+    # Cooldown does not count toward the error-prone ban threshold.
+    assert usage[0].error_count == 0
+
+    # A request on a new Pacific day clears the cooldown via the daily-reset path.
+    quota_key = "quota:provider-c:" + RedisApiKeyQuota.hash_api_key("sk-cool") + ":gemini-3.1-flash-lite"
+    await redis_client.hset(quota_key, "last_reset", "1999-01-01")
+    await RedisApiKeyQuota.increment_usage("sk-cool", "provider-c", "gemini-3.1-flash-lite")
+
+    usage_after = await RedisApiKeyQuota.get_provider_usage("provider-c")
+    assert usage_after[0].quota_cooldown_until is None

@@ -707,7 +707,7 @@ changing quota or provider behavior yet.
 
 **Scope**
 
-- resolve facade key from `X-SmolRouter-Key` first
+- resolve facade key from `Authorization: Bearer <facade-key>` on the OpenAI write path, with `X-SmolRouter-Key` as the transitional alias
 - store resolved caller on `request.state`
 - thread the identity through:
   - `proxy_request()`
@@ -719,20 +719,18 @@ changing quota or provider behavior yet.
 
 **Initial transport recommendation**
 
-For stability, land this phase first in:
+The original `X-SmolRouter-Key`-first sequencing is now superseded.
+Current Phase B behavior accepts local facade keys on the OpenAI write path via:
 
-- `jwt_request_auth` mode via `X-SmolRouter-Key`
-- `transition_alias` mode via `X-SmolRouter-Key`
+- `Authorization: Bearer srk-...`
+- `X-SmolRouter-Key` as a transitional alias
 
-Do **not** make facade-key-in-`Authorization` the first shipped behavior. That should
-follow only after the dedicated upstream-auth transport exists and the request-path
-auth mode split is implemented.
+The remaining migration concern is not whether `Authorization` is allowed, but that
+request-path auth stays split cleanly for the unfinished phases:
 
-**Why this order**
-
-- preserves current JWT behavior
-- avoids immediate BYOK breakage
-- lets the request path prove identity propagation before auth transport semantics shift
+- SmolRouter-local facade keys resolve locally and can be tracked
+- caller-supplied upstream/BYOK bearer tokens continue to pass through unchanged
+- dashboard/admin authentication can keep its separate transport and enforcement model
 
 **Suggested tests**
 

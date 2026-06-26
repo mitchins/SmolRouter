@@ -1055,6 +1055,27 @@ class ApiKeyQuota:
         return await RedisApiKeyQuota.mark_quota_exhausted(api_key, provider_id, model_name, error)
 
     @staticmethod
+    async def mark_quota_cooldown(
+        api_key: str,
+        provider_id: str,
+        model_name: str,
+        cooldown_until: "datetime",
+        error: str = None,
+    ) -> None:
+        """Mark a quota entry as rate-limited with a transient cooldown.
+
+        Args:
+            api_key: The API key
+            provider_id: The provider ID
+            model_name: The model name
+            cooldown_until: UTC timestamp until which the key should be skipped
+            error: Optional error message to store
+        """
+        return await RedisApiKeyQuota.mark_quota_cooldown(
+            api_key, provider_id, model_name, cooldown_until, error
+        )
+
+    @staticmethod
     async def mark_error(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:
         """Mark an error for a quota entry.
 
