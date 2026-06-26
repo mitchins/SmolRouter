@@ -303,6 +303,22 @@
                         </span>
                     </div>
                     {% endif %}
+
+                    {% if request_identity %}
+                    <div class="detail-row">
+                        <span class="detail-label">Project Identity:</span>
+                        <span class="detail-value">
+                            {% if request_identity.kind == 'facade_key' %}
+                            <a href="/projects/{{ request_identity.subject_id | pathencode }}">{{ request_identity.canonical }}</a>
+                            {% else %}
+                            {{ request_identity.canonical }}
+                            {% endif %}
+                            {% if request_identity.display_name %}
+                            &nbsp;&nbsp;<em>({{ request_identity.display_name }})</em>
+                            {% endif %}
+                        </span>
+                    </div>
+                    {% endif %}
                 </div>
                 
                 <div class="detail-section">

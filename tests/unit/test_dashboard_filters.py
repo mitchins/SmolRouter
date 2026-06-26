@@ -15,6 +15,9 @@ def _make_log(**overrides):
         "path": "/v1/chat/completions",
         "method": "POST",
         "status_code": 200,
+        "identity_kind": "facade_key",
+        "identity_subject_id": "project-a",
+        "identity_display_name": "Project Alpha",
     }
     payload.update(overrides)
     return SimpleNamespace(**payload)
@@ -50,3 +53,30 @@ def test_filter_request_logs_ignores_blank_field_values():
     filtered = filter_request_logs(logs, query)
 
     assert filtered == [logs[1]]
+
+
+@pytest.mark.parametrize(
+    ("query_text", "matches"),
+    [
+        ("project:project-a", True),
+        ("project:facade_key:project-a", True),
+        ("identity:facade_key", True),
+        ("identity:project-a", True),
+        ("identity:Project Alpha", True),
+        ("identity:missing", False),
+    ],
+)
+def test_matches_dashboard_filter_project_and_identity_fields(query_text, matches):
+    log = _make_log()
+    query = parse_dashboard_filter_query(query_text)
+
+    assert matches_dashboard_filter(log, query) is matches
+
+
+def test_bare_text_filter_matches_identity_fields():
+    log = _make_log(identity_display_name="Gamma Team")
+
+    assert matches_dashboard_filter(log, parse_dashboard_filter_query("facade_key")) is True
+    assert matches_dashboard_filter(log, parse_dashboard_filter_query("project-a")) is True
+    assert matches_dashboard_filter(log, parse_dashboard_filter_query("Gamma Team")) is True
+    assert matches_dashboard_filter(log, parse_dashboard_filter_query("unrelated")) is False

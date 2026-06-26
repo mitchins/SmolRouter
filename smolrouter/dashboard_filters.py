@@ -15,6 +15,8 @@ FIELD_ALIASES = {
     "provider": "provider",
     "service": "provider",
     "model": "model",
+    "project": "project",
+    "identity": "identity",
 }
 
 
@@ -58,6 +60,7 @@ def parse_dashboard_filter_query(raw_query: str | None) -> DashboardFilterQuery:
 
     Syntax:
     - fielded clauses: host:1.2.3.4 provider:google model:gemma
+    - project/identity clauses: project:my-project identity:facade_key:my-project
     - quoted values: provider:"google genai"
     - bare terms: matched across common dashboard fields
     """
@@ -125,8 +128,8 @@ def matches_dashboard_filter(log: object, query: DashboardFilterQuery) -> bool:
     return all(any(term.casefold() in value for value in searchable_values) for term in query.text_terms)
 
 
-def _field_value_pair(primary: object | None, secondary: object | None = None) -> tuple[str, str]:
-    return (_stringify(primary), _stringify(secondary))
+def _field_value_pair(*values: object) -> tuple[str, ...]:
+    return tuple(_stringify(value) for value in values)
 
 
 def _field_values(log: object, field: str) -> tuple[str, ...]:
@@ -139,11 +142,31 @@ def _field_values(log: object, field: str) -> tuple[str, ...]:
     if field == "model":
         return _field_value_pair(getattr(log, "mapped_model", None), getattr(log, "original_model", None))
 
+    if field == "project":
+        identity_subject = getattr(log, "identity_subject_id", None)
+        identity_kind = getattr(log, "identity_kind", None)
+        canonical = f"{identity_kind}:{identity_subject}" if identity_kind and identity_subject else None
+        return _field_value_pair(
+            identity_subject,
+            canonical,
+            getattr(log, "identity_display_name", None),
+        )
+
+    if field == "identity":
+        identity_kind = getattr(log, "identity_kind", None)
+        identity_subject = getattr(log, "identity_subject_id", None)
+        canonical = f"{identity_kind}:{identity_subject}" if identity_kind and identity_subject else None
+        return _field_value_pair(identity_kind, identity_subject, canonical, getattr(log, "identity_display_name", None))
+
     return _field_value_pair(None, None)
 
 
 def _searchable_values(log: object) -> tuple[str, ...]:
     status_code = getattr(log, "status_code", None)
+    identity_subject = getattr(log, "identity_subject_id", None)
+    identity_kind = getattr(log, "identity_kind", None)
+    identity_display_name = getattr(log, "identity_display_name", None)
+    canonical = f"{identity_kind}:{identity_subject}" if identity_kind and identity_subject else None
     return (
         _stringify(getattr(log, "source_ip", None)),
         _stringify(getattr(log, "provider_id", None)),
@@ -153,6 +176,10 @@ def _searchable_values(log: object) -> tuple[str, ...]:
         _stringify(getattr(log, "path", None)),
         _stringify(getattr(log, "method", None)),
         _stringify(status_code),
+        _stringify(identity_kind),
+        _stringify(identity_subject),
+        _stringify(canonical),
+        _stringify(identity_display_name),
     )
 
 

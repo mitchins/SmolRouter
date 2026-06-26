@@ -3,6 +3,7 @@ import httpx
 import asyncio
 import logging
 import uuid
+from urllib.parse import quote
 from types import SimpleNamespace
 import smolrouter.database as database
 from pydantic import BaseModel
@@ -25,8 +26,11 @@ import respx
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from unittest.mock import AsyncMock, Mock, patch
 from smolrouter.database import get_error_summary
+from smolrouter.facade_keys import FacadeKeyRegistry, RequestIdentity
+from smolrouter.interfaces import ClientContext
 
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
@@ -124,6 +128,624 @@ async def test_openai_streaming_falls_back_to_non_streaming_provider_architectur
     assert response.json()["choices"][0]["message"]["content"] == "fallback response"
     fake_container.route_streaming_request.assert_awaited_once()
     fake_container.route_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_passes_facade_identity_to_container_in_non_legacy_mode(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={app_module.FACADE_KEY_HEADER: "srk-project-a"},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity == RequestIdentity(
+        kind="facade_key",
+        subject_id="project-a",
+        display_name="Project A",
+        tags=(),
+        default_class=None,
+        quota_policy={
+            "daily_requests_soft": None,
+            "daily_tokens_soft": None,
+            "action": "observe",
+            "warn_threshold": 0.8,
+        },
+        token_accounting_state="untracked",
+    )
+    assert captured["client_context"].auth_payload is None
+    assert captured["client_context"].headers == {}
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_accepts_local_facade_key_from_authorization(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={"Authorization": "Bearer srk-project-a"},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity == RequestIdentity(
+        kind="facade_key",
+        subject_id="project-a",
+        display_name="Project A",
+        tags=(),
+        default_class=None,
+        quota_policy={
+            "daily_requests_soft": None,
+            "daily_tokens_soft": None,
+            "action": "observe",
+            "warn_threshold": 0.8,
+        },
+        token_accounting_state="untracked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_with_nonlocal_authorization_keeps_anonymous_identity(
+    async_client, disable_logging, monkeypatch
+):
+    captured = {}
+    fake_container = Mock()
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs.get("client_context")
+        captured["headers"] = args[4]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={"Authorization": "Bearer provider-token"},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"] is None
+    assert captured["headers"] == {"authorization": "Bearer provider-token"}
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_with_nonlocal_authorization_and_alias_keeps_authorization_header(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        captured["headers"] = args[4]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={"Authorization": "Bearer provider-token", app_module.FACADE_KEY_HEADER: "srk-project-a"},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity == RequestIdentity(
+        kind="facade_key",
+        subject_id="project-a",
+        display_name="Project A",
+        tags=(),
+        default_class=None,
+        quota_policy={
+            "daily_requests_soft": None,
+            "daily_tokens_soft": None,
+            "action": "observe",
+            "warn_threshold": 0.8,
+        },
+        token_accounting_state="untracked",
+    )
+    assert captured["headers"] == {"authorization": "Bearer provider-token"}
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_rejects_mismatched_local_authorization_and_alias(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}, "project-b": {"display_name": "Project B"}},
+        facade_key_secrets={"project-a": ["srk-project-a"], "project-b": ["srk-project-b"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock()
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={"Authorization": "Bearer srk-project-a", app_module.FACADE_KEY_HEADER: "srk-project-b"},
+    )
+
+    assert response.status_code == 401
+    fake_container.route_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_rejects_unknown_local_authorization(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock()
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={"Authorization": "Bearer srk-unknown"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid SmolRouter facade key"
+    fake_container.route_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_accepts_matching_local_authorization_and_alias(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={
+            "Authorization": "Bearer srk-project-a",
+            app_module.FACADE_KEY_HEADER: "srk-project-a",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity == RequestIdentity(
+        kind="facade_key",
+        subject_id="project-a",
+        display_name="Project A",
+        tags=(),
+        default_class=None,
+        quota_policy={
+            "daily_requests_soft": None,
+            "daily_tokens_soft": None,
+            "action": "observe",
+            "warn_threshold": 0.8,
+        },
+        token_accounting_state="untracked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_accepts_rotated_local_authorization_and_alias_for_same_project(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a-v1", "srk-project-a-v2"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={
+            "Authorization": "Bearer srk-project-a-v1",
+            app_module.FACADE_KEY_HEADER: "srk-project-a-v2",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity is not None
+    assert captured["client_context"].identity.subject_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_openai_streaming_request_passes_facade_identity_to_container_in_non_legacy_mode(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    captured = {}
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_route_streaming_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+
+        async def _stream():
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(_stream(), media_type="text/event-stream"), 200, "provider:test", None
+
+    fake_container.route_streaming_request = AsyncMock(side_effect=fake_route_streaming_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+        headers={app_module.FACADE_KEY_HEADER: "srk-project-a"},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"].identity is not None
+    assert captured["client_context"].identity.subject_id == "project-a"
+    assert captured["client_context"].auth_payload is None
+    assert captured["client_context"].headers == {}
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_without_facade_key_keeps_client_context_none(
+    async_client, disable_logging, monkeypatch
+):
+    captured = {}
+    fake_container = Mock()
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_request_log_persists_identity_subject(isolated_db, monkeypatch):
+    from starlette.requests import Request
+    from smolrouter.redis_backend import RedisRequestLog
+
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+
+    async def _receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 1),
+        "query_string": b"",
+    }
+    identity = RequestIdentity(kind="facade_key", subject_id="project-a")
+
+    log_entry = await app_module.start_request_log(
+        Request(scope, _receive),
+        "openai",
+        "http://up",
+        "gpt-4",
+        "gpt-4",
+        None,
+        b'{"prompt":"hi"}',
+        identity,
+    )
+
+    rec = await RedisRequestLog.get_by_id(log_entry.request_id)
+    assert rec is not None
+    assert rec.identity_kind == "facade_key"
+    assert rec.identity_subject_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_openai_invalid_json_with_facade_key_logs_identity_in_non_legacy_mode(
+    async_client, isolated_db, monkeypatch
+):
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        content="{invalid json",
+        headers={"content-type": "application/json", app_module.FACADE_KEY_HEADER: "srk-project-a"},
+    )
+
+    assert response.status_code == 400
+
+    recent = await app_module.RequestLog.get_recent(1)
+    assert recent
+    assert recent[0].status_code == 400
+    assert recent[0].identity_kind == "facade_key"
+    assert recent[0].identity_subject_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_rejects_unknown_facade_key_in_non_legacy_mode(
+    async_client, disable_logging, monkeypatch
+):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock()
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={app_module.FACADE_KEY_HEADER: "srk-unknown"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == "facade_key_auth_failed"
+    fake_container.route_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_treats_whitespace_only_facade_key_as_absent(
+    async_client, disable_logging, monkeypatch
+):
+    captured = {}
+    fake_container = Mock()
+
+    async def fake_route_request(*args, **kwargs):
+        captured["client_context"] = kwargs["client_context"]
+        return (
+            {"choices": [{"message": {"content": "ok"}}]},
+            200,
+            "provider:test",
+            None,
+        )
+
+    fake_container.route_request = AsyncMock(side_effect=fake_route_request)
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={app_module.FACADE_KEY_HEADER: "   "},
+    )
+
+    assert response.status_code == 200
+    assert captured["client_context"] is None
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_rejects_unknown_facade_key_and_logs_request(
+    async_client, isolated_db, monkeypatch
+):
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {"display_name": "Project A"}},
+        facade_key_secrets={"project-a": ["srk-project-a"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock()
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={app_module.FACADE_KEY_HEADER: "srk-unknown"},
+    )
+
+    assert response.status_code == 401
+
+    recent = await app_module.RequestLog.get_recent(1)
+    assert recent
+    assert recent[0].status_code == 401
+    assert recent[0].error_message == "Invalid SmolRouter facade key"
+    fake_container.route_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openai_proxy_request_rejects_facade_key_in_legacy_mode(async_client, disable_logging, monkeypatch):
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: True)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "stream": False},
+        headers={app_module.FACADE_KEY_HEADER: "srk-project-a"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "facade_key_auth_failed"
+    assert response.json()["detail"] == "SmolRouter facade keys are unavailable in legacy proxy mode"
 
 
 @pytest.mark.asyncio
@@ -646,6 +1268,190 @@ async def test_system_dashboard_shows_google_proxy_pool(async_client, disable_lo
     assert "http://127.0.0.1:8888" in content
     assert "http://127.0.0.1:8899" in content
     assert "No proxy configurations in use - all requests go direct" not in content
+
+
+@pytest.mark.asyncio
+async def test_projects_pages_and_api_are_facade_key_read_only_and_do_not_leak_secrets(async_client, disable_logging):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            "project-a": {"display_name": "Project A"},
+        },
+        facade_key_secrets={
+            "project-a": ["srk-project-a-1", "srk-project-a-2"],
+        },
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_security = Mock()
+    fake_security.check_webui_access.return_value = None
+
+    async def _get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    with (
+        patch("smolrouter.app._get_active_container", _get_active_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        projects_response = await async_client.get("/projects")
+        api_response = await async_client.get("/api/projects")
+
+    assert projects_response.status_code == 200
+    projects_body = projects_response.text
+    assert "Project A" in projects_body
+    assert "project-a" in projects_body
+    assert "configured facade-key identities only" in projects_body
+    assert "not live accounting or enforcement" in projects_body
+    assert "srk-project-a-1" not in projects_body
+    assert "srk-project-a-2" not in projects_body
+
+    assert api_response.status_code == 200
+    api_payload = api_response.json()
+    assert api_payload["count"] == 1
+
+    project = api_payload["projects"][0]
+    assert project["id"] == "project-a"
+    assert project["identity"]["kind"] == "facade_key"
+    assert project["identity"]["canonical"] == "facade_key:project-a"
+    assert project["secret_count"] == 2
+    assert "srk-project-a" not in str(api_payload)
+
+
+@pytest.mark.asyncio
+async def test_project_drilldown_api_uses_identity_index_and_honor_no_config_history_logs(async_client, disable_logging):
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            "project-a": {"display_name": "Project A"},
+        },
+        facade_key_secrets={
+            "project-a": ["srk-project-a-1"],
+        },
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_security = Mock()
+    fake_security.check_webui_access.return_value = None
+
+    await app_module.RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        identity_kind="facade_key",
+        identity_subject_id="legacy-project",
+        identity_display_name="Legacy Project",
+        request_id="legacy-1",
+    )
+    await app_module.RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        identity_kind="facade_key",
+        identity_subject_id="legacy-project",
+        identity_display_name="Legacy Project",
+        request_id="legacy-2",
+    )
+
+    async def _get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    with (
+        patch("smolrouter.app._get_active_container", _get_active_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        response = await async_client.get("/api/projects/legacy-project?limit=1")
+        missing_response = await async_client.get("/api/projects/never-seen")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["project"]["id"] == "legacy-project"
+    assert payload["project"]["configured"] is False
+    assert payload["project"]["identity"]["kind"] == "facade_key"
+    assert payload["logs_returned"] == 1
+    assert payload["logs"][0]["id"] == "legacy-2"
+    assert payload["logs"][0]["identity_subject_id"] == "legacy-project"
+    assert payload["logs"][0]["identity_display_name"] == "Legacy Project"
+
+    assert missing_response.status_code == 404
+
+    with (
+        patch("smolrouter.app._get_active_container", _get_active_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        page = await async_client.get("/projects/legacy-project")
+
+    assert page.status_code == 200
+    assert "legacy-project" in page.text
+    assert "No current config" in page.text
+    assert "does not provide quota accounting or enforcement yet" in page.text
+
+
+def test_openapi_documents_proxy_and_project_api_error_responses():
+    app_module.app.openapi_schema = None
+    schema = app_module.app.openapi()
+
+    chat_responses = schema["paths"]["/v1/chat/completions"]["post"]["responses"]
+    assert chat_responses["400"]["description"] == "Invalid request payload"
+    assert chat_responses["401"]["description"] == "Invalid or mismatched local facade key"
+    assert chat_responses["503"]["description"] == "Routing unavailable"
+
+    projects_responses = schema["paths"]["/api/projects"]["get"]["responses"]
+    assert projects_responses["500"]["description"] == "Failed to load project inventory"
+
+    project_detail_responses = schema["paths"]["/api/projects/{project_id}"]["get"]["responses"]
+    assert project_detail_responses["404"]["description"] == "Project not found"
+
+
+@pytest.mark.asyncio
+async def test_project_pages_and_api_support_slash_delimited_logical_ids(async_client, disable_logging):
+    project_id = "team/proj"
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            project_id: {"display_name": "Team Project"},
+        },
+        facade_key_secrets={
+            project_id: ["srk-team-proj-1"],
+        },
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_security = Mock()
+    fake_security.check_webui_access.return_value = None
+
+    await app_module.RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        identity_kind="facade_key",
+        identity_subject_id=project_id,
+        identity_display_name="Team Project",
+        request_id="slash-project-1",
+    )
+
+    async def _get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    encoded_project_id = quote(project_id, safe="")
+
+    with (
+        patch("smolrouter.app._get_active_container", _get_active_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        projects_response = await async_client.get("/projects")
+        detail_response = await async_client.get(f"/projects/{encoded_project_id}")
+        api_response = await async_client.get(f"/api/projects/{encoded_project_id}")
+
+    assert projects_response.status_code == 200
+    assert f"/projects/{encoded_project_id}" in projects_response.text
+
+    assert detail_response.status_code == 200
+    assert "Team Project" in detail_response.text
+    assert "facade_key:team/proj" in detail_response.text
+    assert "/v1/chat/completions" in detail_response.text
+    assert "/request/slash-project-1" in detail_response.text
+
+    assert api_response.status_code == 200
+    api_payload = api_response.json()
+    assert api_payload["project"]["id"] == project_id
+    assert api_payload["logs"][0]["id"] == "slash-project-1"
 
 
 @pytest.mark.asyncio
@@ -1276,6 +2082,8 @@ def test_serialize_request_log_reuses_summary_metadata():
         source_ip="127.0.0.1",
         method="POST",
         path="/v1/chat/completions",
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
         service_type="openai",
         provider_id="google-main",
         original_model="gpt-4o",
@@ -1302,6 +2110,9 @@ def test_serialize_request_log_reuses_summary_metadata():
     assert payload["api_key_suffix"] == "abcd1234"
     assert payload["api_key_index"] == 2
     assert payload["api_key_total"] == 5
+    assert payload["identity_kind"] == "facade_key"
+    assert payload["identity_subject_id"] == "project-a"
+    assert payload["identity_display_name"] is None
 
 
 def test_serialize_request_log_normalizes_empty_provider_id():
@@ -1310,6 +2121,8 @@ def test_serialize_request_log_normalizes_empty_provider_id():
         timestamp=app_module.datetime.now(),
         source_ip="127.0.0.1",
         path="/v1/chat/completions",
+        identity_kind=None,
+        identity_subject_id=None,
         service_type="openai",
         provider_id="",
         original_model="gpt-4o",
@@ -1333,9 +2146,12 @@ def test_serialize_request_detail_response_reuses_summary_and_provider_metadata(
         timestamp=timestamp,
         source_ip="127.0.0.1",
         path="/v1/chat/completions",
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
         service_type="openai",
         original_model="gpt-4o",
         mapped_model="gemini-2.5-pro",
+        identity_display_name="Project A",
         duration_ms=321,
         request_size=12,
         response_size=24,
@@ -1361,6 +2177,9 @@ def test_serialize_request_detail_response_reuses_summary_and_provider_metadata(
     assert payload["api_key_suffix"] == "abcd1234"
     assert payload["api_key_index"] == 2
     assert payload["api_key_total"] == 5
+    assert payload["identity_kind"] == "facade_key"
+    assert payload["identity_subject_id"] == "project-a"
+    assert payload["identity_display_name"] == "Project A"
     assert payload["request_body"] == '{"model": "gpt-4o"}'
     assert payload["response_body"] == '{"choices": []}'
 

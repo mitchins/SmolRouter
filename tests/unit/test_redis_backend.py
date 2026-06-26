@@ -280,6 +280,142 @@ async def test_request_log_get_by_source_ip_with_limit_avoids_full_set_fetch(mon
 
 
 @pytest.mark.asyncio
+async def test_request_log_create_indexes_by_identity_and_get_by_identity_is_ordered():
+    await redis_client.flushall()
+
+    now = datetime(2026, 4, 25, 10, 0, 0, tzinfo=timezone.utc)
+    later = now + timedelta(minutes=10)
+
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-project-a-1",
+        timestamp=now,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-other-project",
+        timestamp=now + timedelta(seconds=1),
+        identity_kind="facade_key",
+        identity_subject_id="project-b",
+    )
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-project-a-2",
+        timestamp=later,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+
+    records = await RedisRequestLog.get_by_identity("facade_key", "project-a", limit=1)
+    assert [record.id for record in records] == ["req-project-a-2"]
+
+    records = await RedisRequestLog.get_by_identity("facade_key", "project-a", limit=5)
+    assert [record.id for record in records] == ["req-project-a-2", "req-project-a-1"]
+
+    records_other = await RedisRequestLog.get_by_identity("facade_key", "project-b", limit=5)
+    assert [record.id for record in records_other] == ["req-other-project"]
+
+
+@pytest.mark.asyncio
+async def test_request_log_get_by_identity_prunes_stale_members_and_backfills_results():
+    await redis_client.flushall()
+
+    now = datetime(2026, 4, 25, 10, 0, 0, tzinfo=timezone.utc)
+    later = now + timedelta(minutes=10)
+    latest = later + timedelta(minutes=10)
+
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-project-a-1",
+        timestamp=now,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-project-a-2",
+        timestamp=later,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+    await RedisRequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        request_id="req-project-a-3",
+        timestamp=latest,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+
+    await redis_client.delete("request:req-project-a-3")
+
+    records = await RedisRequestLog.get_by_identity("facade_key", "project-a", limit=2)
+
+    assert [record.id for record in records] == ["req-project-a-2", "req-project-a-1"]
+    assert await redis_client.zrevrange("requests:by_identity:facade_key:project-a", 0, -1) == [
+        "req-project-a-2",
+        "req-project-a-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_request_log_get_by_identity_does_not_skip_live_rows_after_pruning_stale_pages():
+    await redis_client.flushall()
+
+    base_time = datetime(2026, 4, 25, 10, 0, 0, tzinfo=timezone.utc)
+
+    for offset in range(30):
+        request_number = offset + 1
+        request_id = f"req-project-a-{request_number:02d}"
+        await RedisRequestLog.create(
+            source_ip="127.0.0.1",
+            method="POST",
+            path="/v1/chat/completions",
+            request_id=request_id,
+            timestamp=base_time + timedelta(seconds=offset),
+            identity_kind="facade_key",
+            identity_subject_id="project-a",
+        )
+
+    for request_number in range(10, 31):
+        await redis_client.delete(f"request:req-project-a-{request_number:02d}")
+
+    records = await RedisRequestLog.get_by_identity("facade_key", "project-a", limit=5)
+
+    assert [record.id for record in records] == [
+        "req-project-a-09",
+        "req-project-a-08",
+        "req-project-a-07",
+        "req-project-a-06",
+        "req-project-a-05",
+    ]
+    assert await redis_client.zrevrange("requests:by_identity:facade_key:project-a", 0, -1) == [
+        "req-project-a-09",
+        "req-project-a-08",
+        "req-project-a-07",
+        "req-project-a-06",
+        "req-project-a-05",
+        "req-project-a-04",
+        "req-project-a-03",
+        "req-project-a-02",
+        "req-project-a-01",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_request_log_get_recent_falls_back_when_lua_fails(monkeypatch):
     await redis_client.flushall()
     request_id = await RedisRequestLog.create(

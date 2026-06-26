@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from .interfaces import ClientContext
+from .facade_keys import FacadeKeyRegistry, RequestIdentity, load_facade_key_registry
 from .providers import ProviderFactory, IModelProvider
 from .mediator import ModelMediatorFactory, ModelMediator
 from .caching import InMemoryModelCache, NoOpModelCache, IModelCache
@@ -59,6 +60,8 @@ class SmolRouterConfig:
     routes: Optional[List[Dict[str, Any]]] = None
     servers: Optional[Dict[str, str]] = None
     aliases: Optional[Dict[str, Any]] = None
+    facade_keys: Optional[Dict[str, Any]] = None
+    facade_key_registry: Optional[FacadeKeyRegistry] = None
 
     def __post_init__(self):
         if self.model_map is None:
@@ -73,6 +76,8 @@ class SmolRouterConfig:
             self.servers = {}
         if self.aliases is None:
             self.aliases = {}
+        if self.facade_keys is None:
+            self.facade_keys = {}
 
 
 class SmolRouterContainer:
@@ -85,6 +90,8 @@ class SmolRouterContainer:
 
     def __init__(self, config: Optional[SmolRouterConfig] = None):
         self.config = config or self._create_default_config()
+        if self.config.facade_key_registry is None:
+            self.config.facade_key_registry = load_facade_key_registry(self.config.facade_keys)
         self._providers = None
         self._mediator = None
         self._cache = None
@@ -133,6 +140,7 @@ class SmolRouterContainer:
             routes=routes_data.get("routes", []),
             servers=routes_data.get("servers", {}),
             aliases=routes_data.get("aliases", {}),
+            facade_keys=routes_data.get("facade_keys", {}),
             enable_background_health_checks=enable_background_health_checks,
             health_check_interval=health_check_interval,
         )
@@ -142,7 +150,7 @@ class SmolRouterContainer:
         resolved_config_path = resolve_routes_config_path(str(config_path))
         if not os.path.exists(resolved_config_path):
             logger.info(f"No routes config file found at {config_path}")
-            return {"routes": [], "servers": {}, "aliases": {}}
+            return {"routes": [], "servers": {}, "aliases": {}, "facade_keys": {}}
 
         try:
             with open(resolved_config_path, "r") as f:
@@ -154,7 +162,7 @@ class SmolRouterContainer:
             return normalize_provider_file_references(config, resolved_config_path)
         except Exception as e:
             logger.error(f"Failed to load routes config from {config_path}: {e}")
-            return {"routes": [], "servers": {}, "aliases": {}}
+            return {"routes": [], "servers": {}, "aliases": {}, "facade_keys": {}}
 
     def _create_providers_from_legacy_config(
         self, default_upstream: str, routes_data: Dict[str, Any]
@@ -391,9 +399,19 @@ class SmolRouterContainer:
         auth_payload: Optional[Dict[str, Any]] = None,
         user_agent: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        identity: Optional[RequestIdentity] = None,
     ) -> ClientContext:
         """Create client context for requests"""
-        return ClientContext(ip=ip, auth_payload=auth_payload, user_agent=user_agent, headers=headers or {})
+        return ClientContext(
+            ip=ip,
+            auth_payload=auth_payload,
+            user_agent=user_agent,
+            headers=headers or {},
+            identity=identity,
+        )
+
+    def get_facade_key_registry(self) -> FacadeKeyRegistry:
+        return self.config.facade_key_registry or load_facade_key_registry(self.config.facade_keys)
 
     async def route_request(
         self,
@@ -403,6 +421,7 @@ class SmolRouterContainer:
         path: str,
         headers: Dict[str, str],
         request_timeout: float,
+        client_context: Optional[ClientContext] = None,
     ):
         """
         Route a request using the new architecture.
@@ -421,7 +440,7 @@ class SmolRouterContainer:
         # TimeoutError handling, and surfaces as an uncaught TimeoutError logged
         # as "Provider architecture failed" with a 503. Let the mediator own it.
         return await self._mediator.route_request(
-            source_ip, model, request_payload, path, headers, request_timeout
+            source_ip, model, request_payload, path, headers, request_timeout, client_context=client_context
         )
 
     async def route_streaming_request(
@@ -432,6 +451,7 @@ class SmolRouterContainer:
         path: str,
         headers: Dict[str, str],
         request_timeout: float,
+        client_context: Optional[ClientContext] = None,
     ):
         """Route streaming requests.
 
@@ -442,7 +462,7 @@ class SmolRouterContainer:
         # a 504 response dict on expiry; no second nested timeout here (see
         # route_request for why nesting caused uncaught TimeoutError spew).
         data, status_code, upstream_used, metadata = await self.route_request(
-            source_ip, model, request_payload, path, headers, request_timeout
+            source_ip, model, request_payload, path, headers, request_timeout, client_context=client_context
         )
 
         if status_code >= 400:

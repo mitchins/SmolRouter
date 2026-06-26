@@ -5,14 +5,26 @@
 - 🟡 Ensure Consistent Information Architecture
     Google GenAI provider has extra features like key status tracking and exhaustion detection. Need to ensure consistent IA across all providers (OpenAI, Anthropic, Ollama). Consider: Should other providers have similar detailed status tracking? Location: Provider interfaces and dashboard consistency.
 
+- 🔴 Facade-key identity and attribution (Phase A complete, Phase B first milestone complete)
+    Treat facade API keys as first-class SmolRouter identity for request attribution, soft quota accounting, routing/QoS defaults, and future batch approval policy. Phase A groundwork is in place: facade-key config/secret registry, validation, and container plumbing. Phase B now accepts local facade keys on the OpenAI write path (`/v1/chat/completions`, `/v1/completions`, `/v1/responses`) via `Authorization: Bearer srk-...`, keeps `X-SmolRouter-Key` as a transitional alias, exempts those write routes from JWT-in-`Authorization` collision, threads identity through `ClientContext`, persists a generic request subject (`identity_kind`, `identity_subject_id`, `identity_display_name`) on request creation, surfaces project identity in dashboard/client/request-detail views, and adds read-only `/projects` inventory for configured facade-key identities plus `/projects/{id}` drilldown backed by a Redis identity-recency index. Facade-key provisioning now has an operator CLI (`python -m smolrouter.manage_facade_keys create`) and dedicated secret boundary (`facade_keys.yaml` / `SMOLROUTER_FACADE_KEYS`) as the single runtime source of truth for facade-key secrets. Future deliberate gaps: no quota ledger yet, no hard enforcement, no Ollama compatibility-path parity, no `/v1/models` or `/api/tags` identity resolution yet, and no broader dashboard/browser auth redesign or provider-BYOK transport cleanup yet. Historical traffic-only identities are reachable via drilldown when known, but are not listed as inventory. Full design: `docs/PROPOSAL_facade_key_identity_accounting.md`.
+
+- 🟡 Facade-key request/token accounting and soft quotas
+    Build on facade-key identity first, then add approximate request/token accounting and soft quota state for local project/use-case keys. Keep semantics honest: soft/best-effort, streaming-aware, and fail-open on accounting gaps. This should precede broad provider-key accounting convergence because the main product question is "which local project/use case consumed the budget?" not just "which downstream secret was used?". Full design: `docs/PROPOSAL_facade_key_identity_accounting.md`.
+
 - 🔵 Add Client Class-based Priority Injection (TODO - unstarted)
     SmolRouter should own request-class policy and inject vLLM's `priority` so background services don't have to. Target deploy is a single dedicated GPU running vLLM with `--scheduling-policy priority` (lower numeric = runs earlier); with no external backpressure, per-request `priority` is the only lever protecting rare human long-context requests from a pile of background/system jobs. Clients declare *intent* (`interactive`/`cli`/`normal`/`background`/`best-effort`) via model alias, `X-SmolRouter-Class` header, or facade-key identity; router maps class → explicit `priority` (0/10/50/100/200) and injects it into the OpenAI-compatible body. Key rules: unknown/undeclared class defaults to **background, never interactive** (anti-starvation); raw client `priority` is stripped/clamped for untrusted clients; elevated classes gated behind trusted identity; pair with class-based `max_tokens`/prompt caps (priority protects scheduling, caps protect KV budget). Plugs into the existing alias-resolution / request-mutation path (`smolrouter/mediator.py`) and reuses facade-key identity + per-key accounting. Full design: `docs/PROPOSAL_request_class_priority.md`.
 
-- 🔴 Fix O(N²) blob-storage write scan (body-archival lag) (TODO - unstarted)
-    `FilesystemBlobStorage.store()` calls `_total_size_bytes()` (full `rglob`+`stat` over the whole tree) on every write, twice per request, synchronously on the asyncio event loop — O(N) per write, O(N²) over time. On the production box this caused a multi-hour request/response body archival backlog (bodies show blank in the request detail view until they eventually land). Fix: incremental size counter (or cap-enforcement only in the janitor), offload file I/O via `asyncio.to_thread`, cache created hour-dirs. Paradigm-agnostic; prerequisite for the segment store below. Files: `smolrouter/storage.py` (`store`, `_total_size_bytes`, `_cleanup_for_space`, `_janitor_loop`), `smolrouter/database.py` (`_archive_bodies_after_completion`). Context: `docs/PROPOSAL_segment_blob_storage.md` (Prerequisite section).
+- 🟡 Reassess body-archival lag after blob-storage hot-path fix
+    The original O(N²) write-path issue has been addressed: `FilesystemBlobStorage` now uses a persisted usage counter instead of scanning the whole tree on every write, and request/response body archival stores are already offloaded via `asyncio.to_thread`. If operators still observe blank request/response bodies that appear later, the remaining work is to measure the current bottleneck accurately before changing storage again (for example: async eventual-consistency on detail views, write amplification from per-request files, or janitor contention). This is still relevant context for any future segment-store work, but the backlog item should no longer assume the old synchronous full-tree scan is the active bug. Files: `smolrouter/storage.py`, `smolrouter/database.py`. Context: `docs/PROPOSAL_segment_blob_storage.md`.
 
-- 🟡 Token/Request Counting for All API Keys
-    Google GenAI has comprehensive token/request counting with quota tracking. OpenAI and Anthropic providers need similar request/token counting against their API keys. All keys should have consistent metrics regardless of provider type. Google can keep extra features (exhaustion status, least-used key selection) as provider-specific enhancements. Files: `providers.py` (OpenAI path), `anthropic_provider.py`, `database.py`
+- 🟡 Provider-key accounting convergence
+    Google GenAI has comprehensive per-key token/request counting with quota tracking, and the Redis quota primitives already exist for reuse. The remaining gap is provider integration consistency: Anthropic currently reports model-level stats rather than true per-key accounting, and OpenAI-compatible flows still need explicit key-level usage tracking across configured-key and BYOK/passthrough modes. This should follow facade-key identity/accounting so downstream-secret observability complements, rather than substitutes for, project/use-case accounting. Files: `providers.py` (OpenAI path), `anthropic_provider.py`, `database.py`, `redis_backend.py`
+
+- 🔴 Provider readiness by key availability (TODO - unstarted)
+    Do not include provider instances in routing until required provider keys are present/valid; emit `UNAVAILABLE_NO_KEY` status so operators can distinguish config/dependency outages from infra/network issues.
+
+- 🟠 Health check failure taxonomy (TODO - unstarted)
+    Split provider health outcomes by cause (`UNAVAILABLE_AUTH`, `UNAVAILABLE_NETWORK`, `UNAVAILABLE_SERVICE`) and keep the dashboard/API reasoned state machine on root-cause, not only boolean up/down.
 
 ## Low Priority
 
@@ -23,11 +35,20 @@
 - 🔵 Improve JSON formatting + raw copy for request/body views (TODO - unstarted)
     Request and response payload blocks in web detail views should be consistently pretty-printed with a dedicated raw-copy action, including request and body payloads.
 
-- 🔵 Treat facade API keys as routing/analytics/QoS identity (TODO - unstarted)
-    Document and enforce that facade API keys are first-class credentials but are primarily used for request routing, usage attribution, and QoS policy, not for direct provider security semantics.
-
 - 🔵 Clean up BYOK and upstream auth precedence (TODO - unstarted)
     Simplify and standardize auth precedence so BYOK/passthrough behavior is obvious and consistent instead of provider-specific and surprising.
+
+- 🔵 Parse google_genai non-text response parts
+    Explicitly parse/record non-text `candidates.content.parts` (e.g., `thought_signature`) so we stop implicit text-only concatenation and warning spam while preserving backward-compatible text output.
+
+- 🔵 Enforce request span start/completion parity
+    Guarantee every request path logs matching `Request started` and `Request completed` events (including early validation/adapter/timeout fail paths) with completion cause.
+
+- 🔵 Add non-invasive latency attribution telemetry
+    Track per-provider/per-model/request-source p50/p90/p95/p99 and max latency without altering routing, timeout, retry, or fallback behavior.
+
+- 🔵 Tune dashboard refresh/reconnect noise
+    The main dashboard is already primarily WebSocket-driven, with a small debounced `/api/dashboard` refresh after request events. The remaining work is narrower than "polling noise": reduce unnecessary refreshes during reconnect/error conditions, coalesce bursts more aggressively if needed, and verify that dashboard control-plane load stays low under sustained request churn without changing any request-serving pathways.
 
 - 🔵 Separate dashboard auth from request auth headers (TODO - unstarted)
     Keep request API and model-routing auth using existing `Authorization` behavior while decoupling dashboard/session security to avoid header collisions (for example via `X-Auth-Bearer` or cookie/session-based auth). This supports the future state of API keys for LAN quota/monitoring and stronger dashboard auth without competing transport semantics.

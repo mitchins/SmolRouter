@@ -20,6 +20,7 @@ from .redis_config import redis_client, is_fake_redis, get_redis_status
 UTC_OFFSET_SUFFIX = "+00:00"
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 REDIS_REQUESTS_BY_TIME_KEY = "requests:by_time"
+REDIS_REQUEST_IDENTITY_KEY_PREFIX = "requests:by_identity"
 # O(1) dashboard stats: maintained on create/complete instead of scanning records.
 STATS_TOTAL_KEY = "stats:requests:total"
 STATS_COMPLETED_KEY = "stats:requests:completed"
@@ -68,6 +69,9 @@ REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
         "request_id",
         "user_agent",
         "auth_user",
+        "identity_kind",
+        "identity_subject_id",
+        "identity_display_name",
         "request_size",
         "request_body_hash",
         "duration_ms",
@@ -129,6 +133,9 @@ class RequestLogCreateOptions(TypedDict, total=False):
     request_id: Optional[str]
     user_agent: Optional[str]
     auth_user: Optional[str]
+    identity_kind: Optional[str]
+    identity_subject_id: Optional[str]
+    identity_display_name: Optional[str]
     request_size: Optional[int]
     request_body_hash: Optional[str]
     duration_ms: Optional[int]
@@ -266,6 +273,9 @@ def _build_request_log_data(
         "provider_id": option_fields.get("provider_id") or "",
         "user_agent": option_fields.get("user_agent") or "",
         "auth_user": option_fields.get("auth_user") or "",
+        "identity_kind": option_fields.get("identity_kind") or "",
+        "identity_subject_id": option_fields.get("identity_subject_id") or "",
+        "identity_display_name": option_fields.get("identity_display_name") or "",
         "request_size": str(option_fields.get("request_size") or 0),
         "created_at": created_at.isoformat(),
         "completed_at": completed_at.isoformat() if completed_at else "",
@@ -286,6 +296,25 @@ def _queue_store_request_log(
     pipe.hset(f"request:{request_id}", mapping=request_data)
     pipe.zadd(REDIS_REQUESTS_BY_TIME_KEY, {request_id: created_at.timestamp()})
     pipe.sadd(f"requests:by_ip:{source_ip}", request_id)
+
+
+def _identity_index_key(identity_kind: str, identity_subject_id: str) -> str:
+    return f"{REDIS_REQUEST_IDENTITY_KEY_PREFIX}:{identity_kind}:{identity_subject_id}"
+
+
+def _request_hash_key(request_id: str) -> str:
+    return f"request:{request_id}"
+
+
+def _queue_store_identity_index(
+    pipe: Any,
+    request_id: str,
+    identity_kind: str,
+    identity_subject_id: str,
+    created_at: datetime,
+) -> None:
+    key = _identity_index_key(identity_kind, identity_subject_id)
+    pipe.zadd(key, {request_id: created_at.timestamp()})
 
 
 def _status_is_terminal(status_code: Any) -> bool:
@@ -598,6 +627,16 @@ class RedisRequestLog:
 
         pipe = client.pipeline(transaction=False)
         _queue_store_request_log(pipe, request_id, source_ip, created_at, request_data)
+        identity_kind = option_fields.get("identity_kind")
+        identity_subject_id = option_fields.get("identity_subject_id")
+        if identity_kind and identity_subject_id:
+            _queue_store_identity_index(
+                pipe,
+                request_id=request_id,
+                identity_kind=str(identity_kind),
+                identity_subject_id=str(identity_subject_id),
+                created_at=created_at,
+            )
         await _check_and_queue_duplicate_request_body(client, pipe, request_id, option_fields.get("request_body_hash"))
         _queue_create_stats(pipe, request_id, request_data)
         await pipe.execute()
@@ -688,7 +727,7 @@ class RedisRequestLog:
     async def get_by_id(request_id: str) -> Optional[LogRecord]:
         """Get request by ID"""
         client = get_redis()
-        data = await client.hgetall(f"request:{request_id}")
+        data = await client.hgetall(_request_hash_key(request_id))
         return LogRecord(dict(data)) if data else None
 
     @staticmethod
@@ -771,15 +810,78 @@ class RedisRequestLog:
 
         requests = [LogRecord(dict(data)) for data in results if data]
 
-        requests.sort(
-            key=lambda log: getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)(),
-            reverse=True,
-        )
+        requests.sort(key=RedisRequestLog._request_log_timestamp, reverse=True)
 
         if limit is None:
             return requests
 
         return requests[:limit]
+
+    @staticmethod
+    def _normalize_identity_query_limit(limit: int | None) -> int:
+        if limit is None:
+            return 100
+        return limit
+
+    @staticmethod
+    async def _fetch_identity_log_batch(client, request_ids: List[str]) -> tuple[list[LogRecord], list[str]]:
+        pipe = client.pipeline(transaction=False)
+        for request_id in request_ids:
+            pipe.hgetall(_request_hash_key(request_id))
+        results = await pipe.execute()
+
+        logs: list[LogRecord] = []
+        stale_request_ids: list[str] = []
+        for request_id, data in zip(request_ids, results):
+            if not data:
+                stale_request_ids.append(request_id)
+                continue
+            logs.append(LogRecord(_flat_pairs_to_dict(data)))
+
+        return logs, stale_request_ids
+
+    @staticmethod
+    def _request_log_timestamp(log: LogRecord):
+        return getattr(getattr(log, "timestamp", None), "timestamp", lambda: 0)()
+
+    @staticmethod
+    async def get_by_identity(
+        identity_kind: str,
+        identity_subject_id: str,
+        limit: int | None = None,
+    ) -> List[LogRecord]:
+        """Get requests for a specific identity kind and subject ordered by recency."""
+        client = get_redis()
+
+        if not identity_kind or not identity_subject_id:
+            return []
+
+        limit = RedisRequestLog._normalize_identity_query_limit(limit)
+        if limit <= 0:
+            return []
+
+        index_key = _identity_index_key(identity_kind, identity_subject_id)
+        page_size = max(limit * 2, 25)
+        start = 0
+        logs: list[LogRecord] = []
+
+        while len(logs) < limit:
+            request_ids = [str(request_id) for request_id in await client.zrevrange(index_key, start, start + page_size - 1)]
+            if not request_ids:
+                break
+
+            batch_logs, stale_request_ids = await RedisRequestLog._fetch_identity_log_batch(client, request_ids)
+            logs.extend(batch_logs)
+
+            if stale_request_ids:
+                await client.zrem(index_key, *stale_request_ids)
+
+            if len(request_ids) < page_size:
+                break
+            start += len(request_ids) - len(stale_request_ids)
+
+        logs.sort(key=RedisRequestLog._request_log_timestamp, reverse=True)
+        return logs[:limit]
 
     @staticmethod
     async def get_duplicate_request_ids(body_hash: str) -> List[str]:

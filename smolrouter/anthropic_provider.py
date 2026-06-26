@@ -110,8 +110,14 @@ class AnthropicProvider(IModelProvider):
             response = await client.get("https://api.anthropic.com/v1/health")
             # Anthropic doesn't have a health endpoint, so we'll just check if the base URL is reachable
             return response.status_code in [200, 404]  # 404 is expected for /health
-        except Exception:
-            logger.exception("Anthropic health check failed")
+        except Exception as exc:
+            detail = f" ({exc})" if str(exc) else ""
+            logger.warning(
+                "Provider %s health check probe failed: %s%s",
+                self.get_provider_id(),
+                type(exc).__name__,
+                detail,
+            )
             return False
 
     async def make_request(self, request_data: dict, client_headers: dict) -> dict:

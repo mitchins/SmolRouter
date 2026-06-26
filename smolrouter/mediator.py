@@ -534,7 +534,7 @@ class ModelMediator:
         Returns:
             Tuple of (response_data, status_code, upstream_used, metadata)
         """
-        client = ClientContext(ip=source_ip, headers=headers)
+        client = kwargs.get("client_context") or ClientContext(ip=source_ip, headers=headers)
         timeout = kwargs.get("timeout")
         if timeout is None and args:
             timeout = args[0]

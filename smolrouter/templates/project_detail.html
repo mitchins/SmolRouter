@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ project.id }} - Project - SmolRouter</title>
+    <link href="/static/fonts/fonts.css" rel="stylesheet">
+    <link href="/static/css/dashboard.css" rel="stylesheet">
+    <style>
+        .project-header {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            color: white;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+
+        .project-header h1 {
+            margin: 0 0 0.5rem;
+            font-size: 1.75rem;
+            font-weight: 600;
+        }
+
+        .project-identity {
+            font-size: 0.95rem;
+            opacity: 0.95;
+            margin-bottom: 0.4rem;
+        }
+
+        .project-meta {
+            display: flex;
+            justify-content: center;
+            gap: 0.65rem;
+            flex-wrap: wrap;
+            margin-top: 0.6rem;
+        }
+
+        .project-meta-item {
+            background: rgba(255, 255, 255, 0.16);
+            border-radius: 999px;
+            padding: 0.25rem 0.65rem;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+        }
+
+        .project-meta-item.ok {
+            background: rgba(16, 185, 129, 0.28);
+        }
+
+        .project-meta-item.warn {
+            background: rgba(245, 158, 11, 0.24);
+        }
+
+        .project-meta-item.muted {
+            background: rgba(15, 23, 42, 0.22);
+            color: #f8fafc;
+        }
+
+        .project-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .project-summary-item {
+            background: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 0.75rem;
+        }
+
+        .project-summary-item .label {
+            color: #64748b;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }
+
+        .project-summary-item .value {
+            color: #0f172a;
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 0.25rem;
+            overflow-wrap: anywhere;
+        }
+
+        .breadcrumb {
+            background: #e9ecef;
+            padding: 1rem 2rem;
+            font-size: 0.9rem;
+        }
+
+        .breadcrumb a {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .project-empty {
+            text-align: center;
+            color: #64748b;
+            padding: 2rem;
+            font-size: 0.95rem;
+        }
+    </style>
+    {% include 'responsive_shell.html' %}
+</head>
+<body>
+    {% include 'navigation.html' %}
+
+    <div class="breadcrumb">
+        <a href="/">Dashboard</a> &gt; <a href="/projects">Projects</a> &gt; {{ project.id }}
+    </div>
+
+    <div class="project-header">
+        <h1>{{ project.display_name or project.id }}</h1>
+        <div class="project-identity">facade_key:{{ project.id }}</div>
+        <div class="project-meta">
+            {% if project.configured and project.enabled %}
+            <span class="project-meta-item ok">Enabled</span>
+            {% elif project.configured %}
+            <span class="project-meta-item warn">Configured but disabled</span>
+            {% else %}
+            <span class="project-meta-item muted">No current config</span>
+            {% endif %}
+            <span class="project-meta-item">Secrets: {{ project.secret_count }}</span>
+            {% if project.configured %}
+            <span class="project-meta-item">Tagged {{ project.tags | length }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="project-summary">
+            <div class="project-summary-item">
+                <div class="label">Secret Count</div>
+                <div class="value">{{ project.secret_count }}</div>
+            </div>
+            <div class="project-summary-item">
+                <div class="label">Default Class</div>
+                <div class="value">{{ project.default_class or "default" }}</div>
+            </div>
+            <div class="project-summary-item">
+                <div class="label">Quota Action</div>
+                <div class="value">{{ project.quota.action if project.quota else "observe" }}</div>
+            </div>
+            <div class="project-summary-item">
+                <div class="label">Records Loaded</div>
+                <div class="value">{{ logs | length }}</div>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <div class="table-header">
+                <h2>Recent Facade-Key Requests</h2>
+                <div class="action-buttons">
+                    <a class="action-btn secondary" href="/projects">Back to Projects</a>
+                </div>
+            </div>
+
+            <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
+                This page shows recent requests attributed to <strong>facade_key:{{ project.id }}</strong> within the retained request-log window. It does not provide quota accounting or enforcement yet.
+            </div>
+
+            <div class="table-scroll">
+                <table id="requests-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Source</th>
+                            <th>Path</th>
+                            <th>Model</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for log in logs %}
+                        <tr>
+                            <td data-label="Time"><a href="/request/{{ log.id }}">{{ log.timestamp[:19] if log.timestamp else "-" }}</a></td>
+                            <td data-label="Source">{{ log.source_ip }}</td>
+                            <td data-label="Path">{{ log.path }}</td>
+                            <td data-label="Model">{{ log.mapped_model or log.original_model or "-" }}</td>
+                            <td data-label="Status">{{ log.status_code if log.status_code else "pending" }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="5" class="project-empty">No matching requests in the recent window.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

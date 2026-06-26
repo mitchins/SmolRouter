@@ -148,6 +148,7 @@
                         <th></th>
                         <th>Time</th>
                         <th>Service</th>
+                        <th>Project Identity</th>
                         <th>Path</th>
                         <th>Model</th>
                         <th>Size</th>
@@ -157,7 +158,7 @@
                 </thead>
                 <tbody id="requests-tbody">
                     <tr>
-                        <td colspan="8" class="no-data">
+                        <td colspan="9" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">hourglass_empty</span>
                             Loading requests...
                         </td>
@@ -215,6 +216,24 @@
                     </div>
                 `;
             }
+        }
+
+        function renderProjectCell(log) {
+            const identityKind = log.identity_kind;
+            const identitySubject = log.identity_subject_id;
+            if (!identityKind || !identitySubject) {
+                return '<span style="color:#999;">-</span>';
+            }
+
+            const canonical = `${identityKind}:${identitySubject}`;
+            const displayName = log.identity_display_name;
+            const label = displayName ? `${canonical} (${displayName})` : canonical;
+
+            if (identityKind === 'facade_key') {
+                return `<a href="/projects/${encodeURIComponent(identitySubject)}" class="token-button secondary">${escapeHtml(label)}</a>`;
+            }
+
+            return escapeHtml(label);
         }
 
         // JSON formatting functions (same as main dashboard)
@@ -359,7 +378,7 @@
             if (!logs || logs.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="8" class="no-data">
+                        <td colspan="9" class="no-data">
                             <span class="material-icons" style="font-size: 3rem; opacity: 0.3; margin-bottom: 1rem; display: block;">inbox</span>
                             No requests logged yet for this client
                         </td>
@@ -379,6 +398,7 @@
                             ${log.service_type || 'unknown'}
                         </span>
                     </td>
+                    <td data-label="Project Identity">${renderProjectCell(log)}</td>
                     <td data-label="Path">${log.path || '-'}</td>
                     <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
                     <td data-label="Size">${formatSize(log.request_size)}</td>
@@ -526,6 +546,7 @@
                         ${request.service_type || 'unknown'}
                     </span>
                 </td>
+                <td data-label="Project Identity">${renderProjectCell(request)}</td>
                 <td data-label="Path">${request.path || '-'}</td>
                 <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
                 <td data-label="Size">${formatSize(request.request_size)}</td>
@@ -559,6 +580,7 @@
                                 ${request.service_type || 'unknown'}
                             </span>
                         </td>
+                        <td data-label="Project Identity">${renderProjectCell(request)}</td>
                         <td data-label="Path">${request.path || '-'}</td>
                         <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
                         <td data-label="Size">${formatSize(request.request_size)}</td>
