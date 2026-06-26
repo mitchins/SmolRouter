@@ -1059,7 +1059,7 @@ class ApiKeyQuota:
         api_key: str,
         provider_id: str,
         model_name: str,
-        cooldown_until: "datetime",
+        cooldown_until: datetime,
         error: str = None,
     ) -> None:
         """Mark a quota entry as rate-limited with a transient cooldown.

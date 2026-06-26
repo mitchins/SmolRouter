@@ -867,6 +867,7 @@ class GoogleGenAIProvider(IModelProvider):
             # one is usable again far sooner than midnight. Prefer it over a midnight reset so we
             # report an accurate retry hint and, in the fallback, don't hammer api_keys[0].
             soonest_cooldown_key, soonest_cooldown_until = self._soonest_cooldown(cooling_down_keys)
+            cooldown_remaining = None
 
             if soonest_cooldown_until is not None:
                 cooldown_remaining = max(int((soonest_cooldown_until - self._utc_now()).total_seconds()), 0)
@@ -884,7 +885,7 @@ class GoogleGenAIProvider(IModelProvider):
                 from google.api_core.exceptions import ResourceExhausted
 
                 retry_after = (
-                    cooldown_remaining if soonest_cooldown_until is not None else seconds_until_reset
+                    cooldown_remaining if cooldown_remaining is not None else seconds_until_reset
                 )
                 raise ResourceExhausted(
                     f"All {total_keys} API keys exhausted for model {model_name}. "
@@ -973,15 +974,16 @@ class GoogleGenAIProvider(IModelProvider):
         return actual_requests_today
 
     def _active_cooldown_until(self, quota: QuotaRecord) -> Optional[datetime]:
-        """Return the cooldown expiry if the key is still within a per-minute cooldown, else None."""
+        """Return the cooldown expiry if the key is still within a per-minute cooldown, else None.
+
+        ``quota_cooldown_until`` is always an aware-UTC datetime (or None): persisted values
+        pass through ``_normalize_datetime`` and in-memory values are set from ``_utc_now()``,
+        so we can compare directly in UTC without a timezone conversion.
+        """
         cooldown_until = getattr(quota, "quota_cooldown_until", None)
         if not cooldown_until:
             return None
-        try:
-            cooldown_until = _to_pacific_datetime(cooldown_until, assume_utc=True)
-        except (ValueError, TypeError, AttributeError):
-            return None
-        if cooldown_until > datetime.now(PACIFIC_TZ):
+        if cooldown_until > self._utc_now():
             return cooldown_until
         return None
 
