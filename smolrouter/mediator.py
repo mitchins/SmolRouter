@@ -380,10 +380,11 @@ class ModelMediator:
         provider: GoogleGenAIProvider,
         resolved_model: ModelInfo,
         request_payload: Dict[str, Any],
+        path: str,
         lb_instance: Any,
     ) -> Tuple[Dict[str, Any], int, str, Any]:
         try:
-            response_data, metadata = await provider.generate_completion(request_payload)
+            response_data, metadata = await provider.generate_completion(request_payload, path)
             return (
                 response_data,
                 200,
@@ -478,7 +479,7 @@ class ModelMediator:
             )
 
         if isinstance(provider, GoogleGenAIProvider):
-            return await self._handle_google_provider_request(provider, resolved_model, request_payload, lb_instance)
+            return await self._handle_google_provider_request(provider, resolved_model, request_payload, path, lb_instance)
 
         if hasattr(provider, "generate_completion") and resolved_model.provider_type in {"openai", "zai-coding"}:
             return await self._handle_openai_compatible_provider_request(
