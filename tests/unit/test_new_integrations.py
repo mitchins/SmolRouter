@@ -28,6 +28,7 @@ from smolrouter.container import SmolRouterContainer
 from smolrouter.dummy_provider import DummyConfig, DummyProvider
 from smolrouter.redis_backend import QuotaRecord
 from smolrouter.providers import OpenAIProvider, ProviderFactory, ZaiCodingProvider, ZaiCodingConfig
+from smolrouter.request_metadata import RequestMetadata
 from smolrouter.strategies import SimpleModelStrategy
 
 
@@ -410,24 +411,49 @@ async def test_google_genai_generate_completion_accepts_responses_endpoint():
         original_model="original",
         observation_id="obs-123",
         endpoint="/v1/responses",
+        model_name="gemini-2.0-flash",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
     )
 
     provider._build_completion_context = AsyncMock(return_value=context)
-    provider._run_completion_request = AsyncMock(return_value={"result": "ok"})
-    provider._finalize_completion = AsyncMock(return_value=({"id": "resp-test", "object": "response"}, None))
+    provider._run_completion_request = AsyncMock(
+        return_value=SimpleNamespace(
+            text="response text",
+            usage_metadata=SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5),
+        )
+    )
+    provider._update_api_key_stats = AsyncMock()
 
     response = await provider.generate_completion(
         {"model": "gemini-2.0-flash", "input": "Hi"},
         endpoint="/v1/responses",
     )
 
-    assert response == ({"id": "resp-test", "object": "response"}, None)
+    response_data, metadata = response
+    assert response_data["object"] == "response"
+    assert response_data["output_text"] == "response text"
+    assert response_data["usage"]["total_tokens"] == 5
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-2.0-flash"
     provider._build_completion_context.assert_awaited_once()
     build_args = provider._build_completion_context.await_args.args
     assert build_args[0] == {"model": "gemini-2.0-flash", "input": "Hi"}
     assert isinstance(build_args[1], GoogleGenAICompletionContext)
     assert build_args[1].original_model == "gemini-2.0-flash"
     assert build_args[2] == "/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_generate_completion_rejects_streaming_responses_endpoint():
+    provider = _make_google_provider()
+
+    with pytest.raises(GoogleGenAIRequestError, match="streaming is not supported for /v1/responses"):
+        await provider.generate_completion(
+            {"model": "gemini-2.0-flash", "input": "Hi", "stream": True},
+            endpoint="/v1/responses",
+        )
 
 
 @pytest.mark.asyncio
@@ -1902,7 +1928,12 @@ async def test_mediator_passes_responses_path_to_google_provider():
         endpoint="https://generativelanguage.googleapis.com",
     )
     provider = _make_google_provider()
-    provider.generate_completion = AsyncMock(return_value=({"id": "resp-test", "object": "response"}, None))
+    provider.generate_completion = AsyncMock(
+        return_value=(
+            {"id": "resp-test", "object": "response"},
+            RequestMetadata(provider_id="test-google", model_name="gemini-2.0-flash"),
+        )
+    )
     mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
     mediator._get_provider_by_id = Mock(return_value=provider)
 
@@ -1918,7 +1949,9 @@ async def test_mediator_passes_responses_path_to_google_provider():
     assert status_code == 200
     assert response_data["object"] == "response"
     assert upstream_used == "google-genai:test-google"
-    assert metadata is None
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-2.0-flash"
     provider.generate_completion.assert_awaited_once_with(
         {"model": "gemini-2.0-flash", "input": "Hello from responses"},
         "/v1/responses",

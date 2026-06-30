@@ -223,6 +223,21 @@ def test_convert_openai_to_genai_request_accepts_responses_multimodal_input(prov
     ]
 
 
+def test_convert_openai_to_genai_request_prepends_responses_instructions(provider):
+    request = {
+        "model": "gemini-2.5-flash",
+        "input": "hello from responses",
+        "instructions": "reply tersely",
+    }
+
+    _model_name, genai_request = provider._convert_openai_to_genai_request(request, endpoint="/v1/responses")
+
+    assert genai_request["contents"] == [
+        {"role": "user", "parts": [{"text": "System: reply tersely"}]},
+        {"role": "user", "parts": [{"text": "hello from responses"}]},
+    ]
+
+
 def test_convert_openai_to_genai_request_no_messages_raises(provider):
     with pytest.raises(ValueError, match="No messages"):
         provider._convert_openai_to_genai_request({"model": "x", "messages": []})
@@ -291,6 +306,17 @@ def test_convert_genai_to_responses_response(provider):
     assert out["usage"]["total_tokens"] == 5
     assert out["usage"]["input_tokens"] == 3
     assert out["usage"]["output_tokens"] == 2
+
+
+def test_convert_genai_to_responses_response_uses_unique_ids(provider):
+    meta = SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5)
+    genai_resp = SimpleNamespace(text="answer", usage_metadata=meta)
+
+    out1 = provider._convert_genai_to_responses_response(genai_resp, "gemini-2.5-flash")
+    out2 = provider._convert_genai_to_responses_response(genai_resp, "gemini-2.5-flash")
+
+    assert out1["id"] != out2["id"]
+    assert out1["output"][0]["id"] != out2["output"][0]["id"]
 
 
 # ==========================================================================

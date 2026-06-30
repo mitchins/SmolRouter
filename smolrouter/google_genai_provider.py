@@ -33,6 +33,10 @@ from .task_utils import create_logged_task
 logger = logging.getLogger(__name__)
 
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+OPENAI_CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
+OPENAI_RESPONSES_ENDPOINT = "/v1/responses"
+AUDIO_WAV_MIME_TYPE = "audio/wav"
+AUDIO_MPEG_MIME_TYPE = "audio/mpeg"
 
 
 def _current_pacific_date() -> str:
@@ -209,7 +213,7 @@ class GoogleGenAIConfig(ProviderConfig):
 class GoogleGenAICompletionContext:
     original_model: str
     observation_id: str
-    endpoint: str = "/v1/chat/completions"
+    endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT
     model_name: str = ""
     genai_request: Dict[str, Any] = field(default_factory=dict)
     api_key: str = ""
@@ -1507,12 +1511,12 @@ class GoogleGenAIProvider(IModelProvider):
     def _convert_openai_to_genai_request(
         self,
         openai_request: Dict[str, Any],
-        endpoint: str = "/v1/chat/completions",
+        endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT,
     ) -> Tuple[str, Dict[str, Any]]:
         """Convert OpenAI request format to Google GenAI format"""
         request_payload = (
             self._convert_openai_responses_to_chat_request(openai_request)
-            if endpoint == "/v1/responses"
+            if endpoint == OPENAI_RESPONSES_ENDPOINT
             else openai_request
         )
         model_name = self._normalize_model_name(request_payload.get("model", ""))
@@ -1522,24 +1526,8 @@ class GoogleGenAIProvider(IModelProvider):
         if not messages:
             raise ValueError("No messages provided in request")
 
-        contents = []
-        for message in messages:
-            genai_content = self._convert_openai_message_to_genai_content(message)
-            if genai_content is not None:
-                contents.append(genai_content)
-
-        # Build generation config
-        generation_config = {}
-
-        # Map common parameters
-        if "temperature" in request_payload:
-            generation_config["temperature"] = request_payload["temperature"]
-        if "max_tokens" in request_payload:
-            generation_config["max_output_tokens"] = request_payload["max_tokens"]
-        elif "max_completion_tokens" in request_payload:
-            generation_config["max_output_tokens"] = request_payload["max_completion_tokens"]
-        elif "max_output_tokens" in request_payload:
-            generation_config["max_output_tokens"] = request_payload["max_output_tokens"]
+        contents = self._convert_openai_messages_to_genai_contents(messages)
+        generation_config = self._build_generation_config(request_payload)
         if "top_p" in request_payload:
             generation_config["top_p"] = request_payload["top_p"]
 
@@ -1548,20 +1536,48 @@ class GoogleGenAIProvider(IModelProvider):
 
         return model_name, genai_request
 
+    def _convert_openai_messages_to_genai_contents(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        contents = []
+        for message in messages:
+            genai_content = self._convert_openai_message_to_genai_content(message)
+            if genai_content is not None:
+                contents.append(genai_content)
+        return contents
+
+    def _build_generation_config(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        generation_config = {}
+        if "temperature" in request_payload:
+            generation_config["temperature"] = request_payload["temperature"]
+
+        max_output_tokens = self._extract_max_output_tokens(request_payload)
+        if max_output_tokens is not None:
+            generation_config["max_output_tokens"] = max_output_tokens
+
+        return generation_config
+
+    @staticmethod
+    def _extract_max_output_tokens(request_payload: Dict[str, Any]) -> Optional[int]:
+        for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            if key in request_payload:
+                return request_payload[key]
+        return None
+
     def _convert_openai_responses_to_chat_request(self, openai_request: Dict[str, Any]) -> Dict[str, Any]:
         converted_request = dict(openai_request)
         messages = self._convert_responses_input_to_messages(openai_request.get("input"))
-        instructions = openai_request.get("instructions")
-
-        if isinstance(instructions, str) and instructions:
-            messages = [{"role": "system", "content": instructions}, *messages]
-
+        messages = self._prepend_responses_instructions(messages, openai_request.get("instructions"))
         converted_request["messages"] = messages
 
         if "max_output_tokens" in openai_request and "max_completion_tokens" not in converted_request:
             converted_request["max_completion_tokens"] = openai_request["max_output_tokens"]
 
         return converted_request
+
+    @staticmethod
+    def _prepend_responses_instructions(messages: List[Dict[str, Any]], instructions: Any) -> List[Dict[str, Any]]:
+        if isinstance(instructions, str) and instructions:
+            return [{"role": "system", "content": instructions}, *messages]
+        return messages
 
     def _convert_responses_input_to_messages(self, input_data: Any) -> List[Dict[str, Any]]:
         if isinstance(input_data, str):
@@ -1572,31 +1588,38 @@ class GoogleGenAIProvider(IModelProvider):
 
         messages: List[Dict[str, Any]] = []
         for item in input_data:
-            if isinstance(item, str):
-                messages.append({"role": "user", "content": item})
-                continue
-
-            if not isinstance(item, dict):
-                continue
-
-            role = item.get("role", "user")
-
-            if "content" in item:
-                content = item.get("content", "")
-                if isinstance(content, str):
-                    messages.append({"role": role, "content": content})
-                    continue
-
-                converted_content = self._convert_responses_content_to_chat_content(content)
-                if converted_content:
-                    messages.append({"role": role, "content": converted_content})
-                continue
-
-            converted_item = self._convert_responses_content_item_to_chat_item(item)
-            if converted_item is not None:
-                messages.append({"role": role, "content": [converted_item]})
+            message = self._convert_responses_input_item_to_message(item)
+            if message is not None:
+                messages.append(message)
 
         return messages
+
+    def _convert_responses_input_item_to_message(self, item: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(item, str):
+            return {"role": "user", "content": item}
+
+        if not isinstance(item, dict):
+            return None
+
+        role = item.get("role", "user")
+        if "content" in item:
+            return self._convert_responses_content_message(role, item.get("content", ""))
+
+        converted_item = self._convert_responses_content_item_to_chat_item(item)
+        if converted_item is not None:
+            return {"role": role, "content": [converted_item]}
+
+        return None
+
+    def _convert_responses_content_message(self, role: str, content: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(content, str):
+            return {"role": role, "content": content}
+
+        converted_content = self._convert_responses_content_to_chat_content(content)
+        if converted_content:
+            return {"role": role, "content": converted_content}
+
+        return None
 
     def _convert_responses_content_to_chat_content(self, content: Any) -> List[Dict[str, Any]]:
         if isinstance(content, str):
@@ -1625,19 +1648,24 @@ class GoogleGenAIProvider(IModelProvider):
             return {"type": "input_audio", "input_audio": item.get("input_audio", {})}
 
         if item_type in {"input_image", "image_url"}:
-            image_url = item.get("image_url")
-            if isinstance(image_url, str):
-                return {"type": "image_url", "image_url": {"url": image_url}}
-            if isinstance(image_url, dict):
-                return {"type": "image_url", "image_url": image_url}
+            return self._convert_responses_image_item_to_chat_item(item)
 
-            input_image = item.get("input_image")
-            if isinstance(input_image, str):
-                return {"type": "image_url", "image_url": {"url": input_image}}
-            if isinstance(input_image, dict):
-                nested_url = input_image.get("image_url") or input_image.get("url")
-                if isinstance(nested_url, str):
-                    return {"type": "image_url", "image_url": {"url": nested_url}}
+        return None
+
+    def _convert_responses_image_item_to_chat_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        image_url = item.get("image_url")
+        if isinstance(image_url, str):
+            return {"type": "image_url", "image_url": {"url": image_url}}
+        if isinstance(image_url, dict):
+            return {"type": "image_url", "image_url": image_url}
+
+        input_image = item.get("input_image")
+        if isinstance(input_image, str):
+            return {"type": "image_url", "image_url": {"url": input_image}}
+        if isinstance(input_image, dict):
+            nested_url = input_image.get("image_url") or input_image.get("url")
+            if isinstance(nested_url, str):
+                return {"type": "image_url", "image_url": {"url": nested_url}}
 
         return None
 
@@ -1668,53 +1696,64 @@ class GoogleGenAIProvider(IModelProvider):
             return parts
 
         for item in content:
-            if item.get("type") == "text":
-                parts.append({"text": item.get("text", "")})
-                continue
-
-            if item.get("type") == "input_audio":
-                input_audio = item.get("input_audio", {})
-                audio_data = input_audio.get("data", "")
-                audio_format = str(input_audio.get("format", "")).strip().lower()
-
-                if audio_data:
-                    parts.append(
-                        {
-                            "inline_data": {
-                                "mime_type": self._audio_format_to_mime_type(audio_format),
-                                "data": audio_data,
-                            }
-                        }
-                    )
-                continue
-
-            if item.get("type") != "image_url":
-                continue
-
-            image_url = item.get("image_url", {}).get("url", "")
-            if image_url.startswith("data:"):
-                try:
-                    header, base64_data = image_url.split(",", 1)
-                    mime_type = header.split(":")[1].split(";")[0]
-                    parts.append({"inline_data": {"mime_type": mime_type, "data": base64_data}})
-                except Exception as exc:
-                    logger.warning("Failed to parse data URI: %s", exc)
-            else:
-                logger.warning(
-                    f"Image URLs are not supported in this version, only base64 data URIs: {image_url[:30]}..."
-                )
+            part = self._convert_openai_content_item_to_part(item)
+            if part is not None:
+                parts.append(part)
 
         return parts
+
+    def _convert_openai_content_item_to_part(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        item_type = item.get("type")
+        if item_type == "text":
+            return {"text": item.get("text", "")}
+        if item_type == "input_audio":
+            return self._convert_openai_input_audio_to_part(item.get("input_audio", {}))
+        if item_type == "image_url":
+            return self._convert_openai_image_url_to_part(item.get("image_url", {}))
+        return None
+
+    def _convert_openai_input_audio_to_part(self, input_audio: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        audio_data = input_audio.get("data", "")
+        audio_format = str(input_audio.get("format", "")).strip().lower()
+        if not audio_data:
+            return None
+
+        return {
+            "inline_data": {
+                "mime_type": self._audio_format_to_mime_type(audio_format),
+                "data": audio_data,
+            }
+        }
+
+    def _convert_openai_image_url_to_part(self, image_url: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        image_url_value = image_url.get("url", "")
+        if not image_url_value.startswith("data:"):
+            logger.warning(
+                "Image URLs are not supported in this version, only base64 data URIs: %s...",
+                image_url_value[:30],
+            )
+            return None
+
+        return self._parse_data_uri_inline_part(image_url_value)
+
+    def _parse_data_uri_inline_part(self, data_uri: str) -> Optional[Dict[str, Any]]:
+        try:
+            header, base64_data = data_uri.split(",", 1)
+            mime_type = header.split(":")[1].split(";")[0]
+            return {"inline_data": {"mime_type": mime_type, "data": base64_data}}
+        except Exception as exc:
+            logger.warning("Failed to parse data URI: %s", exc)
+            return None
 
     @staticmethod
     def _audio_format_to_mime_type(audio_format: str) -> str:
         format_key = audio_format.strip().lower()
         mime_types = {
-            "wav": "audio/wav",
-            "wave": "audio/wav",
-            "mp3": "audio/mpeg",
-            "mpeg": "audio/mpeg",
-            "mpga": "audio/mpeg",
+            "wav": AUDIO_WAV_MIME_TYPE,
+            "wave": AUDIO_WAV_MIME_TYPE,
+            "mp3": AUDIO_MPEG_MIME_TYPE,
+            "mpeg": AUDIO_MPEG_MIME_TYPE,
+            "mpga": AUDIO_MPEG_MIME_TYPE,
             "m4a": "audio/mp4",
             "mp4": "audio/mp4",
             "aac": "audio/aac",
@@ -1729,19 +1768,18 @@ class GoogleGenAIProvider(IModelProvider):
             return mime_types[format_key]
         if format_key:
             return f"audio/{format_key}"
-        return "audio/wav"
+        return AUDIO_WAV_MIME_TYPE
 
     def _convert_genai_to_openai_response(self, genai_response: Any, original_model: str) -> Dict[str, Any]:
         """Convert Google GenAI response to OpenAI format"""
         try:
             text_content = self._extract_genai_text(genai_response)
             usage = self._extract_genai_usage(genai_response)
-
-            # Build OpenAI-compatible response
+            created = self._current_utc_unix_timestamp()
             openai_response = {
-                "id": f"chatcmpl-{datetime.now().timestamp()}",
+                "id": f"chatcmpl-{created}",
                 "object": "chat.completion",
-                "created": int(datetime.now().timestamp()),
+                "created": created,
                 "model": original_model,
                 "choices": [
                     {"index": 0, "message": {"role": "assistant", "content": text_content}, "finish_reason": "stop"}
@@ -1760,8 +1798,8 @@ class GoogleGenAIProvider(IModelProvider):
         try:
             text_content = self._extract_genai_text(genai_response)
             usage = self._extract_genai_usage(genai_response)
-            created = int(datetime.now().timestamp())
-            response_id = f"resp-{created}"
+            created = self._current_utc_unix_timestamp()
+            response_id, message_id = self._create_responses_ids()
 
             return {
                 "id": response_id,
@@ -1771,7 +1809,7 @@ class GoogleGenAIProvider(IModelProvider):
                 "model": original_model,
                 "output": [
                     {
-                        "id": f"msg-{created}",
+                        "id": message_id,
                         "type": "message",
                         "role": "assistant",
                         "status": "completed",
@@ -1789,6 +1827,14 @@ class GoogleGenAIProvider(IModelProvider):
         except Exception:
             logger.exception("Error converting GenAI response to OpenAI Responses format")
             raise
+
+    @staticmethod
+    def _create_responses_ids() -> Tuple[str, str]:
+        return f"resp-{secrets.token_hex(8)}", f"msg-{secrets.token_hex(8)}"
+
+    @staticmethod
+    def _current_utc_unix_timestamp() -> int:
+        return int(datetime.now(timezone.utc).timestamp())
 
     def _extract_genai_text(self, genai_response: Any) -> str:
         text_content = ""
@@ -1825,7 +1871,7 @@ class GoogleGenAIProvider(IModelProvider):
     async def generate_completion(
         self,
         openai_request: Dict[str, Any],
-        endpoint: str = "/v1/chat/completions",
+        endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT,
     ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
         """Generate completion using Google GenAI API
 
@@ -1840,6 +1886,7 @@ class GoogleGenAIProvider(IModelProvider):
         )
 
         try:
+            self._validate_endpoint_request(openai_request, endpoint, context)
             context = await self._build_completion_context(openai_request, context, endpoint)
             response = await self._run_completion_request(context)
             return await self._finalize_completion(context, response)
@@ -1853,7 +1900,7 @@ class GoogleGenAIProvider(IModelProvider):
         self,
         openai_request: Dict[str, Any],
         context: GoogleGenAICompletionContext,
-        endpoint: str = "/v1/chat/completions",
+        endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT,
     ) -> GoogleGenAICompletionContext:
         context.endpoint = endpoint
         context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request, endpoint)
@@ -1929,13 +1976,26 @@ class GoogleGenAIProvider(IModelProvider):
         finally:
             await self._rate_limiter.release_slot()
 
+    def _validate_endpoint_request(
+        self,
+        openai_request: Dict[str, Any],
+        endpoint: str,
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        if endpoint == OPENAI_RESPONSES_ENDPOINT and openai_request.get("stream"):
+            raise self._build_request_error_from_context(
+                context,
+                f"400 invalid argument: streaming is not supported for {OPENAI_RESPONSES_ENDPOINT} "
+                "in the Google GenAI compatibility shim",
+            )
+
     async def _finalize_completion(
         self, context: GoogleGenAICompletionContext, response: Any
     ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
         from .request_metadata import RequestMetadata
         from .transport_observer import get_observer
 
-        if context.endpoint == "/v1/responses":
+        if context.endpoint == OPENAI_RESPONSES_ENDPOINT:
             openai_response = self._convert_genai_to_responses_response(response, context.original_model)
         else:
             openai_response = self._convert_genai_to_openai_response(response, context.original_model)
