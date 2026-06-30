@@ -110,6 +110,20 @@ def test_convert_content_to_parts_remote_image_skipped(provider):
     assert provider._convert_openai_content_to_parts(content) == []
 
 
+def test_convert_content_to_parts_input_audio(provider):
+    content = [{"type": "input_audio", "input_audio": {"data": "QUJD", "format": "wav"}}]
+    assert provider._convert_openai_content_to_parts(content) == [
+        {"inline_data": {"mime_type": "audio/wav", "data": "QUJD"}}
+    ]
+
+
+def test_audio_format_to_mime_type_defaults(provider):
+    assert provider._audio_format_to_mime_type("mp3") == "audio/mpeg"
+    assert provider._audio_format_to_mime_type("aiff") == "audio/aiff"
+    assert provider._audio_format_to_mime_type("custom") == "audio/custom"
+    assert provider._audio_format_to_mime_type("") == "audio/wav"
+
+
 def test_convert_content_to_parts_non_list_non_str(provider):
     assert provider._convert_openai_content_to_parts(42) == []
 
@@ -168,6 +182,47 @@ def test_convert_openai_to_genai_request_accepts_max_completion_tokens(provider)
     assert genai_request["generation_config"]["max_output_tokens"] == 123
 
 
+def test_convert_openai_to_genai_request_accepts_responses_string_input(provider):
+    request = {
+        "model": "gemini-2.5-flash",
+        "input": "hello from responses",
+        "max_output_tokens": 77,
+    }
+
+    model_name, genai_request = provider._convert_openai_to_genai_request(request, endpoint="/v1/responses")
+
+    assert model_name == "gemini-2.5-flash"
+    assert genai_request["contents"] == [{"role": "user", "parts": [{"text": "hello from responses"}]}]
+    assert genai_request["generation_config"]["max_output_tokens"] == 77
+
+
+def test_convert_openai_to_genai_request_accepts_responses_multimodal_input(provider):
+    request = {
+        "model": "gemini-2.5-flash",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "transcribe this"},
+                    {"type": "input_audio", "input_audio": {"data": "QUJD", "format": "wav"}},
+                ],
+            }
+        ],
+    }
+
+    _model_name, genai_request = provider._convert_openai_to_genai_request(request, endpoint="/v1/responses")
+
+    assert genai_request["contents"] == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "transcribe this"},
+                {"inline_data": {"mime_type": "audio/wav", "data": "QUJD"}},
+            ],
+        }
+    ]
+
+
 def test_convert_openai_to_genai_request_no_messages_raises(provider):
     with pytest.raises(ValueError, match="No messages"):
         provider._convert_openai_to_genai_request({"model": "x", "messages": []})
@@ -220,6 +275,22 @@ def test_convert_genai_to_openai_response(provider):
     assert out["choices"][0]["message"]["content"] == "answer"
     assert out["choices"][0]["finish_reason"] == "stop"
     assert out["usage"]["total_tokens"] == 5
+
+
+def test_convert_genai_to_responses_response(provider):
+    meta = SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5)
+    genai_resp = SimpleNamespace(text="answer", usage_metadata=meta)
+    out = provider._convert_genai_to_responses_response(genai_resp, "gemini-2.5-flash")
+
+    assert out["id"].startswith("resp-")
+    assert out["object"] == "response"
+    assert out["status"] == "completed"
+    assert out["model"] == "gemini-2.5-flash"
+    assert out["output_text"] == "answer"
+    assert out["output"][0]["content"][0]["type"] == "output_text"
+    assert out["usage"]["total_tokens"] == 5
+    assert out["usage"]["input_tokens"] == 3
+    assert out["usage"]["output_tokens"] == 2
 
 
 # ==========================================================================

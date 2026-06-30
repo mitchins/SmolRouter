@@ -44,6 +44,12 @@
 - 🔵 Parse google_genai non-text response parts
     Explicitly parse/record non-text `candidates.content.parts` (e.g., `thought_signature`) so we stop implicit text-only concatenation and warning spam while preserving backward-compatible text output.
 
+- 🔵 Responses API parity beyond Google shim (Phase 2 backlog)
+    Current state is intentionally narrow: Google GenAI now has a minimal `/v1/responses` shim that translates basic `input`/`instructions` into the existing chat/content path, supports inline `input_audio`, and returns a non-streaming `response` object. Phase 2 should make endpoint handling first-class across providers and shared helpers rather than letting each path accrete endpoint-specific hacks. Scope: shared request normalization for `input`, `instructions`, and `max_output_tokens`; token estimation for Responses-style inputs; `/no_think` marker handling outside `messages`/`prompt`; and honest non-streaming plus streaming Responses semantics where supported. Goal: explicit partial parity, not "looks close enough" shape masquerading.
+
+- 🔵 Internal normalized request/response model for multi-provider API parity (Phase 3 backlog)
+    If `/v1/responses` becomes a real product surface, stop teaching each provider about both OpenAI Chat payloads and Responses payloads independently. Introduce a provider-neutral internal request model that captures text/media/system/tool controls once, then adapt that canonical model to OpenAI-compatible, Google GenAI, Anthropic, and Ollama transports. This reduces duplicated conversion logic, keeps future additions like tools/events/streaming from multiplying across provider adapters, and turns endpoint support into translation at the boundary instead of ad hoc branching deep inside providers. Do this only after Phase 2 proves the surface is worth first-class support.
+
 - 🔵 Enforce request span start/completion parity
     Guarantee every request path logs matching `Request started` and `Request completed` events (including early validation/adapter/timeout fail paths) with completion cause.
 
@@ -99,6 +105,9 @@
 
 - 🟢 Console Logging Cleanup
     Added `LOG_LEVEL` with sane defaults and reduced default INFO-level console noise by moving provider/routing debug details behind `DEBUG`, improving request-level signal quality.
+
+- 🟢 Minimal Google `/v1/responses` compatibility shim
+    Google GenAI requests can now accept basic OpenAI Responses payloads by translating `input`/`instructions` into the existing Gemini chat/content path, including inline `input_audio`, and returning a non-streaming `response` object. Intentionally narrow: Google-only, non-streaming, and not a claim of full Responses API parity across shared helpers or other providers.
 
 ## Architecture Notes
 
