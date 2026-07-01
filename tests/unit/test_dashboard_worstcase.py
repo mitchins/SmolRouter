@@ -30,13 +30,12 @@ import smolrouter.app as app_module
 import smolrouter.database as database
 from smolrouter.database import (
     get_error_summary,
-    get_inflight_requests,
     get_log_stats,
     get_recent_logs,
     record_exception_event,
 )
 from smolrouter.redis_backend import RedisRequestLog
-from smolrouter.redis_config import redis_client, is_fake_redis
+from smolrouter.redis_config import redis_client
 from tests.redis_roundtrip import RoundTripCounter
 
 # Bound for "O(1)" work: a handful of reads, never a per-record scan.

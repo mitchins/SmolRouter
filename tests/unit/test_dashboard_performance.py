@@ -26,7 +26,6 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 
-import smolrouter.database as database
 from smolrouter.database import get_log_stats, get_recent_logs
 from smolrouter.redis_backend import RedisRequestLog
 from smolrouter.redis_config import redis_client, is_fake_redis
