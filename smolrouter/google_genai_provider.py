@@ -1427,7 +1427,9 @@ class GoogleGenAIProvider(IModelProvider):
         metadata.setdefault("sample_rate_hz", TTS_SAMPLE_RATE_HZ)
         metadata.setdefault("channels", TTS_CHANNELS)
         metadata.setdefault("sample_width_bytes", TTS_SAMPLE_WIDTH_BYTES)
-        metadata.setdefault("max_context_tokens", 32768)
+        input_token_limit = metadata.get("input_token_limit")
+        if input_token_limit is not None:
+            metadata.setdefault("max_context_tokens", input_token_limit)
         metadata.setdefault("recommended_chunking", TTS_RECOMMENDED_CHUNKING)
         return metadata
 
@@ -1575,7 +1577,7 @@ class GoogleGenAIProvider(IModelProvider):
         )
         model_name = self._normalize_model_name(request_payload.get("model", ""))
 
-        if self._is_tts_request(openai_request, endpoint):
+        if self._is_tts_request(openai_request):
             self._validate_tts_request(openai_request, endpoint)
             tts_text = self._extract_tts_text(openai_request, endpoint)
             return model_name, {
@@ -1624,7 +1626,7 @@ class GoogleGenAIProvider(IModelProvider):
                 return request_payload[key]
         return None
 
-    def _is_tts_request(self, request_payload: Dict[str, Any], endpoint: str) -> bool:
+    def _is_tts_request(self, request_payload: Dict[str, Any]) -> bool:
         modalities = request_payload.get("modalities")
         if isinstance(modalities, list) and any(str(modality).strip().lower() == "audio" for modality in modalities):
             return True
@@ -1641,7 +1643,7 @@ class GoogleGenAIProvider(IModelProvider):
         return audio_config if isinstance(audio_config, dict) else {}
 
     def _get_tts_audio_format(self, request_payload: Dict[str, Any]) -> str:
-        requested_format = str(self._get_tts_audio_config(request_payload).get("format", "pcm")).strip().lower()
+        requested_format = str(self._get_tts_audio_config(request_payload).get("format") or "pcm").strip().lower()
         return requested_format or "pcm"
 
     @staticmethod
@@ -1649,13 +1651,19 @@ class GoogleGenAIProvider(IModelProvider):
         normalized = str(voice_name or "").strip()
         return normalized or fallback
 
-    def _validate_tts_request(self, request_payload: Dict[str, Any], endpoint: str) -> None:
-        if endpoint not in TTS_SUPPORTED_ENDPOINTS:
-            raise ValueError(
-                "501 not implemented: audio-output TTS is only supported for "
-                f"{OPENAI_CHAT_COMPLETIONS_ENDPOINT} and {OPENAI_RESPONSES_ENDPOINT}"
-            )
+    @staticmethod
+    def _normalize_tts_modalities(request_payload: Dict[str, Any]) -> set[str]:
+        modalities = request_payload.get("modalities")
+        if not isinstance(modalities, list):
+            return set()
+        return {str(modality).strip().lower() for modality in modalities if str(modality).strip()}
 
+    def _validate_tts_modalities(self, request_payload: Dict[str, Any]) -> None:
+        normalized_modalities = self._normalize_tts_modalities(request_payload)
+        if normalized_modalities and normalized_modalities != {"audio"}:
+            raise ValueError("400 invalid argument: TTS requests currently support audio-only output")
+
+    def _validate_tts_audio_settings(self, request_payload: Dict[str, Any], endpoint: str) -> None:
         if request_payload.get("stream"):
             raise ValueError(f"400 invalid argument: streaming is not supported for TTS requests on {endpoint}")
 
@@ -1665,21 +1673,34 @@ class GoogleGenAIProvider(IModelProvider):
                 f"400 invalid argument: unsupported TTS audio format '{requested_format}'. Supported formats: wav, pcm"
             )
 
-        speakers = self._get_tts_audio_config(request_payload).get("speakers")
-        if speakers is not None:
-            if not isinstance(speakers, list) or not speakers:
-                raise ValueError("400 invalid argument: audio.speakers must be a non-empty list")
+    @staticmethod
+    def _validate_tts_speakers(speakers: Any) -> None:
+        if speakers is None:
+            return
 
-            if len(speakers) > TTS_MAX_SPEAKERS:
-                raise ValueError("400 invalid argument: Google GenAI TTS supports at most 2 speakers")
+        if not isinstance(speakers, list) or not speakers:
+            raise ValueError("400 invalid argument: audio.speakers must be a non-empty list")
 
-            for speaker_config in speakers:
-                if not isinstance(speaker_config, dict):
-                    raise ValueError("400 invalid argument: each TTS speaker entry must be an object")
+        if len(speakers) > TTS_MAX_SPEAKERS:
+            raise ValueError("400 invalid argument: Google GenAI TTS supports at most 2 speakers")
 
-                if not str(speaker_config.get("speaker", "")).strip():
-                    raise ValueError("400 invalid argument: each TTS speaker entry must include a speaker name")
+        for speaker_config in speakers:
+            if not isinstance(speaker_config, dict):
+                raise ValueError("400 invalid argument: each TTS speaker entry must be an object")
 
+            if not str(speaker_config.get("speaker", "")).strip():
+                raise ValueError("400 invalid argument: each TTS speaker entry must include a speaker name")
+
+    def _validate_tts_request(self, request_payload: Dict[str, Any], endpoint: str) -> None:
+        if endpoint not in TTS_SUPPORTED_ENDPOINTS:
+            raise ValueError(
+                "501 not implemented: audio-output TTS is only supported for "
+                f"{OPENAI_CHAT_COMPLETIONS_ENDPOINT} and {OPENAI_RESPONSES_ENDPOINT}"
+            )
+
+        self._validate_tts_modalities(request_payload)
+        self._validate_tts_audio_settings(request_payload, endpoint)
+        self._validate_tts_speakers(self._get_tts_audio_config(request_payload).get("speakers"))
         self._extract_tts_text(request_payload, endpoint)
 
     def _extract_tts_text(self, request_payload: Dict[str, Any], endpoint: str) -> str:
@@ -1708,7 +1729,7 @@ class GoogleGenAIProvider(IModelProvider):
         if not isinstance(message, dict):
             return ""
 
-        role = str(message.get("role", "user")).strip().lower() or "user"
+        role = str(message.get("role") or "user").strip().lower()
         content = message.get("content", "")
 
         if isinstance(content, str):
@@ -1724,7 +1745,7 @@ class GoogleGenAIProvider(IModelProvider):
 
             item_type = str(item.get("type", "")).strip().lower()
             if item_type in {"text", "input_text"}:
-                text_parts.append(str(item.get("text", "")))
+                text_parts.append(str(item.get("text") or ""))
                 continue
 
             if item_type in {"image_url", "input_image", "input_audio"}:
@@ -2051,36 +2072,52 @@ class GoogleGenAIProvider(IModelProvider):
 
     def _extract_genai_audio_bytes(self, genai_response: Any) -> bytes:
         audio_chunks = []
+        content = self._extract_genai_audio_content(genai_response)
+        for part in getattr(content, "parts", None) or []:
+            inline_data = self._extract_genai_inline_data(part)
+            if inline_data is None or not self._is_genai_audio_inline_data(inline_data):
+                continue
 
-        for candidate in getattr(genai_response, "candidates", None) or []:
-            content = getattr(candidate, "content", None)
-            for part in getattr(content, "parts", None) or []:
-                inline_data = getattr(part, "inline_data", None)
-                if inline_data is None and isinstance(part, dict):
-                    inline_data = part.get("inline_data") or part.get("inlineData")
-                if inline_data is None:
-                    continue
-
-                mime_type = getattr(inline_data, "mime_type", None)
-                if mime_type is None and isinstance(inline_data, dict):
-                    mime_type = inline_data.get("mime_type") or inline_data.get("mimeType")
-                if mime_type and not str(mime_type).lower().startswith("audio/"):
-                    continue
-
-                audio_data = getattr(inline_data, "data", None)
-                if audio_data is None and isinstance(inline_data, dict):
-                    audio_data = inline_data.get("data")
-                if not audio_data:
-                    continue
-
-                if isinstance(audio_data, bytes):
-                    audio_chunks.append(audio_data)
-                elif isinstance(audio_data, bytearray):
-                    audio_chunks.append(bytes(audio_data))
-                else:
-                    audio_chunks.append(base64.b64decode(audio_data))
+            audio_data = self._extract_genai_audio_data(inline_data)
+            if audio_data:
+                audio_chunks.append(audio_data)
 
         return b"".join(audio_chunks)
+
+    @staticmethod
+    def _extract_genai_audio_content(genai_response: Any) -> Any:
+        candidates = getattr(genai_response, "candidates", None) or []
+        if not candidates:
+            return None
+        return getattr(candidates[0], "content", None)
+
+    @staticmethod
+    def _extract_genai_inline_data(part: Any) -> Any:
+        inline_data = getattr(part, "inline_data", None)
+        if inline_data is None and isinstance(part, dict):
+            return part.get("inline_data") or part.get("inlineData")
+        return inline_data
+
+    @staticmethod
+    def _is_genai_audio_inline_data(inline_data: Any) -> bool:
+        mime_type = getattr(inline_data, "mime_type", None)
+        if mime_type is None and isinstance(inline_data, dict):
+            mime_type = inline_data.get("mime_type") or inline_data.get("mimeType")
+        return not mime_type or str(mime_type).lower().startswith("audio/")
+
+    @staticmethod
+    def _extract_genai_audio_data(inline_data: Any) -> bytes:
+        audio_data = getattr(inline_data, "data", None)
+        if audio_data is None and isinstance(inline_data, dict):
+            audio_data = inline_data.get("data")
+        if not audio_data:
+            return b""
+
+        if isinstance(audio_data, bytes):
+            return audio_data
+        if isinstance(audio_data, bytearray):
+            return bytes(audio_data)
+        return base64.b64decode(audio_data)
 
     @staticmethod
     def _pcm_to_wav_bytes(
@@ -2259,7 +2296,7 @@ class GoogleGenAIProvider(IModelProvider):
         endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT,
     ) -> GoogleGenAICompletionContext:
         context.endpoint = endpoint
-        context.tts_request = self._is_tts_request(openai_request, endpoint)
+        context.tts_request = self._is_tts_request(openai_request)
         context.tts_audio_format = self._get_tts_audio_format(openai_request) if context.tts_request else "pcm"
         context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request, endpoint)
         context.api_key = await self._select_best_api_key(context.model_name)
@@ -2340,7 +2377,7 @@ class GoogleGenAIProvider(IModelProvider):
         endpoint: str,
         context: GoogleGenAICompletionContext,
     ) -> None:
-        if self._is_tts_request(openai_request, endpoint):
+        if self._is_tts_request(openai_request):
             try:
                 self._validate_tts_request(openai_request, endpoint)
             except ValueError as exc:

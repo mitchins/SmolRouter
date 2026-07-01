@@ -159,7 +159,7 @@ If you already have inline or file-based keys in an existing routes config, `pyt
 
 Google GenAI models are discovered live from the provider. Use the provider and system dashboards to inspect configured backends, quotas, and proxy status.
 
-Google GenAI TTS/audio-output is available through the existing OpenAI-style rails on `/v1/responses` and `/v1/chat/completions`; no separate TTS endpoint is required. Supported Google TTS models include `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, and `gemini-2.5-pro-preview-tts`. TTS requests are text-input/audio-output only, support `wav` and `pcm`, and return base64 audio data in the OpenAI-compatible JSON response. Native audio is 24 kHz mono 16-bit PCM; `wav` responses wrap that PCM into a WAV container. Keep prompts under the practical 32k-token context limit and chunk transcripts longer than a few minutes for more stable output quality.
+Google GenAI TTS/audio-output is available through the existing OpenAI-style rails on `/v1/responses` and `/v1/chat/completions`; no separate TTS endpoint is required. Supported Google TTS models include `gemini-3.1-flash-tts-preview`, `gemini-2.5-flash-preview-tts`, and `gemini-2.5-pro-preview-tts`. TTS requests are text-input/audio-output only, support `wav` and `pcm`, and return base64 audio data in the OpenAI-compatible JSON response. Native audio is 24 kHz mono 16-bit PCM; `wav` responses wrap that PCM into a WAV container. The current July 2026 fallback snapshot exposes an `8192` token input limit for these preview TTS models, and transcripts longer than a few minutes should still be chunked for more stable output quality.
 
 `/v1/responses` TTS example:
 ```json

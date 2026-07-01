@@ -248,12 +248,12 @@ def test_convert_openai_to_genai_request_no_messages_raises(provider):
 
 def test_is_tts_request_detects_modalities_audio(provider):
     request = {"model": "gemini-3.1-flash-tts-preview", "messages": [], "modalities": ["audio"]}
-    assert provider._is_tts_request(request, endpoint="/v1/chat/completions") is True
+    assert provider._is_tts_request(request) is True
 
 
 def test_is_tts_request_detects_response_format_audio(provider):
     request = {"model": "gemini-3.1-flash-tts-preview", "messages": [], "response_format": {"type": "audio"}}
-    assert provider._is_tts_request(request, endpoint="/v1/chat/completions") is True
+    assert provider._is_tts_request(request) is True
 
 
 def test_build_tts_generation_config_uses_default_voice(provider):
@@ -267,6 +267,10 @@ def test_build_tts_generation_config_uses_supplied_voice(provider):
     config = provider._build_tts_generation_config({"audio": {"voice": "Puck", "format": "wav"}})
 
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
+
+
+def test_get_tts_audio_format_defaults_when_explicitly_null(provider):
+    assert provider._get_tts_audio_format({"audio": {"format": None}}) == "pcm"
 
 
 def test_build_tts_generation_config_supports_two_speakers(provider):
@@ -309,6 +313,18 @@ def test_validate_tts_request_rejects_three_speakers(provider):
         provider._validate_tts_request(request, endpoint="/v1/chat/completions")
 
 
+def test_validate_tts_request_rejects_mixed_output_modalities(provider):
+    request = {
+        "model": "gemini-3.1-flash-tts-preview",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["text", "audio"],
+        "audio": {"format": "wav"},
+    }
+
+    with pytest.raises(ValueError, match="audio-only output"):
+        provider._validate_tts_request(request, endpoint="/v1/chat/completions")
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -326,6 +342,16 @@ def test_validate_tts_request_rejects_non_text_input(provider, content):
 
     with pytest.raises(ValueError, match="only support text input"):
         provider._validate_tts_request(request, endpoint="/v1/chat/completions")
+
+
+def test_extract_tts_text_from_message_defaults_null_role_to_user(provider):
+    message = {"role": None, "content": "hello"}
+    assert provider._extract_tts_text_from_message(message) == "hello"
+
+
+def test_extract_tts_text_from_message_ignores_null_text(provider):
+    message = {"role": "user", "content": [{"type": "text", "text": None}]}
+    assert provider._extract_tts_text_from_message(message) == ""
 
 
 # ==========================================================================
@@ -379,6 +405,25 @@ def test_extract_genai_audio_bytes(provider):
     )
 
     assert provider._extract_genai_audio_bytes(response) == b"\x01\x02\x03\x04"
+
+
+def test_extract_genai_audio_bytes_uses_first_candidate_only(provider):
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[SimpleNamespace(inline_data=SimpleNamespace(mime_type="audio/pcm", data=b"\x01\x02"))]
+                )
+            ),
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[SimpleNamespace(inline_data=SimpleNamespace(mime_type="audio/pcm", data=b"\x03\x04"))]
+                )
+            ),
+        ]
+    )
+
+    assert provider._extract_genai_audio_bytes(response) == b"\x01\x02"
 
 
 def test_pcm_to_wav_bytes_wraps_pcm(provider):
@@ -658,6 +703,17 @@ def test_build_static_model_metadata(provider):
     assert meta["supported_methods"] == ["generateContent"]
     assert meta["thinking"] is True
     assert meta["input_token_limit"] == 5
+
+
+def test_build_static_model_metadata_keeps_tts_context_limit_in_sync(provider):
+    data = {
+        "name": "models/gemini-3.1-flash-tts-preview",
+        "description": "tts",
+        "inputTokenLimit": 8192,
+    }
+    meta = provider._build_static_google_model_metadata(data, ["generateContent"])
+    assert meta["supports_tts"] is True
+    assert meta["max_context_tokens"] == 8192
 
 
 # ==========================================================================
