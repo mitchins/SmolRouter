@@ -7,6 +7,9 @@ touching the Google SDK. The provider is constructed with a dummy api key;
 none of these methods perform I/O.
 """
 
+import base64
+import io
+import wave
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -243,6 +246,88 @@ def test_convert_openai_to_genai_request_no_messages_raises(provider):
         provider._convert_openai_to_genai_request({"model": "x", "messages": []})
 
 
+def test_is_tts_request_detects_modalities_audio(provider):
+    request = {"model": "gemini-3.1-flash-tts-preview", "messages": [], "modalities": ["audio"]}
+    assert provider._is_tts_request(request, endpoint="/v1/chat/completions") is True
+
+
+def test_is_tts_request_detects_response_format_audio(provider):
+    request = {"model": "gemini-3.1-flash-tts-preview", "messages": [], "response_format": {"type": "audio"}}
+    assert provider._is_tts_request(request, endpoint="/v1/chat/completions") is True
+
+
+def test_build_tts_generation_config_uses_default_voice(provider):
+    config = provider._build_tts_generation_config({"audio": {"format": "wav"}})
+
+    assert config.response_modalities == ["AUDIO"]
+    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
+
+
+def test_build_tts_generation_config_uses_supplied_voice(provider):
+    config = provider._build_tts_generation_config({"audio": {"voice": "Puck", "format": "wav"}})
+
+    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
+
+
+def test_build_tts_generation_config_supports_two_speakers(provider):
+    config = provider._build_tts_generation_config(
+        {
+            "audio": {
+                "format": "wav",
+                "speakers": [
+                    {"speaker": "Joe", "voice": "Kore"},
+                    {"speaker": "Jane", "voice": "Puck"},
+                ],
+            }
+        }
+    )
+
+    speaker_configs = config.speech_config.multi_speaker_voice_config.speaker_voice_configs
+    assert len(speaker_configs) == 2
+    assert speaker_configs[0].speaker == "Joe"
+    assert speaker_configs[0].voice_config.prebuilt_voice_config.voice_name == "Kore"
+    assert speaker_configs[1].speaker == "Jane"
+    assert speaker_configs[1].voice_config.prebuilt_voice_config.voice_name == "Puck"
+
+
+def test_validate_tts_request_rejects_three_speakers(provider):
+    request = {
+        "model": "gemini-3.1-flash-tts-preview",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["audio"],
+        "audio": {
+            "format": "wav",
+            "speakers": [
+                {"speaker": "Joe", "voice": "Kore"},
+                {"speaker": "Jane", "voice": "Puck"},
+                {"speaker": "Sam", "voice": "Leda"},
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="at most 2 speakers"):
+        provider._validate_tts_request(request, endpoint="/v1/chat/completions")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}],
+        [{"type": "input_audio", "input_audio": {"data": "QUJD", "format": "wav"}}],
+    ],
+)
+def test_validate_tts_request_rejects_non_text_input(provider, content):
+    request = {
+        "model": "gemini-3.1-flash-tts-preview",
+        "messages": [{"role": "user", "content": content}],
+        "modalities": ["audio"],
+        "audio": {"format": "wav"},
+    }
+
+    with pytest.raises(ValueError, match="only support text input"):
+        provider._validate_tts_request(request, endpoint="/v1/chat/completions")
+
+
 # ==========================================================================
 # GenAI -> OpenAI response conversion
 # ==========================================================================
@@ -277,6 +362,35 @@ def test_extract_genai_usage(provider):
 
 def test_extract_genai_usage_missing(provider):
     assert provider._extract_genai_usage(SimpleNamespace(usage_metadata=None)) == {}
+
+
+def test_extract_genai_audio_bytes(provider):
+    response = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(inline_data=SimpleNamespace(mime_type="audio/pcm", data=b"\x01\x02\x03\x04")),
+                        SimpleNamespace(text="ignored"),
+                    ]
+                )
+            )
+        ]
+    )
+
+    assert provider._extract_genai_audio_bytes(response) == b"\x01\x02\x03\x04"
+
+
+def test_pcm_to_wav_bytes_wraps_pcm(provider):
+    pcm = b"\x00\x00\x01\x00\x02\x00\x03\x00"
+    wav_bytes = provider._pcm_to_wav_bytes(pcm)
+
+    assert wav_bytes[:4] == b"RIFF"
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+        assert wav_file.getframerate() == ggp.TTS_SAMPLE_RATE_HZ
+        assert wav_file.getnchannels() == ggp.TTS_CHANNELS
+        assert wav_file.getsampwidth() == ggp.TTS_SAMPLE_WIDTH_BYTES
+        assert wav_file.readframes(4) == pcm
 
 
 def test_convert_genai_to_openai_response(provider):
@@ -317,6 +431,56 @@ def test_convert_genai_to_responses_response_uses_unique_ids(provider):
 
     assert out1["id"] != out2["id"]
     assert out1["output"][0]["id"] != out2["output"][0]["id"]
+
+
+def test_convert_genai_to_openai_audio_chat_response(provider):
+    meta = SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5)
+    genai_resp = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[SimpleNamespace(inline_data=SimpleNamespace(mime_type="audio/pcm", data=b"\x01\x02\x03\x04"))]
+                )
+            )
+        ],
+        usage_metadata=meta,
+    )
+
+    out = provider._convert_genai_to_openai_audio_chat_response(
+        genai_resp, "gemini-3.1-flash-tts-preview", "wav"
+    )
+
+    assert out["object"] == "chat.completion"
+    assert out["choices"][0]["message"]["content"] is None
+    assert out["choices"][0]["message"]["audio"]["format"] == "wav"
+    assert out["choices"][0]["message"]["audio"]["mime_type"] == "audio/wav"
+    assert base64.b64decode(out["choices"][0]["message"]["audio"]["data"])[:4] == b"RIFF"
+    assert out["usage"]["total_tokens"] == 5
+
+
+def test_convert_genai_to_responses_audio_response(provider):
+    meta = SimpleNamespace(prompt_token_count=3, candidates_token_count=2, total_token_count=5)
+    genai_resp = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(
+                content=SimpleNamespace(
+                    parts=[SimpleNamespace(inline_data=SimpleNamespace(mime_type="audio/pcm", data=b"\x01\x02\x03\x04"))]
+                )
+            )
+        ],
+        usage_metadata=meta,
+    )
+
+    out = provider._convert_genai_to_responses_audio_response(
+        genai_resp, "gemini-3.1-flash-tts-preview", "pcm"
+    )
+
+    assert out["object"] == "response"
+    assert out["output"][0]["content"][0]["type"] == "output_audio"
+    assert out["output"][0]["content"][0]["audio"]["format"] == "pcm"
+    assert out["output"][0]["content"][0]["audio"]["mime_type"] == "audio/pcm"
+    assert base64.b64decode(out["output"][0]["content"][0]["audio"]["data"]) == b"\x01\x02\x03\x04"
+    assert out["usage"]["total_tokens"] == 5
 
 
 # ==========================================================================

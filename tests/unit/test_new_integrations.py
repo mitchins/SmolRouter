@@ -351,7 +351,7 @@ async def test_google_genai_discover_models_falls_back_to_static_json():
                             "name": "models/gemini-2.5-flash",
                             "displayName": "Gemini Flash",
                             "description": "Fast",
-                            "supportedGenerationMethods": ["generateContent"],
+                            "supportedActions": ["generateContent"],
                             "inputTokenLimit": 8192,
                             "outputTokenLimit": 1024,
                             "version": "v1",
@@ -365,7 +365,7 @@ async def test_google_genai_discover_models_falls_back_to_static_json():
                             "name": "models/gemini-embedding",
                             "displayName": "Embed",
                             "description": "Skip me",
-                            "supportedGenerationMethods": ["embedContent"],
+                            "supportedActions": ["embedContent"],
                         },
                     ]
                 }

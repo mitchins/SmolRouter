@@ -4,7 +4,6 @@ Test the critical security fixes we implemented
 Relocated into tests/ and annotated for Sonar suppression where literal IPs appear.
 """
 
-import os
 import sys
 from unittest.mock import patch
 
