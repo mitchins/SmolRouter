@@ -31,6 +31,25 @@
 
 ## Low Priority
 
+- 🟠 Documentation Site + README Overhaul (TODO - unstarted, planning only)
+    Current README currently carries deep reference material (especially env vars, provider setup, and deployment details), making it harder for users to quickly understand what SmolRouter can do. Scope this work as two linked tasks:
+    1) Establish a dedicated docs site so canonical reference can move out of README.
+    2) Rework README into a faster, visual landing experience with examples and screenshots.
+
+- 🟠 Documentation platform optioning (TODO - unstarted, planning only)
+    Decide one documentation delivery route and standardize on it:
+    - ReadTheDocs-style workflow (Sphinx/mkdocs + RTD or GH Pages).
+    - GitHub Pages-only docs using mdBook/mkdocs-material without RTD.
+    - PyPI/official docs page linking strategy for end-user discoverability.
+    Preferred criteria: low-maintenance publishing, clean versioning, good search, and minimal divergence from source docs. Outcome should include one primary canonical docs URL and a small "docs by intent" structure (`Getting Started`, `Routing`, `Providers`, `Security`, `Deployment`, `API Reference`, `Troubleshooting`).
+
+- 🟠 README rewrite into expressive onboarding (TODO - unstarted, planning only)
+    Make README concise and outcome-oriented: remove or heavily trim the environment variable table and long setup prose from top-level file. Replace with:
+    - a short "what this solves" narrative,
+    - 2–3 quick wins / usage snippets,
+    - a visual section (screenshots, GIF loop, or slide-like step gallery) showing request routing, dashboard visibility, and quota/accounting behavior.
+    Keep the full env/config reference in the docs site and add strict deep links from README.
+
 - 🔵 Move from Static Pages to Dynamic API
     Current dashboard uses server-side rendered HTML templates. Move to SPA (Single Page App) with separate API endpoints. Benefits: Better UX, real-time updates, easier testing. Templates to migrate: `templates/index.html`, `templates/system.html`, etc. New endpoints needed: `/api/dashboard`, `/api/providers`, `/api/stats`
     Current dashboard uses server-side rendered templates with API-backed data fetching. Most main pages are API-driven but render via Jinja templates (`templates/index.html`, `providers.html`, `performance.html`). Core dashboard data endpoints exist (`/api/dashboard`, `/api/stats`), and provider list data is currently exposed via `/api/upstreams` (not `/api/providers`).
