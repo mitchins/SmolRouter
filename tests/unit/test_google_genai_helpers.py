@@ -199,6 +199,20 @@ def test_convert_openai_to_genai_request_accepts_responses_string_input(provider
     assert genai_request["generation_config"]["max_output_tokens"] == 77
 
 
+def test_convert_openai_to_genai_request_accepts_embeddings_input(provider):
+    request = {
+        "model": "gemini-embedding-001",
+        "input": ["hello", "world"],
+        "dimensions": 768,
+    }
+
+    model_name, genai_request = provider._convert_openai_to_genai_request(request, endpoint="/v1/embeddings")
+
+    assert model_name == "gemini-embedding-001"
+    assert genai_request["contents"] == ["hello", "world"]
+    assert genai_request["config"]["output_dimensionality"] == 768
+
+
 def test_convert_openai_to_genai_request_accepts_responses_multimodal_input(provider):
     request = {
         "model": "gemini-2.5-flash",

@@ -13,6 +13,7 @@ import io
 import re
 import secrets
 import wave
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -32,6 +33,7 @@ from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
 from .request_metadata import RequestMetadata
 from .task_utils import create_logged_task
+from .transport_observer import get_observer
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 OPENAI_CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 OPENAI_COMPLETIONS_ENDPOINT = "/v1/completions"
 OPENAI_RESPONSES_ENDPOINT = "/v1/responses"
+OPENAI_EMBEDDINGS_ENDPOINT = "/v1/embeddings"
 GOOGLE_GENAI_STATIC_MODELS_SNAPSHOT = "google-genai-models-2026-july.json"
 AUDIO_WAV_MIME_TYPE = "audio/wav"
 AUDIO_PCM_MIME_TYPE = "audio/pcm"
@@ -228,10 +231,12 @@ class GoogleGenAICompletionContext:
     original_model: str
     observation_id: str
     endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT
+    request_kind: str = "generate_content"
     model_name: str = ""
     tts_request: bool = False
     tts_audio_format: str = "pcm"
     genai_request: Dict[str, Any] = field(default_factory=dict)
+    input_token_count: Optional[int] = None
     api_key: str = ""
     api_key_suffix: Optional[str] = None
     api_key_index: Optional[int] = None
@@ -1382,6 +1387,7 @@ class GoogleGenAIProvider(IModelProvider):
             "display_name": getattr(model, "display_name", model_name),
             "description": getattr(model, "description", ""),
             "supported_methods": supported_actions,
+            "supports_embeddings": "embedContent" in supported_actions,
             "input_token_limit": getattr(model, "input_token_limit", None),
             "output_token_limit": getattr(model, "output_token_limit", None),
         }
@@ -1394,6 +1400,7 @@ class GoogleGenAIProvider(IModelProvider):
             "display_name": model_data.get("displayName", model_name),
             "description": model_data.get("description", ""),
             "supported_methods": supported_methods,
+            "supports_embeddings": "embedContent" in supported_methods,
             "input_token_limit": model_data.get("inputTokenLimit"),
             "output_token_limit": model_data.get("outputTokenLimit"),
             "version": model_data.get("version"),
@@ -1478,15 +1485,17 @@ class GoogleGenAIProvider(IModelProvider):
         for model in model_list:
             # New API uses 'supported_actions' instead of 'supported_generation_methods'
             supported_actions = getattr(model, "supported_actions", [])
-            if "generateContent" in supported_actions:
-                model_name = self._extract_google_model_name(getattr(model, "name", "") or "")
+            if not self._is_google_supported_action_model(supported_actions):
+                continue
 
-                model_info = self._build_google_model_info(
-                    model_name,
-                    self._build_live_google_model_metadata(model, supported_actions),
-                )
-                models.append(model_info)
-                logger.debug(f"Discovered Google GenAI model: {model_info.id}")
+            model_name = self._extract_google_model_name(getattr(model, "name", "") or "")
+
+            model_info = self._build_google_model_info(
+                model_name,
+                self._build_live_google_model_metadata(model, supported_actions),
+            )
+            models.append(model_info)
+            logger.debug(f"Discovered Google GenAI model: {model_info.id}")
 
         return models
 
@@ -1544,10 +1553,9 @@ class GoogleGenAIProvider(IModelProvider):
 
             models = []
             for model_data in data.get("models", []):
-                # Only include models that support text generation
                 supported_methods = model_data.get("supportedGenerationMethods") or model_data.get("supportedActions", [])
-                if "generateContent" not in supported_methods:
-                    continue  # Skip embedding and other non-text generation models
+                if not self._is_google_supported_action_model(supported_methods):
+                    continue
 
                 model_name = self._extract_google_model_name(model_data.get("name", ""))
                 model_info = self._build_google_model_info(
@@ -1570,6 +1578,26 @@ class GoogleGenAIProvider(IModelProvider):
         endpoint: str = OPENAI_CHAT_COMPLETIONS_ENDPOINT,
     ) -> Tuple[str, Dict[str, Any]]:
         """Convert OpenAI request format to Google GenAI format"""
+        if endpoint == OPENAI_EMBEDDINGS_ENDPOINT:
+            model_name = self._normalize_model_name(openai_request.get("model", ""))
+            contents = openai_request.get("input")
+            if contents is None:
+                raise ValueError("No input provided in request")
+
+            embed_config: Dict[str, Any] = {}
+            if openai_request.get("dimensions") is not None:
+                embed_config["output_dimensionality"] = openai_request["dimensions"]
+            if openai_request.get("task_type") is not None:
+                embed_config["task_type"] = openai_request["task_type"]
+            if openai_request.get("title") is not None:
+                embed_config["title"] = openai_request["title"]
+            if openai_request.get("mime_type") is not None:
+                embed_config["mime_type"] = openai_request["mime_type"]
+            if openai_request.get("auto_truncate") is not None:
+                embed_config["auto_truncate"] = openai_request["auto_truncate"]
+
+            return model_name, {"contents": contents, "config": embed_config or None}
+
         request_payload = (
             self._convert_openai_responses_to_chat_request(openai_request)
             if endpoint == OPENAI_RESPONSES_ENDPOINT
@@ -2276,6 +2304,7 @@ class GoogleGenAIProvider(IModelProvider):
             original_model=openai_request.get("model", ""),
             observation_id=f"obs_{uuid.uuid4().hex[:12]}",
             endpoint=endpoint,
+            request_kind="embed_content" if endpoint == OPENAI_EMBEDDINGS_ENDPOINT else "generate_content",
         )
 
         try:
@@ -2362,6 +2391,56 @@ class GoogleGenAIProvider(IModelProvider):
     async def _run_completion_request(self, context: GoogleGenAICompletionContext) -> Any:
         await self._rate_limiter.acquire_slot()
         try:
+            if context.request_kind == "embed_content":
+                contents = context.genai_request["contents"]
+                embed_inputs = contents if isinstance(contents, list) else [contents]
+                embedding_responses = []
+                token_total = 0
+
+                for embed_input in embed_inputs:
+                    try:
+                        token_counts = await asyncio.to_thread(
+                            context.client.models.count_tokens,
+                            model=context.model_name,
+                            contents=embed_input,
+                        )
+                        token_total += int(getattr(token_counts, "total_tokens", 0) or 0)
+                    except Exception:
+                        logger.debug(
+                            "Embedding token preflight failed for %s",
+                            context.model_name,
+                            exc_info=True,
+                        )
+
+                    embedding_responses.append(
+                        await asyncio.to_thread(
+                            context.client.models.embed_content,
+                            model=context.model_name,
+                            contents=embed_input,
+                            config=context.genai_request.get("config"),
+                        )
+                    )
+
+                context.input_token_count = token_total or None
+                if len(embedding_responses) == 1:
+                    return embedding_responses[0]
+
+                combined_embeddings = []
+                combined_billable_chars = 0
+                for embedding_response in embedding_responses:
+                    response_embeddings = getattr(embedding_response, "embeddings", None)
+                    if not response_embeddings:
+                        single_embedding = getattr(embedding_response, "embedding", None)
+                        response_embeddings = [single_embedding] if single_embedding else []
+                    combined_embeddings.extend(response_embeddings)
+                    metadata = getattr(embedding_response, "metadata", None)
+                    combined_billable_chars += int(getattr(metadata, "billable_character_count", 0) or 0)
+
+                return SimpleNamespace(
+                    embeddings=combined_embeddings,
+                    metadata=SimpleNamespace(billable_character_count=combined_billable_chars or token_total),
+                )
+
             return await asyncio.to_thread(
                 context.client.models.generate_content,
                 model=context.model_name,
@@ -2377,6 +2456,12 @@ class GoogleGenAIProvider(IModelProvider):
         endpoint: str,
         context: GoogleGenAICompletionContext,
     ) -> None:
+        if endpoint == OPENAI_EMBEDDINGS_ENDPOINT and openai_request.get("input") is None:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: embeddings requests require an input",
+            )
+
         if self._is_tts_request(openai_request):
             try:
                 self._validate_tts_request(openai_request, endpoint)
@@ -2390,11 +2475,43 @@ class GoogleGenAIProvider(IModelProvider):
                 "in the Google GenAI compatibility shim",
             )
 
+    async def _build_completion_metadata(
+        self, context: GoogleGenAICompletionContext, tokens_used: int
+    ) -> RequestMetadata:
+        await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
+
+        if context.proxy_url:
+            self._mark_proxy_health(context.proxy_url, success=True)
+
+        observer = get_observer()
+        observation = observer.get_observation(context.observation_id)
+        actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
+            context, observation
+        )
+
+        return RequestMetadata(
+            api_key_suffix=actual_key_suffix,
+            proxy_used=actual_proxy,
+            provider_id=self.config.name,
+            model_name=context.model_name,
+            api_key_index=context.api_key_index if context.api_key_index else None,
+            api_key_total=context.api_key_total if context.api_key_total else None,
+            api_key_verified=key_verified,
+            proxy_verified=proxy_verified,
+            observation_id=context.observation_id,
+        )
+
     async def _finalize_completion(
         self, context: GoogleGenAICompletionContext, response: Any
     ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
-        from .request_metadata import RequestMetadata
-        from .transport_observer import get_observer
+        if context.request_kind == "embed_content":
+            openai_response = self._convert_genai_to_embeddings_response(
+                response,
+                context.original_model,
+                context.input_token_count,
+            )
+            tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
+            return openai_response, await self._build_completion_metadata(context, tokens_used)
 
         if context.tts_request and context.endpoint == OPENAI_RESPONSES_ENDPOINT:
             openai_response = self._convert_genai_to_responses_audio_response(
@@ -2410,30 +2527,50 @@ class GoogleGenAIProvider(IModelProvider):
             openai_response = self._convert_genai_to_openai_response(response, context.original_model)
 
         tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
-        await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
+        return openai_response, await self._build_completion_metadata(context, tokens_used)
 
-        if context.proxy_url:
-            self._mark_proxy_health(context.proxy_url, success=True)
+    @staticmethod
+    def _is_google_supported_action_model(supported_actions: List[str]) -> bool:
+        return "generateContent" in supported_actions or "embedContent" in supported_actions
 
-        observer = get_observer()
-        observation = observer.get_observation(context.observation_id)
-        actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
-            context, observation
-        )
+    def _convert_genai_to_embeddings_response(
+        self,
+        genai_response: Any,
+        original_model: str,
+        token_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        embeddings = getattr(genai_response, "embeddings", None)
+        if not embeddings:
+            single_embedding = getattr(genai_response, "embedding", None)
+            embeddings = [single_embedding] if single_embedding else []
+        elif not isinstance(embeddings, list):
+            embeddings = [embeddings]
 
-        metadata = RequestMetadata(
-            api_key_suffix=actual_key_suffix,
-            proxy_used=actual_proxy,
-            provider_id=self.config.name,
-            model_name=context.model_name,
-            api_key_index=context.api_key_index if context.api_key_index else None,
-            api_key_total=context.api_key_total if context.api_key_total else None,
-            api_key_verified=key_verified,
-            proxy_verified=proxy_verified,
-            observation_id=context.observation_id,
-        )
+        data = []
+        for index, embedding in enumerate(embeddings):
+            data.append(
+                {
+                    "object": "embedding",
+                    "index": index,
+                    "embedding": list(getattr(embedding, "values", None) or []),
+                }
+            )
 
-        return openai_response, metadata
+        usage_tokens = token_count
+        if usage_tokens is None:
+            metadata = getattr(genai_response, "metadata", None)
+            usage_tokens = getattr(metadata, "billable_character_count", None)
+
+        usage_tokens = int(usage_tokens or 0)
+        return {
+            "object": "list",
+            "data": data,
+            "model": original_model,
+            "usage": {
+                "prompt_tokens": usage_tokens,
+                "total_tokens": usage_tokens,
+            },
+        }
 
     def _resolve_observation_state(
         self, context: GoogleGenAICompletionContext, observation: Any

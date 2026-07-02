@@ -308,12 +308,12 @@ async def test_google_genai_discover_models_uses_cache_and_filters_supported_act
             output_token_limit=1024,
         ),
         SimpleNamespace(
-            name="models/text-embedding",
+            name="models/gemini-embedding-001",
             display_name="Embed",
-            description="Nope",
+            description="Vectors",
             supported_actions=["embedContent"],
             input_token_limit=2048,
-            output_token_limit=0,
+            output_token_limit=3072,
         ),
     ]
 
@@ -329,10 +329,12 @@ async def test_google_genai_discover_models_uses_cache_and_filters_supported_act
 
     assert client_factory.call_count == 1
     assert cached_models is models
-    assert len(models) == 1
+    assert len(models) == 2
     assert models[0].name == "gemini-2.0-flash"
     assert models[0].metadata["display_name"] == "Gemini Flash"
     assert models[0].metadata["input_token_limit"] == 8192
+    assert models[1].name == "gemini-embedding-001"
+    assert models[1].metadata["supports_embeddings"] is True
 
 
 @pytest.mark.asyncio
@@ -362,10 +364,12 @@ async def test_google_genai_discover_models_falls_back_to_static_json():
                             "thinking": True,
                         },
                         {
-                            "name": "models/gemini-embedding",
+                            "name": "models/gemini-embedding-001",
                             "displayName": "Embed",
-                            "description": "Skip me",
+                            "description": "Keep me",
                             "supportedActions": ["embedContent"],
+                            "inputTokenLimit": 2048,
+                            "outputTokenLimit": 3072,
                         },
                     ]
                 }
@@ -374,10 +378,12 @@ async def test_google_genai_discover_models_falls_back_to_static_json():
     ):
         models = await provider.discover_models()
 
-    assert len(models) == 1
+    assert len(models) == 2
     assert models[0].name == "gemini-2.5-flash"
     assert models[0].metadata["thinking"] is True
     assert models[0].metadata["version"] == "v1"
+    assert models[1].name == "gemini-embedding-001"
+    assert models[1].metadata["supports_embeddings"] is True
 
 
 @pytest.mark.asyncio
@@ -443,6 +449,92 @@ async def test_google_genai_generate_completion_accepts_responses_endpoint():
     assert isinstance(build_args[1], GoogleGenAICompletionContext)
     assert build_args[1].original_model == "gemini-2.0-flash"
     assert build_args[2] == "/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_generate_completion_accepts_embeddings_endpoint():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(
+        original_model="original",
+        observation_id="obs-123",
+        endpoint="/v1/embeddings",
+        request_kind="embed_content",
+        model_name="gemini-embedding-001",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+        input_token_count=7,
+    )
+
+    provider._build_completion_context = AsyncMock(return_value=context)
+    provider._run_completion_request = AsyncMock(
+        return_value=SimpleNamespace(
+            embedding=SimpleNamespace(values=[0.1, 0.2, 0.3]),
+            metadata=SimpleNamespace(billable_character_count=7),
+        )
+    )
+    provider._update_api_key_stats = AsyncMock()
+
+    response = await provider.generate_completion(
+        {"model": "gemini-embedding-001", "input": "Hi"},
+        endpoint="/v1/embeddings",
+    )
+
+    response_data, metadata = response
+    assert response_data["object"] == "list"
+    assert response_data["data"][0]["object"] == "embedding"
+    assert response_data["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert response_data["usage"]["total_tokens"] == 7
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-embedding-001"
+    provider._build_completion_context.assert_awaited_once()
+    build_args = provider._build_completion_context.await_args.args
+    assert build_args[0] == {"model": "gemini-embedding-001", "input": "Hi"}
+    assert isinstance(build_args[1], GoogleGenAICompletionContext)
+    assert build_args[1].original_model == "gemini-embedding-001"
+    assert build_args[2] == "/v1/embeddings"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_run_completion_request_batches_embeddings_and_tolerates_token_preflight():
+    provider = _make_google_provider()
+    provider._rate_limiter.acquire_slot = AsyncMock()
+    provider._rate_limiter.release_slot = AsyncMock()
+
+    client = Mock()
+    client.models = Mock()
+    client.models.count_tokens = Mock(
+        side_effect=[
+            SimpleNamespace(total_tokens=2),
+            SimpleNamespace(total_tokens=3),
+        ]
+    )
+    client.models.embed_content = Mock(
+        side_effect=[
+            SimpleNamespace(embedding=SimpleNamespace(values=[0.1, 0.2])),
+            SimpleNamespace(embedding=SimpleNamespace(values=[0.3, 0.4])),
+        ]
+    )
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-embedding-001",
+        observation_id="obs-456",
+        endpoint="/v1/embeddings",
+        request_kind="embed_content",
+        model_name="gemini-embedding-001",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+        client=client,
+        genai_request={"contents": ["one", "two"], "config": None},
+    )
+
+    response = await provider._run_completion_request(context)
+
+    assert provider._rate_limiter.acquire_slot.await_count == 1
+    assert provider._rate_limiter.release_slot.await_count == 1
+    assert client.models.count_tokens.call_count == 2
+    assert client.models.embed_content.call_count == 2
+    assert context.input_token_count == 5
+    assert [embedding.values for embedding in response.embeddings] == [[0.1, 0.2], [0.3, 0.4]]
 
 
 @pytest.mark.asyncio
@@ -1364,6 +1456,11 @@ async def test_openai_provider_discovers_models_from_live_endpoint(mock_client):
     assert models[0].metadata["owned_by"] == "openai"
 
 
+def test_openai_provider_embedding_backfill_gate_matches_canonical_host():
+    assert _make_openai_provider(url="https://api.openai.com/v1")._should_include_static_openai_embedding_models() is True
+    assert _make_openai_provider()._should_include_static_openai_embedding_models() is False
+
+
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient")
 async def test_openai_provider_falls_back_to_static_models_on_upstream_errors(mock_client):
@@ -1955,6 +2052,49 @@ async def test_mediator_passes_responses_path_to_google_provider():
     provider.generate_completion.assert_awaited_once_with(
         {"model": "gemini-2.0-flash", "input": "Hello from responses"},
         "/v1/responses",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mediator_passes_embeddings_path_to_google_provider():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemini-embedding-001@test-google",
+        name="gemini-embedding-001",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    provider.generate_completion = AsyncMock(
+        return_value=(
+            {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}]},
+            RequestMetadata(provider_id="test-google", model_name="gemini-embedding-001"),
+        )
+    )
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemini-embedding-001 [test-google]",
+        {"model": "gemini-embedding-001 [test-google]", "input": "Hello embeddings"},
+        "/v1/embeddings",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 200
+    assert response_data["object"] == "list"
+    assert upstream_used == "google-genai:test-google"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-embedding-001"
+    provider.generate_completion.assert_awaited_once_with(
+        {"model": "gemini-embedding-001", "input": "Hello embeddings"},
+        "/v1/embeddings",
     )
 
 

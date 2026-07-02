@@ -58,6 +58,23 @@ def test_log_record_parses_fields_and_loads_blob_bodies(monkeypatch):
     assert record.response_body == b'{"output": true}'
 
 
+def test_log_record_marks_missing_blob_storage_as_storage_error(monkeypatch):
+    monkeypatch.setattr(storage_module, "get_blob_storage", lambda: None)
+
+    record = LogRecord(
+        {
+            "request_id": "req-1",
+            "request_body_key": "req-body",
+            "response_body_key": "resp-body",
+        }
+    )
+
+    assert record.request_body is None
+    assert record.response_body is None
+    assert record.request_body_status == "storage_error"
+    assert record.response_body_status == "storage_error"
+
+
 def test_log_record_normalizes_pending_and_invalid_values(monkeypatch):
     monkeypatch.setattr(storage_module, "get_blob_storage", lambda: FakeBlobStorage({}))
 

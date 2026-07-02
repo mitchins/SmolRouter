@@ -53,6 +53,19 @@ def mock_openai_upstream():
         respx_mock.post("http://localhost:8000/v1/completions").mock(
             return_value=httpx.Response(200, json=load_mock_json("openai_completion_non_streaming.json"))
         )
+        respx_mock.post("http://localhost:8000/v1/embeddings").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]},
+                    ],
+                    "model": "text-embedding-3-small",
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                },
+            )
+        )
         respx_mock.get("http://localhost:8000/v1/models").mock(
             return_value=httpx.Response(200, json=load_mock_json("openai_list_models.json"))
         )
@@ -97,6 +110,21 @@ async def test_openai_completions_non_streaming(async_client, mock_openai_upstre
 
 
 @pytest.mark.asyncio
+async def test_openai_embeddings_non_streaming(async_client, mock_openai_upstream, disable_logging):
+    response = await async_client.post(
+        "/v1/embeddings",
+        json={"model": "text-embedding-3-small", "input": "Hello embeddings"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "list"
+    assert data["data"][0]["object"] == "embedding"
+    assert data["data"][0]["index"] == 0
+    assert data["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+
+
+@pytest.mark.asyncio
 async def test_openai_invalid_json_returns_400(async_client, disable_logging):
     response = await async_client.post(
         "/v1/chat/completions",
@@ -128,6 +156,28 @@ async def test_openai_streaming_falls_back_to_non_streaming_provider_architectur
     assert response.json()["choices"][0]["message"]["content"] == "fallback response"
     fake_container.route_streaming_request.assert_awaited_once()
     fake_container.route_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_openai_embeddings_route_is_exposed_and_uses_shared_proxy(async_client, disable_logging, monkeypatch):
+    captured = {}
+
+    async def fake_proxy_request(path, request):
+        captured["path"] = path
+        captured["body"] = await request.json()
+        return {"object": "list", "data": []}
+
+    monkeypatch.setattr(app_module, "proxy_request", fake_proxy_request)
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        json={"model": "text-embedding-3-small", "input": ["hello", "world"]},
+    )
+
+    assert response.status_code == 200
+    assert captured["path"] == "/v1/embeddings"
+    assert captured["body"]["model"] == "text-embedding-3-small"
+    assert captured["body"]["input"] == ["hello", "world"]
 
 
 @pytest.mark.asyncio
@@ -1392,6 +1442,11 @@ def test_openapi_documents_proxy_and_project_api_error_responses():
     assert chat_responses["400"]["description"] == "Invalid request payload"
     assert chat_responses["401"]["description"] == "Invalid or mismatched local facade key"
     assert chat_responses["503"]["description"] == "Routing unavailable"
+    assert "/v1/embeddings" in schema["paths"]
+    embeddings_responses = schema["paths"]["/v1/embeddings"]["post"]["responses"]
+    assert embeddings_responses["400"]["description"] == "Invalid request payload"
+    assert embeddings_responses["401"]["description"] == "Invalid or mismatched local facade key"
+    assert embeddings_responses["503"]["description"] == "Routing unavailable"
 
     projects_responses = schema["paths"]["/api/projects"]["get"]["responses"]
     assert projects_responses["500"]["description"] == "Failed to load project inventory"
@@ -2137,6 +2192,12 @@ def test_serialize_request_log_normalizes_empty_provider_id():
     payload = app_module._serialize_request_log(log_entry)
 
     assert payload["provider_id"] is None
+
+
+def test_body_status_treats_empty_payload_as_not_found():
+    log_entry = SimpleNamespace(request_body=b"", request_body_key="req-body")
+
+    assert app_module._body_status(log_entry, "request_body") == "not_found"
 
 
 def test_serialize_request_detail_response_reuses_summary_and_provider_metadata():

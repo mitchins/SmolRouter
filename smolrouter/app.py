@@ -2258,6 +2258,11 @@ async def responses(request: Request):
     return await proxy_request("/v1/responses", request)
 
 
+@app.post("/v1/embeddings", responses=OPENAI_PROXY_ROUTE_RESPONSES)
+async def embeddings(request: Request):
+    return await proxy_request("/v1/embeddings", request)
+
+
 @app.get("/v1/models")
 async def list_models(request: Request):
     """List available models with aggregation from multiple providers"""
@@ -2711,6 +2716,21 @@ def _decode_log_body(body: Any) -> Optional[str]:
     return str(body)
 
 
+def _body_status(log_entry: Any, body_name: str) -> str:
+    status = getattr(log_entry, f"{body_name}_status", None)
+    if status in {"available", "not_stored", "not_found", "storage_error"}:
+        return str(status)
+
+    body = getattr(log_entry, body_name, None)
+    if body:
+        return "available"
+
+    if getattr(log_entry, f"{body_name}_key", None):
+        return "not_found"
+
+    return "not_stored"
+
+
 def _serialize_duplicate_request_log(log_entry: Any) -> dict[str, Any]:
     timestamp = getattr(log_entry, "timestamp", None)
     return {
@@ -2754,6 +2774,8 @@ def _serialize_request_detail_response(log_entry: Any, duplicate_info: dict[str,
         **{field_name: summary[field_name] for field_name in REQUEST_DETAIL_RESPONSE_FIELDS},
         "request_body": _decode_log_body(getattr(log_entry, "request_body", None)),
         "response_body": _decode_log_body(getattr(log_entry, "response_body", None)),
+        "request_body_status": _body_status(log_entry, "request_body"),
+        "response_body_status": _body_status(log_entry, "response_body"),
         "duplicate": duplicate_info,
     }
 
@@ -3749,6 +3771,8 @@ async def request_detail(request_id: str, request: Request):
                 "response_body_str": getattr(log_entry, "response_body", b"").decode("utf-8")
                 if getattr(log_entry, "response_body", None)
                 else None,
+                "request_body_status": _body_status(log_entry, "request_body"),
+                "response_body_status": _body_status(log_entry, "response_body"),
                 "duplicates": duplicates,
             },
         )
