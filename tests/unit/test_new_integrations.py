@@ -468,7 +468,7 @@ async def test_google_genai_generate_completion_accepts_embeddings_endpoint():
     provider._build_completion_context = AsyncMock(return_value=context)
     provider._run_completion_request = AsyncMock(
         return_value=SimpleNamespace(
-            embeddings=[SimpleNamespace(values=[0.1, 0.2, 0.3])],
+            embedding=SimpleNamespace(values=[0.1, 0.2, 0.3]),
             metadata=SimpleNamespace(billable_character_count=7),
         )
     )
@@ -493,6 +493,48 @@ async def test_google_genai_generate_completion_accepts_embeddings_endpoint():
     assert isinstance(build_args[1], GoogleGenAICompletionContext)
     assert build_args[1].original_model == "gemini-embedding-001"
     assert build_args[2] == "/v1/embeddings"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_run_completion_request_batches_embeddings_and_tolerates_token_preflight():
+    provider = _make_google_provider()
+    provider._rate_limiter.acquire_slot = AsyncMock()
+    provider._rate_limiter.release_slot = AsyncMock()
+
+    client = Mock()
+    client.models = Mock()
+    client.models.count_tokens = Mock(
+        side_effect=[
+            SimpleNamespace(total_tokens=2),
+            SimpleNamespace(total_tokens=3),
+        ]
+    )
+    client.models.embed_content = Mock(
+        side_effect=[
+            SimpleNamespace(embedding=SimpleNamespace(values=[0.1, 0.2])),
+            SimpleNamespace(embedding=SimpleNamespace(values=[0.3, 0.4])),
+        ]
+    )
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-embedding-001",
+        observation_id="obs-456",
+        endpoint="/v1/embeddings",
+        request_kind="embed_content",
+        model_name="gemini-embedding-001",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+        client=client,
+        genai_request={"contents": ["one", "two"], "config": None},
+    )
+
+    response = await provider._run_completion_request(context)
+
+    assert provider._rate_limiter.acquire_slot.await_count == 1
+    assert provider._rate_limiter.release_slot.await_count == 1
+    assert client.models.count_tokens.call_count == 2
+    assert client.models.embed_content.call_count == 2
+    assert context.input_token_count == 5
+    assert [embedding.values for embedding in response.embeddings] == [[0.1, 0.2], [0.3, 0.4]]
 
 
 @pytest.mark.asyncio
@@ -1412,6 +1454,11 @@ async def test_openai_provider_discovers_models_from_live_endpoint(mock_client):
 
     assert [model.id for model in models] == ["gpt-4o@test-openai"]
     assert models[0].metadata["owned_by"] == "openai"
+
+
+def test_openai_provider_embedding_backfill_gate_matches_canonical_host():
+    assert _make_openai_provider(url="https://api.openai.com/v1")._should_include_static_openai_embedding_models() is True
+    assert _make_openai_provider()._should_include_static_openai_embedding_models() is False
 
 
 @pytest.mark.asyncio

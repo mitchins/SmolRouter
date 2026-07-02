@@ -449,8 +449,6 @@
                         Unable to retrieve request body (storage error)
                         {% elif request_body_status == "not_found" %}
                         Unable to retrieve request body (missing blob)
-                        {% elif request_body_status == "not_stored" %}
-                        Not stored
                         {% else %}
                         Request body unavailable
                         {% endif %}
@@ -505,8 +503,6 @@
                         Unable to retrieve response body (storage error)
                         {% elif response_body_status == "not_found" %}
                         Unable to retrieve response body (missing blob)
-                        {% elif response_body_status == "not_stored" %}
-                        Not stored
                         {% else %}
                         Response body unavailable
                         {% endif %}

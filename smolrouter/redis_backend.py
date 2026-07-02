@@ -206,6 +206,9 @@ def _load_blob_body(blob_storage: Any, key: Any) -> tuple[Any, str]:
     if not key:
         return None, "not_stored"
 
+    if not blob_storage:
+        return None, "storage_error"
+
     try:
         data = blob_storage.retrieve(key)
     except Exception:

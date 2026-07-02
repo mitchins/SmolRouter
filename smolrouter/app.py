@@ -2722,7 +2722,7 @@ def _body_status(log_entry: Any, body_name: str) -> str:
         return str(status)
 
     body = getattr(log_entry, body_name, None)
-    if body is not None:
+    if body:
         return "available"
 
     if getattr(log_entry, f"{body_name}_key", None):

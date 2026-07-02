@@ -2194,6 +2194,12 @@ def test_serialize_request_log_normalizes_empty_provider_id():
     assert payload["provider_id"] is None
 
 
+def test_body_status_treats_empty_payload_as_not_found():
+    log_entry = SimpleNamespace(request_body=b"", request_body_key="req-body")
+
+    assert app_module._body_status(log_entry, "request_body") == "not_found"
+
+
 def test_serialize_request_detail_response_reuses_summary_and_provider_metadata():
     timestamp = app_module.datetime.now()
     log_entry = SimpleNamespace(

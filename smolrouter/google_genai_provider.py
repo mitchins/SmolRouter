@@ -13,6 +13,7 @@ import io
 import re
 import secrets
 import wave
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, field
@@ -2390,17 +2391,53 @@ class GoogleGenAIProvider(IModelProvider):
         await self._rate_limiter.acquire_slot()
         try:
             if context.request_kind == "embed_content":
-                token_counts = await asyncio.to_thread(
-                    context.client.models.count_tokens,
-                    model=context.model_name,
-                    contents=context.genai_request["contents"],
-                )
-                context.input_token_count = getattr(token_counts, "total_tokens", None)
-                return await asyncio.to_thread(
-                    context.client.models.embed_content,
-                    model=context.model_name,
-                    contents=context.genai_request["contents"],
-                    config=context.genai_request.get("config"),
+                contents = context.genai_request["contents"]
+                embed_inputs = contents if isinstance(contents, list) else [contents]
+                embedding_responses = []
+                token_total = 0
+
+                for embed_input in embed_inputs:
+                    try:
+                        token_counts = await asyncio.to_thread(
+                            context.client.models.count_tokens,
+                            model=context.model_name,
+                            contents=embed_input,
+                        )
+                        token_total += int(getattr(token_counts, "total_tokens", 0) or 0)
+                    except Exception:
+                        logger.debug(
+                            "Embedding token preflight failed for %s",
+                            context.model_name,
+                            exc_info=True,
+                        )
+
+                    embedding_responses.append(
+                        await asyncio.to_thread(
+                            context.client.models.embed_content,
+                            model=context.model_name,
+                            contents=embed_input,
+                            config=context.genai_request.get("config"),
+                        )
+                    )
+
+                context.input_token_count = token_total or None
+                if len(embedding_responses) == 1:
+                    return embedding_responses[0]
+
+                combined_embeddings = []
+                combined_billable_chars = 0
+                for embedding_response in embedding_responses:
+                    response_embeddings = getattr(embedding_response, "embeddings", None)
+                    if not response_embeddings:
+                        single_embedding = getattr(embedding_response, "embedding", None)
+                        response_embeddings = [single_embedding] if single_embedding else []
+                    combined_embeddings.extend(response_embeddings)
+                    metadata = getattr(embedding_response, "metadata", None)
+                    combined_billable_chars += int(getattr(metadata, "billable_character_count", 0) or 0)
+
+                return SimpleNamespace(
+                    embeddings=combined_embeddings,
+                    metadata=SimpleNamespace(billable_character_count=combined_billable_chars or token_total),
                 )
 
             return await asyncio.to_thread(
@@ -2525,7 +2562,13 @@ class GoogleGenAIProvider(IModelProvider):
         original_model: str,
         token_count: Optional[int] = None,
     ) -> Dict[str, Any]:
-        embeddings = getattr(genai_response, "embeddings", None) or []
+        embeddings = getattr(genai_response, "embeddings", None)
+        if not embeddings:
+            single_embedding = getattr(genai_response, "embedding", None)
+            embeddings = [single_embedding] if single_embedding else []
+        elif not isinstance(embeddings, list):
+            embeddings = [embeddings]
+
         data = []
         for index, embedding in enumerate(embeddings):
             data.append(

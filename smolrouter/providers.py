@@ -360,6 +360,10 @@ class OpenAIProvider(BaseModelProvider):
         logger.info(f"Providing {len(models)} fallback OpenAI models for {self.get_provider_id()}")
         return models
 
+    def _should_include_static_openai_embedding_models(self) -> bool:
+        parsed_url = urlsplit(self.config.url.rstrip("/"))
+        return parsed_url.scheme == "https" and parsed_url.netloc == "api.openai.com"
+
     @staticmethod
     def _normalize_client_header_value(value: Any) -> Any:
         return value.decode("utf-8") if isinstance(value, bytes) else value
