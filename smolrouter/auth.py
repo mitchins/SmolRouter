@@ -187,6 +187,7 @@ def create_auth_middleware():
                 "/v1/chat/completions",
                 "/v1/completions",
                 "/v1/responses",
+                "/v1/embeddings",
             }
 
         async def dispatch(self, request: Request, call_next):

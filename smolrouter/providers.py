@@ -243,6 +243,7 @@ class OpenAIProvider(BaseModelProvider):
 
                 data = response.json()
                 models = []
+                seen_model_names = set()
 
                 for model_data in data.get("data", []):
                     model_id = model_data.get("id", "unknown")
@@ -258,7 +259,19 @@ class OpenAIProvider(BaseModelProvider):
                     model_info = self._create_openai_model_info(model_id, metadata=metadata)
 
                     models.append(model_info)
+                    seen_model_names.add(model_info.name)
                     logger.debug(f"Discovered OpenAI model: {model_info.id}")
+
+                if self._should_include_static_openai_embedding_models():
+                    for model_info in self._get_static_openai_models():
+                        if not model_info.name.startswith("text-embedding-"):
+                            continue
+                        if model_info.name in seen_model_names:
+                            continue
+
+                        models.append(model_info)
+                        seen_model_names.add(model_info.name)
+                        logger.debug("Backfilled OpenAI embedding model: %s", model_info.id)
 
                 logger.info(f"Discovered {len(models)} models from OpenAI provider {self.get_provider_id()}")
                 return models

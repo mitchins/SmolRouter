@@ -440,6 +440,23 @@
                     <div class="code-block">{{ request_body_str }}</div>
                 </div>
             </div>
+            {% elif request_body_status and request_body_status != "not_stored" %}
+            <div class="detail-section">
+                <div class="detail-row">
+                    <span class="detail-label">Request Body</span>
+                    <span class="detail-value">
+                        {% if request_body_status == "storage_error" %}
+                        Unable to retrieve request body (storage error)
+                        {% elif request_body_status == "not_found" %}
+                        Unable to retrieve request body (missing blob)
+                        {% elif request_body_status == "not_stored" %}
+                        Not stored
+                        {% else %}
+                        Request body unavailable
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
             {% endif %}
 
             <!-- Duplicate Requests -->
@@ -477,6 +494,23 @@
                 </button>
                 <div class="collapsible-content">
                     <div class="code-block">{{ response_body_str }}</div>
+                </div>
+            </div>
+            {% elif response_body_status and response_body_status != "not_stored" %}
+            <div class="detail-section">
+                <div class="detail-row">
+                    <span class="detail-label">Response Body</span>
+                    <span class="detail-value">
+                        {% if response_body_status == "storage_error" %}
+                        Unable to retrieve response body (storage error)
+                        {% elif response_body_status == "not_found" %}
+                        Unable to retrieve response body (missing blob)
+                        {% elif response_body_status == "not_stored" %}
+                        Not stored
+                        {% else %}
+                        Response body unavailable
+                        {% endif %}
+                    </span>
                 </div>
             </div>
             {% endif %}

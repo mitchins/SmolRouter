@@ -224,6 +224,14 @@ async def test_middleware_allows_openai_write_routes_without_jwt(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_middleware_allows_embeddings_write_route_without_jwt(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
+    mw = _build_middleware()
+    result = await mw.dispatch(_MiddlewareRequest("/v1/embeddings", method="POST"), _call_next_sentinel)
+    assert result == "passed-through"
+
+
+@pytest.mark.asyncio
 async def test_middleware_does_not_bypass_get_on_openai_write_route(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", STRONG_SECRET)
     mw = _build_middleware()

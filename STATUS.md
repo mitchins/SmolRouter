@@ -17,6 +17,9 @@
 - 🟡 Reassess body-archival lag after blob-storage hot-path fix
     The original O(N²) write-path issue has been addressed: `FilesystemBlobStorage` now uses a persisted usage counter instead of scanning the whole tree on every write, and request/response body archival stores are already offloaded via `asyncio.to_thread`. If operators still observe blank request/response bodies that appear later, the remaining work is to measure the current bottleneck accurately before changing storage again (for example: async eventual-consistency on detail views, write amplification from per-request files, or janitor contention). This is still relevant context for any future segment-store work, but the backlog item should no longer assume the old synchronous full-tree scan is the active bug. Files: `smolrouter/storage.py`, `smolrouter/database.py`. Context: `docs/PROPOSAL_segment_blob_storage.md`.
 
+- 🔴 OpenAI + Google `/v1/embeddings` endpoint support (in progress)
+    `POST /v1/embeddings` now exists on the shared OpenAI proxy path and works end-to-end against an OpenAI-compatible local upstream, with auth-path parity and body archival verified. Google GenAI embeddings support has also been wired through the provider stack and model discovery now includes `embedContent` models, but a live Google smoke is still pending because no Google API key is configured in this environment. Acceptance remains: prove both OpenAI-compatible and Google GenAI embeddings paths with smoke where credentials are available.
+
 - 🟡 Provider-key accounting convergence
     Google GenAI has comprehensive per-key token/request counting with quota tracking, and the Redis quota primitives already exist for reuse. The remaining gap is provider integration consistency: Anthropic currently reports model-level stats rather than true per-key accounting, and OpenAI-compatible flows still need explicit key-level usage tracking across configured-key and BYOK/passthrough modes. This should follow facade-key identity/accounting so downstream-secret observability complements, rather than substitutes for, project/use-case accounting. Files: `providers.py` (OpenAI path), `anthropic_provider.py`, `database.py`, `redis_backend.py`
 
@@ -32,7 +35,7 @@
 ## Low Priority
 
 - 🟠 Documentation Site + README Overhaul (TODO - unstarted, planning only)
-    Current README currently carries deep reference material (especially env vars, provider setup, and deployment details), making it harder for users to quickly understand what SmolRouter can do. Scope this work as two linked tasks:
+    README currently carries deep reference material (especially env vars, provider setup, and deployment details), making it harder for users to quickly understand what SmolRouter can do. Scope this work as two linked tasks:
     1) Establish a dedicated docs site so canonical reference can move out of README.
     2) Rework README into a faster, visual landing experience with examples and screenshots.
 
@@ -50,9 +53,8 @@
     - a visual section (screenshots, GIF loop, or slide-like step gallery) showing request routing, dashboard visibility, and quota/accounting behavior.
     Keep the full env/config reference in the docs site and add strict deep links from README.
 
-- 🔵 Move from Static Pages to Dynamic API
-    Current dashboard uses server-side rendered HTML templates. Move to SPA (Single Page App) with separate API endpoints. Benefits: Better UX, real-time updates, easier testing. Templates to migrate: `templates/index.html`, `templates/system.html`, etc. New endpoints needed: `/api/dashboard`, `/api/providers`, `/api/stats`
-    Current dashboard uses server-side rendered templates with API-backed data fetching. Most main pages are API-driven but render via Jinja templates (`templates/index.html`, `providers.html`, `performance.html`). Core dashboard data endpoints exist (`/api/dashboard`, `/api/stats`), and provider list data is currently exposed via `/api/upstreams` (not `/api/providers`).
+- 🔵 Move from server-rendered dashboard pages to richer client/API UI
+    Existing dashboard pages are server-rendered via Jinja templates with API-backed data sources. If a future SPA migration proceeds, target `/api/dashboard`, `/api/providers`, and `/api/stats` alongside `templates/index.html`, `templates/system.html`, and related views. Core dashboard endpoints already exist (`/api/dashboard`, `/api/stats`), while provider list data is currently exposed via `/api/upstreams` (not `/api/providers`).
 
 - 🔵 Improve JSON formatting + raw copy for request/body views (TODO - unstarted)
     Request and response payload blocks in web detail views should be consistently pretty-printed with a dedicated raw-copy action, including request and body payloads.

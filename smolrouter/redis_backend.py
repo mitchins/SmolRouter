@@ -202,10 +202,20 @@ def _normalize_datetime(value: Any) -> Optional[datetime]:
     return normalized
 
 
-def _load_blob_body(blob_storage: Any, key: Any) -> Any:
+def _load_blob_body(blob_storage: Any, key: Any) -> tuple[Any, str]:
     if not key:
-        return None
-    return blob_storage.retrieve(key)
+        return None, "not_stored"
+
+    try:
+        data = blob_storage.retrieve(key)
+    except Exception:
+        logger.exception("Failed to retrieve blob %s", key)
+        return None, "storage_error"
+
+    if data is None:
+        return None, "not_found"
+
+    return data, "available"
 
 
 def _prepare_quota_record_data(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,8 +477,12 @@ class LogRecord:
         from .storage import get_blob_storage
 
         blob_storage = get_blob_storage()
-        self.request_body = _load_blob_body(blob_storage, getattr(self, "request_body_key", None))
-        self.response_body = _load_blob_body(blob_storage, getattr(self, "response_body_key", None))
+        self.request_body, self.request_body_status = _load_blob_body(
+            blob_storage, getattr(self, "request_body_key", None)
+        )
+        self.response_body, self.response_body_status = _load_blob_body(
+            blob_storage, getattr(self, "response_body_key", None)
+        )
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
