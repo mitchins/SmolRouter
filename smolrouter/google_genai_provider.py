@@ -33,6 +33,7 @@ from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
 from .request_metadata import RequestMetadata
 from .task_utils import create_logged_task
+from .transport_observer import get_observer
 
 logger = logging.getLogger(__name__)
 
@@ -2474,44 +2475,43 @@ class GoogleGenAIProvider(IModelProvider):
                 "in the Google GenAI compatibility shim",
             )
 
+    async def _build_completion_metadata(
+        self, context: GoogleGenAICompletionContext, tokens_used: int
+    ) -> RequestMetadata:
+        await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
+
+        if context.proxy_url:
+            self._mark_proxy_health(context.proxy_url, success=True)
+
+        observer = get_observer()
+        observation = observer.get_observation(context.observation_id)
+        actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
+            context, observation
+        )
+
+        return RequestMetadata(
+            api_key_suffix=actual_key_suffix,
+            proxy_used=actual_proxy,
+            provider_id=self.config.name,
+            model_name=context.model_name,
+            api_key_index=context.api_key_index if context.api_key_index else None,
+            api_key_total=context.api_key_total if context.api_key_total else None,
+            api_key_verified=key_verified,
+            proxy_verified=proxy_verified,
+            observation_id=context.observation_id,
+        )
+
     async def _finalize_completion(
         self, context: GoogleGenAICompletionContext, response: Any
     ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
-        from .request_metadata import RequestMetadata
-        from .transport_observer import get_observer
-
         if context.request_kind == "embed_content":
             openai_response = self._convert_genai_to_embeddings_response(
                 response,
                 context.original_model,
                 context.input_token_count,
             )
-
             tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
-            await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
-
-            if context.proxy_url:
-                self._mark_proxy_health(context.proxy_url, success=True)
-
-            observer = get_observer()
-            observation = observer.get_observation(context.observation_id)
-            actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
-                context, observation
-            )
-
-            metadata = RequestMetadata(
-                api_key_suffix=actual_key_suffix,
-                proxy_used=actual_proxy,
-                provider_id=self.config.name,
-                model_name=context.model_name,
-                api_key_index=context.api_key_index if context.api_key_index else None,
-                api_key_total=context.api_key_total if context.api_key_total else None,
-                api_key_verified=key_verified,
-                proxy_verified=proxy_verified,
-                observation_id=context.observation_id,
-            )
-
-            return openai_response, metadata
+            return openai_response, await self._build_completion_metadata(context, tokens_used)
 
         if context.tts_request and context.endpoint == OPENAI_RESPONSES_ENDPOINT:
             openai_response = self._convert_genai_to_responses_audio_response(
@@ -2527,30 +2527,7 @@ class GoogleGenAIProvider(IModelProvider):
             openai_response = self._convert_genai_to_openai_response(response, context.original_model)
 
         tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
-        await self._update_api_key_stats(context.api_key, context.model_name, success=True, tokens=tokens_used)
-
-        if context.proxy_url:
-            self._mark_proxy_health(context.proxy_url, success=True)
-
-        observer = get_observer()
-        observation = observer.get_observation(context.observation_id)
-        actual_key_suffix, actual_proxy, key_verified, proxy_verified = self._resolve_observation_state(
-            context, observation
-        )
-
-        metadata = RequestMetadata(
-            api_key_suffix=actual_key_suffix,
-            proxy_used=actual_proxy,
-            provider_id=self.config.name,
-            model_name=context.model_name,
-            api_key_index=context.api_key_index if context.api_key_index else None,
-            api_key_total=context.api_key_total if context.api_key_total else None,
-            api_key_verified=key_verified,
-            proxy_verified=proxy_verified,
-            observation_id=context.observation_id,
-        )
-
-        return openai_response, metadata
+        return openai_response, await self._build_completion_metadata(context, tokens_used)
 
     @staticmethod
     def _is_google_supported_action_model(supported_actions: List[str]) -> bool:
