@@ -2512,56 +2512,6 @@ class GoogleGenAIProvider(IModelProvider):
                 "unsupported Imagen parameter(s): " + ",".join(sorted(unsupported_parameters)),
             )
 
-    def _validate_imagen_aspect_ratio(
-        self,
-        imagen_parameters: Dict[str, Any],
-        context: GoogleGenAICompletionContext,
-    ) -> None:
-        aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
-        if aspect_ratio is not None and aspect_ratio not in GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS:
-            self._raise_invalid_image_request(
-                context,
-                "extra_body.google.imagen.aspect_ratio must be one of "
-                + ", ".join(sorted(GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS)),
-            )
-
-    def _validate_imagen_image_size(
-        self,
-        imagen_parameters: Dict[str, Any],
-        context: GoogleGenAICompletionContext,
-    ) -> None:
-        self._validate_imagen_membership(
-            imagen_parameters.get("imageSize"),
-            GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES,
-            context,
-            "extra_body.google.imagen.image_size must be one of 1K or 2K",
-        )
-
-    def _validate_imagen_person_generation(
-        self,
-        imagen_parameters: Dict[str, Any],
-        context: GoogleGenAICompletionContext,
-    ) -> None:
-        self._validate_imagen_membership(
-            imagen_parameters.get("personGeneration"),
-            {"dont_allow", "allow_adult", "allow_all"},
-            context,
-            "extra_body.google.imagen.person_generation is invalid",
-            formatter=lambda value: str(value).strip().lower(),
-        )
-
-    def _validate_imagen_safety_setting(
-        self,
-        imagen_parameters: Dict[str, Any],
-        context: GoogleGenAICompletionContext,
-    ) -> None:
-        self._validate_imagen_membership(
-            imagen_parameters.get("safetySetting"),
-            {"BLOCK_LOW_AND_ABOVE", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_ONLY_HIGH", "BLOCK_NONE"},
-            context,
-            "extra_body.google.imagen.safety_filter_level is invalid",
-        )
-
     def _validate_imagen_output_options(
         self,
         imagen_parameters: Dict[str, Any],
@@ -2600,10 +2550,37 @@ class GoogleGenAIProvider(IModelProvider):
         context: GoogleGenAICompletionContext,
     ) -> None:
         self._validate_imagen_supported_parameters(imagen_parameters, context)
-        self._validate_imagen_aspect_ratio(imagen_parameters, context)
-        self._validate_imagen_image_size(imagen_parameters, context)
-        self._validate_imagen_person_generation(imagen_parameters, context)
-        self._validate_imagen_safety_setting(imagen_parameters, context)
+        aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
+        if aspect_ratio is not None and aspect_ratio not in GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS:
+            self._raise_invalid_image_request(
+                context,
+                "extra_body.google.imagen.aspect_ratio must be one of "
+                + ", ".join(sorted(GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS)),
+            )
+
+        membership_validations = (
+            (
+                imagen_parameters.get("imageSize"),
+                GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES,
+                "extra_body.google.imagen.image_size must be one of 1K or 2K",
+                None,
+            ),
+            (
+                imagen_parameters.get("personGeneration"),
+                {"dont_allow", "allow_adult", "allow_all"},
+                "extra_body.google.imagen.person_generation is invalid",
+                lambda value: str(value).strip().lower(),
+            ),
+            (
+                imagen_parameters.get("safetySetting"),
+                {"BLOCK_LOW_AND_ABOVE", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_ONLY_HIGH", "BLOCK_NONE"},
+                "extra_body.google.imagen.safety_filter_level is invalid",
+                None,
+            ),
+        )
+        for value, allowed_values, detail, formatter in membership_validations:
+            self._validate_imagen_membership(value, allowed_values, context, detail, formatter=formatter)
+
         self._validate_imagen_output_options(imagen_parameters, context)
 
     def _convert_imagen_response_to_openai_images(self, response: Dict[str, Any]) -> Dict[str, Any]:
@@ -2727,30 +2704,27 @@ class GoogleGenAIProvider(IModelProvider):
 
         return image_request
 
-    def _apply_imagen_size_parameter(
+    def _resolve_imagen_top_level_aspect_ratio(
         self,
-        openai_request: Dict[str, Any],
+        size: Any,
         context: GoogleGenAICompletionContext,
-        imagen_parameters: Dict[str, Any],
-    ) -> None:
-        size = openai_request.get("size")
+    ) -> Optional[str]:
         if size is None:
-            return
+            return None
 
         normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
         if normalized_size == "auto":
-            return
+            return None
 
         aspect_ratio = self._map_imagen_size_to_aspect_ratio(size)
         if aspect_ratio is None:
-            raise self._build_request_error_from_context(
+            self._raise_invalid_image_request(
                 context,
-                "400 invalid argument: Imagen models only support top-level sizes that map to supported "
-                "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
-                "provider-native sizing",
+                "Imagen models only support top-level sizes that map to supported provider aspect ratios; "
+                "use extra_body.google.imagen.aspect_ratio and image_size for provider-native sizing",
             )
 
-        imagen_parameters["aspectRatio"] = aspect_ratio
+        return aspect_ratio
 
     def _build_imagen_generation_request(
         self,
@@ -2762,7 +2736,9 @@ class GoogleGenAIProvider(IModelProvider):
             self._extract_imagen_native_config(openai_request)
         )
         imagen_parameters["sampleCount"] = openai_request.get("n", 1)
-        self._apply_imagen_size_parameter(openai_request, context, imagen_parameters)
+        aspect_ratio = self._resolve_imagen_top_level_aspect_ratio(openai_request.get("size"), context)
+        if aspect_ratio is not None:
+            imagen_parameters["aspectRatio"] = aspect_ratio
 
         return {
             "instances": [{"prompt": prompt}],
@@ -2865,28 +2841,15 @@ class GoogleGenAIProvider(IModelProvider):
         context: GoogleGenAICompletionContext,
         imagen_parameters: Dict[str, Any],
     ) -> None:
-        size = openai_request.get("size")
-        if size is None:
-            return
-
-        normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
-        if normalized_size == "auto":
-            return
-
-        aspect_ratio = self._map_imagen_size_to_aspect_ratio(size)
+        aspect_ratio = self._resolve_imagen_top_level_aspect_ratio(openai_request.get("size"), context)
         if aspect_ratio is None:
-            raise self._build_request_error_from_context(
-                context,
-                "400 invalid argument: Imagen models only support top-level sizes that map to supported "
-                "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
-                "provider-native sizing",
-            )
+            return
 
         existing_aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
         if existing_aspect_ratio and existing_aspect_ratio != aspect_ratio:
-            raise self._build_request_error_from_context(
+            self._raise_invalid_image_request(
                 context,
-                "400 invalid argument: top-level size and extra_body.google.imagen.aspect_ratio conflict",
+                "top-level size and extra_body.google.imagen.aspect_ratio conflict",
             )
 
     def _validate_imagen_request_contract(
