@@ -188,6 +188,9 @@ def create_auth_middleware():
                 "/v1/completions",
                 "/v1/responses",
                 "/v1/embeddings",
+                "/v1/images/generations",
+                "/v1/images/edits",
+                "/v1/images/variations",
             }
 
         async def dispatch(self, request: Request, call_next):

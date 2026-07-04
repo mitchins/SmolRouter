@@ -685,6 +685,13 @@ THINKING_TAG_PAIRS = (
     ("<reasoning>", "</reasoning>"),
 )
 
+OPENAI_IMAGE_GENERATION_PATH = "/v1/images/generations"
+OPENAI_IMAGE_EDIT_PATH = "/v1/images/edits"
+OPENAI_IMAGE_VARIATION_PATH = "/v1/images/variations"
+OPENAI_IMAGE_ROUTES = frozenset(
+    {OPENAI_IMAGE_GENERATION_PATH, OPENAI_IMAGE_EDIT_PATH, OPENAI_IMAGE_VARIATION_PATH}
+)
+
 
 def _remove_thinking_tag_blocks(text: str, start_tag: str, end_tag: str) -> str:
     result = text
@@ -1251,6 +1258,13 @@ def _apply_disable_thinking_request_marker(payload: Dict[str, Any]) -> None:
     elif "prompt" in payload and isinstance(payload["prompt"], str):
         payload["prompt"] = payload["prompt"].rstrip() + " /no_think"
 
+
+def _is_image_generation_path(path: str) -> bool:
+    return path == OPENAI_IMAGE_GENERATION_PATH
+
+
+def _is_image_route(path: str) -> bool:
+    return path in OPENAI_IMAGE_ROUTES
 
 def _build_openai_forward_headers(request: Request, *, include_authorization: bool = True) -> Dict[str, str]:
     headers = {k: v for k, v in request.headers.items() if k.lower() in {"authorization", "openai-organization"}}
@@ -1858,6 +1872,7 @@ async def proxy_request(path: str, request: Request):
         return JSONResponse(content={"error": INVALID_JSON_REQUEST_ERROR}, status_code=400)
 
     original_model, mapped_model = _apply_openai_model_mapping(payload)
+    is_image_generation_request = _is_image_generation_path(path)
     log_entry = await _start_openai_request_log(
         request,
         original_model,
@@ -1866,7 +1881,24 @@ async def proxy_request(path: str, request: Request):
         request_body_bytes,
         context.identity,
     )
-    _apply_disable_thinking_request_marker(payload)
+    if is_image_generation_request and bool(payload.get("stream", False)):
+        return _error_response(
+            log_entry,
+            start_time,
+            400,
+            "Streamed image generation is not supported",
+            request_body_bytes,
+            response_payload={
+                "error": {
+                    "message": "Image generation requests do not support streaming.",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    if not _is_image_route(path):
+        _apply_disable_thinking_request_marker(payload)
+
     is_streaming = bool(payload.get("stream", False))
     model_name = mapped_model or original_model or "unknown"
     return await _execute_openai_route_with_logging(
@@ -2232,6 +2264,11 @@ OPENAI_PROXY_ROUTE_RESPONSES = {
     503: {"description": "Routing unavailable"},
 }
 
+IMAGE_GENERATION_PROXY_ROUTE_RESPONSES = OPENAI_PROXY_ROUTE_RESPONSES
+
+IMAGE_NOT_IMPLEMENTED_PROXY_ROUTE_RESPONSES = {
+    501: {"description": "Image edits and variations are not implemented"},
+}
 PROJECTS_API_RESPONSES = {
     500: {"description": "Failed to load project inventory"},
 }
@@ -2261,6 +2298,31 @@ async def responses(request: Request):
 @app.post("/v1/embeddings", responses=OPENAI_PROXY_ROUTE_RESPONSES)
 async def embeddings(request: Request):
     return await proxy_request("/v1/embeddings", request)
+
+
+@app.post(OPENAI_IMAGE_GENERATION_PATH, responses=IMAGE_GENERATION_PROXY_ROUTE_RESPONSES)
+async def images_generations(request: Request):
+    return await proxy_request(OPENAI_IMAGE_GENERATION_PATH, request)
+
+
+@app.post(OPENAI_IMAGE_EDIT_PATH, responses=IMAGE_NOT_IMPLEMENTED_PROXY_ROUTE_RESPONSES)
+async def images_edits(_: Request):
+    return JSONResponse(
+        content={
+            "error": {"type": "not_implemented", "message": "Image edits endpoint is not implemented"},
+        },
+        status_code=501,
+    )
+
+
+@app.post(OPENAI_IMAGE_VARIATION_PATH, responses=IMAGE_NOT_IMPLEMENTED_PROXY_ROUTE_RESPONSES)
+async def images_variations(_: Request):
+    return JSONResponse(
+        content={
+            "error": {"type": "not_implemented", "message": "Image variations endpoint is not implemented"},
+        },
+        status_code=501,
+    )
 
 
 @app.get("/v1/models")

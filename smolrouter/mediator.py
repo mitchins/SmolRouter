@@ -14,7 +14,7 @@ from datetime import datetime
 from .interfaces import IModelStrategy, IAccessControl, ModelInfo, ClientContext
 from .caching import ModelAggregator, IModelCache
 from .providers import IModelProvider
-from .google_genai_provider import GoogleGenAIProvider
+from .google_genai_provider import GOOGLE_GENAI_IMAGE_ENDPOINT, GoogleGenAIProvider
 from .dummy_provider import DummyProvider
 from .load_balancer import model_load_balancer
 from .request_metadata import RequestMetadata
@@ -384,6 +384,15 @@ class ModelMediator:
         lb_instance: Any,
     ) -> Tuple[Dict[str, Any], int, str, Any]:
         try:
+            if path == GOOGLE_GENAI_IMAGE_ENDPOINT:
+                response_data, metadata = await provider.generate_image(request_payload, path)
+                return (
+                    response_data,
+                    200,
+                    f"google-genai:{resolved_model.provider_id}",
+                    self._attach_lb_instance(lb_instance, metadata),
+                )
+
             response_data, metadata = await provider.generate_completion(request_payload, path)
             return (
                 response_data,
@@ -393,6 +402,11 @@ class ModelMediator:
             )
         except Exception as e:
             error_msg = str(e)
+            error_type = "api_error"
+            status_code = self._google_error_status_code(error_msg)
+            if status_code == 400:
+                error_type = "invalid_request_error"
+
             error_metadata = RequestMetadata(
                 api_key_suffix=getattr(e, "api_key_suffix", None),
                 proxy_used=getattr(e, "proxy_used", None),
@@ -403,8 +417,8 @@ class ModelMediator:
             )
 
             return (
-                {"error": {"type": "api_error", "message": error_msg, "provider": "google-genai"}},
-                self._google_error_status_code(error_msg),
+                {"error": {"type": error_type, "message": error_msg, "provider": "google-genai"}},
+                status_code,
                 f"google-genai:{resolved_model.provider_id}",
                 self._attach_lb_instance(lb_instance, error_metadata),
             )
