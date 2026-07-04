@@ -15,7 +15,7 @@ import secrets
 import wave
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -2482,6 +2482,24 @@ class GoogleGenAIProvider(IModelProvider):
             return output_options
         return {}
 
+    def _raise_invalid_image_request(self, context: GoogleGenAICompletionContext, detail: str) -> None:
+        raise self._build_request_error_from_context(context, f"400 invalid argument: {detail}")
+
+    def _validate_imagen_membership(
+        self,
+        value: Any,
+        allowed_values: set[str],
+        context: GoogleGenAICompletionContext,
+        detail: str,
+        *,
+        formatter: Optional[Callable[[Any], str]] = None,
+    ) -> None:
+        if value is None:
+            return
+        normalized = formatter(value) if formatter is not None else str(value)
+        if normalized not in allowed_values:
+            self._raise_invalid_image_request(context, detail)
+
     def _validate_imagen_supported_parameters(
         self,
         imagen_parameters: Dict[str, Any],
@@ -2489,9 +2507,9 @@ class GoogleGenAIProvider(IModelProvider):
     ) -> None:
         unsupported_parameters = set(imagen_parameters.keys()) - GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES
         if unsupported_parameters:
-            raise self._build_request_error_from_context(
+            self._raise_invalid_image_request(
                 context,
-                "400 invalid argument: unsupported Imagen parameter(s): " + ",".join(sorted(unsupported_parameters)),
+                "unsupported Imagen parameter(s): " + ",".join(sorted(unsupported_parameters)),
             )
 
     def _validate_imagen_aspect_ratio(
@@ -2501,9 +2519,9 @@ class GoogleGenAIProvider(IModelProvider):
     ) -> None:
         aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
         if aspect_ratio is not None and aspect_ratio not in GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS:
-            raise self._build_request_error_from_context(
+            self._raise_invalid_image_request(
                 context,
-                "400 invalid argument: extra_body.google.imagen.aspect_ratio must be one of "
+                "extra_body.google.imagen.aspect_ratio must be one of "
                 + ", ".join(sorted(GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS)),
             )
 
@@ -2512,45 +2530,37 @@ class GoogleGenAIProvider(IModelProvider):
         imagen_parameters: Dict[str, Any],
         context: GoogleGenAICompletionContext,
     ) -> None:
-        image_size = imagen_parameters.get("imageSize")
-        if image_size is not None and str(image_size) not in GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES:
-            raise self._build_request_error_from_context(
-                context,
-                "400 invalid argument: extra_body.google.imagen.image_size must be one of 1K or 2K",
-            )
+        self._validate_imagen_membership(
+            imagen_parameters.get("imageSize"),
+            GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES,
+            context,
+            "extra_body.google.imagen.image_size must be one of 1K or 2K",
+        )
 
     def _validate_imagen_person_generation(
         self,
         imagen_parameters: Dict[str, Any],
         context: GoogleGenAICompletionContext,
     ) -> None:
-        person_generation = imagen_parameters.get("personGeneration")
-        if person_generation is not None and str(person_generation).strip().lower() not in {
-            "dont_allow",
-            "allow_adult",
-            "allow_all",
-        }:
-            raise self._build_request_error_from_context(
-                context,
-                "400 invalid argument: extra_body.google.imagen.person_generation is invalid",
-            )
+        self._validate_imagen_membership(
+            imagen_parameters.get("personGeneration"),
+            {"dont_allow", "allow_adult", "allow_all"},
+            context,
+            "extra_body.google.imagen.person_generation is invalid",
+            formatter=lambda value: str(value).strip().lower(),
+        )
 
     def _validate_imagen_safety_setting(
         self,
         imagen_parameters: Dict[str, Any],
         context: GoogleGenAICompletionContext,
     ) -> None:
-        safety_setting = imagen_parameters.get("safetySetting")
-        if safety_setting is not None and str(safety_setting) not in {
-            "BLOCK_LOW_AND_ABOVE",
-            "BLOCK_MEDIUM_AND_ABOVE",
-            "BLOCK_ONLY_HIGH",
-            "BLOCK_NONE",
-        }:
-            raise self._build_request_error_from_context(
-                context,
-                "400 invalid argument: extra_body.google.imagen.safety_filter_level is invalid",
-            )
+        self._validate_imagen_membership(
+            imagen_parameters.get("safetySetting"),
+            {"BLOCK_LOW_AND_ABOVE", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_ONLY_HIGH", "BLOCK_NONE"},
+            context,
+            "extra_body.google.imagen.safety_filter_level is invalid",
+        )
 
     def _validate_imagen_output_options(
         self,
@@ -2559,28 +2569,29 @@ class GoogleGenAIProvider(IModelProvider):
     ) -> None:
         output_options = self._extract_imagen_output_options(imagen_parameters)
         mime_type = output_options.get("mimeType")
-        if mime_type is not None and str(mime_type) not in GOOGLE_IMAGEN_SUPPORTED_OUTPUT_MIME_TYPES:
-            raise self._build_request_error_from_context(
-                context,
-                "400 invalid argument: extra_body.google.imagen.output_mime_type must be image/png or image/jpeg",
-            )
+        self._validate_imagen_membership(
+            mime_type,
+            GOOGLE_IMAGEN_SUPPORTED_OUTPUT_MIME_TYPES,
+            context,
+            "extra_body.google.imagen.output_mime_type must be image/png or image/jpeg",
+        )
 
         compression_quality = output_options.get("compressionQuality")
         if compression_quality is not None:
             if not isinstance(compression_quality, int) or isinstance(compression_quality, bool):
-                raise self._build_request_error_from_context(
+                self._raise_invalid_image_request(
                     context,
-                    "400 invalid argument: extra_body.google.imagen.output_compression_quality must be an integer",
+                    "extra_body.google.imagen.output_compression_quality must be an integer",
                 )
             if compression_quality < 0 or compression_quality > 100:
-                raise self._build_request_error_from_context(
+                self._raise_invalid_image_request(
                     context,
-                    "400 invalid argument: extra_body.google.imagen.output_compression_quality must be between 0 and 100",
+                    "extra_body.google.imagen.output_compression_quality must be between 0 and 100",
                 )
             if str(mime_type or "") != "image/jpeg":
-                raise self._build_request_error_from_context(
+                self._raise_invalid_image_request(
                     context,
-                    "400 invalid argument: extra_body.google.imagen.output_compression_quality requires output_mime_type=image/jpeg",
+                    "extra_body.google.imagen.output_compression_quality requires output_mime_type=image/jpeg",
                 )
 
     def _validate_imagen_native_parameters(
