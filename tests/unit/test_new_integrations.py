@@ -2602,6 +2602,40 @@ async def test_mediator_preserves_provider_metadata_for_google_errors():
     assert metadata.api_key_total == 5
 
 
+@pytest.mark.asyncio
+async def test_mediator_reuses_google_error_status_code():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemma-3-4b-it@test-google",
+        name="gemma-3-4b-it",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+
+    provider = _make_google_provider()
+    provider.generate_completion = AsyncMock(side_effect=Exception("invalid argument"))
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    with patch.object(ModelMediator, "_google_error_status_code", side_effect=[400, 500]) as status_mapper:
+        response_data, status_code, _upstream_used, _metadata = await mediator.route_request(
+            "127.0.0.1",
+            "gemma-3-4b-it [test-google]",
+            {"model": "gemma-3-4b-it [test-google]", "messages": [{"role": "user", "content": "Hello"}]},
+            "/v1/chat/completions",
+            {"authorization": "Bearer client-token"},
+            30.0,
+        )
+
+    assert status_code == 400
+    assert response_data["error"]["type"] == "invalid_request_error"
+    assert status_mapper.call_count == 1
+
+
 def test_anthropic_api_key_passthrough():
     """Test Anthropic API key passthrough functionality"""
     config = AnthropicConfig(

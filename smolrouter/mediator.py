@@ -403,7 +403,8 @@ class ModelMediator:
         except Exception as e:
             error_msg = str(e)
             error_type = "api_error"
-            if self._google_error_status_code(error_msg) == 400:
+            status_code = self._google_error_status_code(error_msg)
+            if status_code == 400:
                 error_type = "invalid_request_error"
 
             error_metadata = RequestMetadata(
@@ -417,7 +418,7 @@ class ModelMediator:
 
             return (
                 {"error": {"type": error_type, "message": error_msg, "provider": "google-genai"}},
-                self._google_error_status_code(error_msg),
+                status_code,
                 f"google-genai:{resolved_model.provider_id}",
                 self._attach_lb_instance(lb_instance, error_metadata),
             )

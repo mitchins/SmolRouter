@@ -12,6 +12,7 @@ import io
 import wave
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -531,6 +532,20 @@ def test_build_imagen_generation_request_defaults_to_openai_single_image(provide
     assert image_request["parameters"]["sampleCount"] == 1
 
 
+def test_normalize_imagen_parameters_merges_output_options(provider):
+    normalized = provider._normalize_imagen_parameters(
+        {
+            "output_mime_type": "image/jpeg",
+            "outputOptions": {"compressionQuality": 87},
+        }
+    )
+
+    assert normalized["outputOptions"] == {
+        "mimeType": "image/jpeg",
+        "compressionQuality": 87,
+    }
+
+
 def test_validate_imagen_request_rejects_unsupported_native_parameter(provider):
     context = GoogleGenAICompletionContext(
         original_model="imagen-4.0-generate-001",
@@ -601,10 +616,32 @@ def test_validate_image_request_accepts_supported_optional_fields(provider):
             "prompt": "sunset",
             "size": "1024x1024",
             "response_format": "b64_json",
+            "user": "user-123",
             "extra_body": {"google": {"safety_settings": []}},
         },
         context,
     )
+
+
+def test_build_image_generation_request_forwards_user(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-2.5-flash-image",
+        model_name="gemini-2.5-flash-image",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    image_request = provider._build_image_generation_request(
+        {
+            "model": "gemini-2.5-flash-image",
+            "prompt": "sunset",
+            "user": "user-123",
+        },
+        context,
+    )
+
+    assert image_request["user"] == "user-123"
 
 
 def test_validate_image_request_rejects_unknown_fields(provider):
@@ -621,6 +658,26 @@ def test_validate_image_request_rejects_unknown_fields(provider):
             {"model": "gemini-2.5-flash-image", "prompt": "sunset", "quality": "high"},
             context,
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_image_rejects_imagen_size_conflict_before_context_init(provider):
+    provider._initialize_request_context = AsyncMock(side_effect=AssertionError("should not initialize context"))
+
+    with pytest.raises(
+        GoogleGenAIRequestError,
+        match="top-level size and extra_body.google.imagen.aspect_ratio conflict",
+    ):
+        await provider.generate_image(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "sunset",
+                "size": "1024x1024",
+                "extra_body": {"google": {"imagen": {"aspect_ratio": "16:9"}}},
+            }
+        )
+
+    assert provider._initialize_request_context.await_count == 0
 
 
 # ==========================================================================

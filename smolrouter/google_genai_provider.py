@@ -83,7 +83,30 @@ GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES = {
     "safetySetting",
 }
 GOOGLE_IMAGE_RESPONSE_FORMATS = {"url", "b64_json"}
-OPENAI_IMAGE_REQUEST_FIELDS = {"model", "prompt", "n", "size", "response_format", "extra_body"}
+OPENAI_IMAGE_REQUEST_FIELDS = {"model", "prompt", "n", "size", "response_format", "extra_body", "user"}
+GOOGLE_NON_INVALID_403_INDICATORS = (
+    "paid plan",
+    "paid plans",
+    "upgrade your account",
+    "billing",
+    "billed user",
+    "not supported for predict",
+    "forbidden for project",
+    "model is not found",
+)
+GOOGLE_INVALID_KEY_INDICATORS = (
+    "permission denied",
+    "permission_denied",
+    "permissiondenied",
+    "api key not valid",
+    "invalid api key",
+    "api_key_invalid",
+    "authentication failed",
+    "unauthorized",
+    "credentials are missing or invalid",
+    "api key expired",
+)
+GOOGLE_FALLBACK_INVALID_KEY_INDICATORS = GOOGLE_INVALID_KEY_INDICATORS + ("invalid_argument",)
 AUDIO_WAV_MIME_TYPE = "audio/wav"
 AUDIO_PCM_MIME_TYPE = "audio/pcm"
 AUDIO_MPEG_MIME_TYPE = "audio/mpeg"
@@ -1302,50 +1325,15 @@ class GoogleGenAIProvider(IModelProvider):
         if status_code == 403:
             if error_msg:
                 error_lower = error_msg.lower()
-                non_invalid_403_indicators = [
-                    "paid plan",
-                    "paid plans",
-                    "upgrade your account",
-                    "billing",
-                    "billed user",
-                    "not supported for predict",
-                    "forbidden for project",
-                    "model is not found",
-                ]
-                if any(indicator in error_lower for indicator in non_invalid_403_indicators):
+                if any(indicator in error_lower for indicator in GOOGLE_NON_INVALID_403_INDICATORS):
                     return False
-                invalid_key_indicators = [
-                    "permission denied",
-                    "permission_denied",
-                    "permissiondenied",
-                    "api key not valid",
-                    "invalid api key",
-                    "api_key_invalid",
-                    "authentication failed",
-                    "unauthorized",
-                    "credentials are missing or invalid",
-                    "api key expired",
-                ]
-                return any(indicator in error_lower for indicator in invalid_key_indicators)
+                return any(indicator in error_lower for indicator in GOOGLE_INVALID_KEY_INDICATORS)
             return True
 
         # Check error message for known invalid key indicators
         if error_msg:
             error_lower = error_msg.lower()
-            invalid_key_indicators = [
-                "permission denied",
-                "permission_denied",  # With underscore (PERMISSION_DENIED from Google)
-                "permissiondenied",  # Sometimes without space or underscore
-                "api key not valid",
-                "invalid api key",
-                "api_key_invalid",
-                "authentication failed",
-                "unauthorized",
-                "invalid_argument",  # Often used for bad keys in Google APIs
-                "credentials are missing or invalid",
-                "api key expired",
-            ]
-            return any(indicator in error_lower for indicator in invalid_key_indicators)
+            return any(indicator in error_lower for indicator in GOOGLE_FALLBACK_INVALID_KEY_INDICATORS)
 
         return False
 
@@ -2378,7 +2366,7 @@ class GoogleGenAIProvider(IModelProvider):
     def _build_google_image_generation_url(self, model_name: Optional[str] = None) -> str:
         if model_name and self._is_imagen_generation_model(model_name):
             return f"{self.get_endpoint().rstrip('/')}{GOOGLE_IMAGEN_PREDICT_PATH.format(model=model_name)}"
-        return f"{self.get_endpoint().rstrip('/')}" f"{GOOGLE_OPENAI_IMAGES_GENERATION_PATH}"
+        return f"{self.get_endpoint().rstrip('/')}{GOOGLE_OPENAI_IMAGES_GENERATION_PATH}"
 
     def _is_image_generation_model(self, model_name: str) -> bool:
         if not model_name:
@@ -2415,7 +2403,7 @@ class GoogleGenAIProvider(IModelProvider):
         if not isinstance(imagen_body, dict):
             return {}
 
-        return {key: value for key, value in imagen_body.items()}
+        return dict(imagen_body)
 
     @staticmethod
     def _normalize_imagen_parameter_name(parameter_name: str) -> str:
@@ -2447,20 +2435,33 @@ class GoogleGenAIProvider(IModelProvider):
         for raw_key, value in parameters.items():
             key = cls._normalize_imagen_parameter_name(str(raw_key).strip())
             if key == "output_mime_type":
-                output_options = normalized.setdefault("outputOptions", {})
-                if isinstance(output_options, dict):
-                    output_options["mimeType"] = value
+                cls._set_imagen_output_option(normalized, "mimeType", value)
                 continue
             if key == "output_compression_quality":
-                output_options = normalized.setdefault("outputOptions", {})
-                if isinstance(output_options, dict):
-                    output_options["compressionQuality"] = value
+                cls._set_imagen_output_option(normalized, "compressionQuality", value)
+                continue
+            if key == "outputOptions":
+                cls._merge_imagen_output_options(normalized, value)
                 continue
             if key == "personGeneration":
                 normalized[key] = str(value).strip().lower()
                 continue
             normalized[key] = value
         return normalized
+
+    @staticmethod
+    def _merge_imagen_output_options(normalized: Dict[str, Any], value: Any) -> None:
+        output_options = normalized.get("outputOptions")
+        if isinstance(output_options, dict) and isinstance(value, dict):
+            output_options.update(value)
+            return
+        normalized["outputOptions"] = value
+
+    @staticmethod
+    def _set_imagen_output_option(normalized: Dict[str, Any], option_name: str, value: Any) -> None:
+        output_options = normalized.setdefault("outputOptions", {})
+        if isinstance(output_options, dict):
+            output_options[option_name] = value
 
     @staticmethod
     def _map_imagen_size_to_aspect_ratio(size: Any) -> Optional[str]:
@@ -2481,7 +2482,7 @@ class GoogleGenAIProvider(IModelProvider):
             return output_options
         return {}
 
-    def _validate_imagen_native_parameters(
+    def _validate_imagen_supported_parameters(
         self,
         imagen_parameters: Dict[str, Any],
         context: GoogleGenAICompletionContext,
@@ -2493,6 +2494,11 @@ class GoogleGenAIProvider(IModelProvider):
                 "400 invalid argument: unsupported Imagen parameter(s): " + ",".join(sorted(unsupported_parameters)),
             )
 
+    def _validate_imagen_aspect_ratio(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
         if aspect_ratio is not None and aspect_ratio not in GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS:
             raise self._build_request_error_from_context(
@@ -2501,6 +2507,11 @@ class GoogleGenAIProvider(IModelProvider):
                 + ", ".join(sorted(GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS)),
             )
 
+    def _validate_imagen_image_size(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         image_size = imagen_parameters.get("imageSize")
         if image_size is not None and str(image_size) not in GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES:
             raise self._build_request_error_from_context(
@@ -2508,6 +2519,11 @@ class GoogleGenAIProvider(IModelProvider):
                 "400 invalid argument: extra_body.google.imagen.image_size must be one of 1K or 2K",
             )
 
+    def _validate_imagen_person_generation(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         person_generation = imagen_parameters.get("personGeneration")
         if person_generation is not None and str(person_generation).strip().lower() not in {
             "dont_allow",
@@ -2519,6 +2535,11 @@ class GoogleGenAIProvider(IModelProvider):
                 "400 invalid argument: extra_body.google.imagen.person_generation is invalid",
             )
 
+    def _validate_imagen_safety_setting(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         safety_setting = imagen_parameters.get("safetySetting")
         if safety_setting is not None and str(safety_setting) not in {
             "BLOCK_LOW_AND_ABOVE",
@@ -2531,6 +2552,11 @@ class GoogleGenAIProvider(IModelProvider):
                 "400 invalid argument: extra_body.google.imagen.safety_filter_level is invalid",
             )
 
+    def _validate_imagen_output_options(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         output_options = self._extract_imagen_output_options(imagen_parameters)
         mime_type = output_options.get("mimeType")
         if mime_type is not None and str(mime_type) not in GOOGLE_IMAGEN_SUPPORTED_OUTPUT_MIME_TYPES:
@@ -2556,6 +2582,18 @@ class GoogleGenAIProvider(IModelProvider):
                     context,
                     "400 invalid argument: extra_body.google.imagen.output_compression_quality requires output_mime_type=image/jpeg",
                 )
+
+    def _validate_imagen_native_parameters(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        self._validate_imagen_supported_parameters(imagen_parameters, context)
+        self._validate_imagen_aspect_ratio(imagen_parameters, context)
+        self._validate_imagen_image_size(imagen_parameters, context)
+        self._validate_imagen_person_generation(imagen_parameters, context)
+        self._validate_imagen_safety_setting(imagen_parameters, context)
+        self._validate_imagen_output_options(imagen_parameters, context)
 
     def _convert_imagen_response_to_openai_images(self, response: Dict[str, Any]) -> Dict[str, Any]:
         predictions = response.get("predictions") if isinstance(response, dict) else None
@@ -2670,10 +2708,38 @@ class GoogleGenAIProvider(IModelProvider):
         if "response_format" in openai_request:
             image_request["response_format"] = openai_request["response_format"]
 
+        if "user" in openai_request:
+            image_request["user"] = openai_request["user"]
+
         if "extra_body" in openai_request:
             image_request["extra_body"] = openai_request["extra_body"]
 
         return image_request
+
+    def _apply_imagen_size_parameter(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+        imagen_parameters: Dict[str, Any],
+    ) -> None:
+        size = openai_request.get("size")
+        if size is None:
+            return
+
+        normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
+        if normalized_size == "auto":
+            return
+
+        aspect_ratio = self._map_imagen_size_to_aspect_ratio(size)
+        if aspect_ratio is None:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: Imagen models only support top-level sizes that map to supported "
+                "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
+                "provider-native sizing",
+            )
+
+        imagen_parameters["aspectRatio"] = aspect_ratio
 
     def _build_imagen_generation_request(
         self,
@@ -2681,26 +2747,11 @@ class GoogleGenAIProvider(IModelProvider):
         context: GoogleGenAICompletionContext,
     ) -> Dict[str, Any]:
         prompt = str(openai_request.get("prompt", "")).strip()
-        imagen_parameters: Dict[str, Any] = self._normalize_imagen_parameters(self._extract_imagen_native_config(openai_request))
+        imagen_parameters: Dict[str, Any] = self._normalize_imagen_parameters(
+            self._extract_imagen_native_config(openai_request)
+        )
         imagen_parameters["sampleCount"] = openai_request.get("n", 1)
-
-        if "size" in openai_request and str(openai_request["size"]).strip().lower() != "auto":
-            aspect_ratio = self._map_imagen_size_to_aspect_ratio(openai_request["size"])
-            if aspect_ratio is None:
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: Imagen models only support top-level sizes that map to supported "
-                    "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
-                    "provider-native sizing",
-                )
-
-            existing_aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
-            if existing_aspect_ratio and existing_aspect_ratio != aspect_ratio:
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: top-level size and extra_body.google.imagen.aspect_ratio conflict",
-                )
-            imagen_parameters["aspectRatio"] = aspect_ratio
+        self._apply_imagen_size_parameter(openai_request, context, imagen_parameters)
 
         return {
             "instances": [{"prompt": prompt}],
@@ -2724,6 +2775,19 @@ class GoogleGenAIProvider(IModelProvider):
                 f"400 invalid argument: model '{context.model_name}' does not support image generation",
             )
 
+        self._validate_supported_image_request_fields(openai_request, context)
+        self._validate_image_prompt(openai_request, context)
+        self._validate_image_request_count(openai_request, context)
+        self._validate_image_response_format(openai_request, context)
+
+        if self._is_imagen_generation_model(context.model_name):
+            self._validate_imagen_request_contract(openai_request, context)
+
+    def _validate_supported_image_request_fields(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         unsupported_fields = set(openai_request.keys()) - OPENAI_IMAGE_REQUEST_FIELDS
         if unsupported_fields:
             raise self._build_request_error_from_context(
@@ -2732,6 +2796,11 @@ class GoogleGenAIProvider(IModelProvider):
                 + ",".join(sorted(unsupported_fields)),
             )
 
+    def _validate_image_prompt(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
         prompt = openai_request.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             raise self._build_request_error_from_context(
@@ -2739,56 +2808,91 @@ class GoogleGenAIProvider(IModelProvider):
                 "400 invalid argument: image generation requests require a non-empty prompt",
             )
 
-        if "n" in openai_request:
-            n = openai_request["n"]
-            if not isinstance(n, int) or isinstance(n, bool) or n < 1:
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: n must be a positive integer",
-                )
-            if self._is_imagen_generation_model(context.model_name) and n > 4:
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: Imagen models only support 1 to 4 images per request",
-                )
+    def _validate_image_request_count(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        if "n" not in openai_request:
+            return
 
-        response_format = None
-        if "response_format" in openai_request:
-            response_format = self._normalize_imagen_response_format(openai_request["response_format"])
-            if response_format is None or response_format not in GOOGLE_IMAGE_RESPONSE_FORMATS:
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: response_format must be one of 'url' or 'b64_json'",
-                )
-            if self._is_imagen_generation_model(context.model_name) and response_format == "url":
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: response_format='url' is unsupported for Imagen models; request 'b64_json' instead",
-                )
+        n = openai_request["n"]
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: n must be a positive integer",
+            )
+        if self._is_imagen_generation_model(context.model_name) and n > 4:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: Imagen models only support 1 to 4 images per request",
+            )
 
-        if self._is_imagen_generation_model(context.model_name):
-            size = openai_request.get("size")
-            if size is not None:
-                normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
-                if normalized_size == "auto":
-                    pass
-                elif self._map_imagen_size_to_aspect_ratio(size) is None:
-                    raise self._build_request_error_from_context(
-                        context,
-                        "400 invalid argument: Imagen models only support top-level sizes that map to supported "
-                        "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
-                        "provider-native sizing",
-                    )
+    def _validate_image_response_format(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        if "response_format" not in openai_request:
+            return
 
-            extra_body = openai_request.get("extra_body")
-            if extra_body is not None and not isinstance(extra_body, dict):
-                raise self._build_request_error_from_context(
-                    context,
-                    "400 invalid argument: extra_body must be an object",
-                )
+        response_format = self._normalize_imagen_response_format(openai_request["response_format"])
+        if response_format is None or response_format not in GOOGLE_IMAGE_RESPONSE_FORMATS:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: response_format must be one of 'url' or 'b64_json'",
+            )
+        if self._is_imagen_generation_model(context.model_name) and response_format == "url":
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: response_format='url' is unsupported for Imagen models; request 'b64_json' instead",
+            )
 
-            imagen_parameters = self._normalize_imagen_parameters(self._extract_imagen_native_config(openai_request))
-            self._validate_imagen_native_parameters(imagen_parameters, context)
+    def _validate_imagen_size_request(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+        imagen_parameters: Dict[str, Any],
+    ) -> None:
+        size = openai_request.get("size")
+        if size is None:
+            return
+
+        normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
+        if normalized_size == "auto":
+            return
+
+        aspect_ratio = self._map_imagen_size_to_aspect_ratio(size)
+        if aspect_ratio is None:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: Imagen models only support top-level sizes that map to supported "
+                "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
+                "provider-native sizing",
+            )
+
+        existing_aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
+        if existing_aspect_ratio and existing_aspect_ratio != aspect_ratio:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: top-level size and extra_body.google.imagen.aspect_ratio conflict",
+            )
+
+    def _validate_imagen_request_contract(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        extra_body = openai_request.get("extra_body")
+        if extra_body is not None and not isinstance(extra_body, dict):
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body must be an object",
+            )
+
+        imagen_parameters = self._normalize_imagen_parameters(self._extract_imagen_native_config(openai_request))
+        self._validate_imagen_size_request(openai_request, context, imagen_parameters)
+        self._validate_imagen_native_parameters(imagen_parameters, context)
 
     async def _run_image_generation_request(
         self,
