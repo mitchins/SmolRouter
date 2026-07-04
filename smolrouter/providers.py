@@ -447,7 +447,7 @@ class OpenAIProvider(BaseModelProvider):
                 "type": "timeout_error",
                 "code": "timeout",
             }
-        }, 408
+        }, 504
 
     @staticmethod
     def _connection_error_response(error: httpx.ConnectError) -> Tuple[Dict[str, Any], int]:

@@ -18,7 +18,9 @@ import pytest
 
 from smolrouter import google_genai_provider as ggp
 from smolrouter.google_genai_provider import (
+    GoogleGenAICompletionContext,
     GoogleGenAIConfig,
+    GoogleGenAIRequestError,
     GoogleGenAIProvider,
     _format_optional_datetime,
     _quota_status,
@@ -369,6 +371,259 @@ def test_extract_tts_text_from_message_ignores_null_text(provider):
 
 
 # ==========================================================================
+# image generation validation
+# ==========================================================================
+
+
+def test_image_generation_model_allowlist(provider):
+    assert provider._is_image_generation_model("gemini-3.1-flash-image")
+    assert not provider._is_image_generation_model("gemini-2.0-flash")
+    assert provider._is_imagen_generation_model("imagen-4.0-generate-001")
+    assert provider._is_imagen_generation_model("imagen-4.0-fast-generate-001")
+    assert not provider._is_imagen_generation_model("gemini-2.0-flash")
+
+
+def test_validate_image_request_requires_supported_model(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-2.0-flash",
+        model_name="gemini-2.0-flash",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(
+        GoogleGenAIRequestError,
+        match="model 'gemini-2.0-flash' does not support image generation",
+    ):
+        provider._validate_image_generation_request(
+            {"model": "gemini-2.0-flash", "prompt": "sunset"},
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    "image_request, expected_message",
+    [
+        ({"model": "gemini-2.5-flash-image"}, "require a non-empty prompt"),
+        ({"model": "gemini-2.5-flash-image", "prompt": ""}, "require a non-empty prompt"),
+        ({"model": "gemini-2.5-flash-image", "prompt": "ok", "response_format": "base64"}, "response_format"),
+        (
+            {"model": "gemini-2.5-flash-image", "prompt": "ok", "n": 0},
+            "n must be a positive integer",
+        ),
+    ],
+)
+def test_validate_image_request_rejects_invalid_fields(provider, image_request, expected_message):
+    context = GoogleGenAICompletionContext(
+        original_model=image_request.get("model", ""),
+        model_name=image_request.get("model", ""),
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(GoogleGenAIRequestError, match=expected_message):
+        provider._validate_image_generation_request(image_request, context)
+
+
+def test_validate_image_request_rejects_imagen_url_response_format(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(
+        GoogleGenAIRequestError,
+        match="response_format='url' is unsupported for Imagen models",
+    ):
+        provider._validate_image_generation_request(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "sunset",
+                "response_format": "url",
+            },
+            context,
+        )
+
+
+def test_validate_imagen_request_rejects_non_exact_size_without_native_config(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(
+        GoogleGenAIRequestError,
+        match="only support top-level sizes that map to supported provider aspect ratios",
+    ):
+        provider._validate_image_generation_request(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "sunset",
+                "size": "1920x1080",
+            },
+            context,
+        )
+
+
+@pytest.mark.parametrize(
+    ("request_size", "expected_aspect_ratio"),
+    [
+        ("1024x1024", "1:1"),
+        ("1024x1536", "3:4"),
+        ("1536x1024", "4:3"),
+    ],
+)
+def test_build_imagen_generation_request_maps_supported_size(provider, request_size, expected_aspect_ratio):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    image_request = provider._build_imagen_generation_request(
+        {
+            "model": "imagen-4.0-generate-001",
+            "prompt": "portrait of a robot",
+            "size": request_size,
+            "n": 2,
+            "response_format": "b64_json",
+            "extra_body": {
+                "google": {"imagen": {"image_size": "2K", "aspect_ratio": expected_aspect_ratio}}
+            },
+        },
+        context,
+    )
+
+    assert image_request["instances"] == [{"prompt": "portrait of a robot"}]
+    assert image_request["parameters"]["sampleCount"] == 2
+    assert image_request["parameters"]["imageSize"] == "2K"
+    assert image_request["parameters"]["aspectRatio"] == expected_aspect_ratio
+
+
+def test_build_imagen_generation_request_defaults_to_openai_single_image(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    image_request = provider._build_imagen_generation_request(
+        {
+            "model": "imagen-4.0-generate-001",
+            "prompt": "sunset",
+            "size": "1024x1024",
+        },
+        context,
+    )
+
+    assert image_request["parameters"]["sampleCount"] == 1
+
+
+def test_validate_imagen_request_rejects_unsupported_native_parameter(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(GoogleGenAIRequestError, match="unsupported Imagen parameter"):
+        provider._validate_image_generation_request(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "sunset",
+                "extra_body": {"google": {"imagen": {"sample_count": 4}}},
+            },
+            context,
+        )
+
+
+def test_build_imagen_generation_request_normalizes_person_generation(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="imagen-4.0-generate-001",
+        model_name="imagen-4.0-generate-001",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    image_request = provider._build_imagen_generation_request(
+        {
+            "model": "imagen-4.0-generate-001",
+            "prompt": "sunset",
+            "extra_body": {"google": {"imagen": {"person_generation": "ALLOW_ADULT"}}},
+        },
+        context,
+    )
+
+    assert image_request["parameters"]["personGeneration"] == "allow_adult"
+
+
+def test_convert_imagen_response_to_openai_images(provider):
+    converted = provider._convert_imagen_response_to_openai_images(
+        {
+            "predictions": [
+                {"bytesBase64Encoded": "QUJD"},
+                {"bytesBase64Encoded": "RUZH"},
+            ]
+        }
+    )
+
+    assert converted["data"] == [{"b64_json": "QUJD"}, {"b64_json": "RUZH"}]
+    assert "created" in converted
+
+
+def test_validate_image_request_accepts_supported_optional_fields(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-2.5-flash-image",
+        model_name="gemini-2.5-flash-image",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    provider._validate_image_generation_request(
+        {
+            "model": "gemini-2.5-flash-image",
+            "prompt": "sunset",
+            "size": "1024x1024",
+            "response_format": "b64_json",
+            "extra_body": {"google": {"safety_settings": []}},
+        },
+        context,
+    )
+
+
+def test_validate_image_request_rejects_unknown_fields(provider):
+    context = GoogleGenAICompletionContext(
+        original_model="gemini-2.5-flash-image",
+        model_name="gemini-2.5-flash-image",
+        observation_id="obs-1",
+        api_key="test-key",
+        api_key_suffix="abcd1234",
+    )
+
+    with pytest.raises(GoogleGenAIRequestError, match="unsupported image request field"):
+        provider._validate_image_generation_request(
+            {"model": "gemini-2.5-flash-image", "prompt": "sunset", "quality": "high"},
+            context,
+        )
+
+
+# ==========================================================================
 # GenAI -> OpenAI response conversion
 # ==========================================================================
 
@@ -608,6 +863,7 @@ def test_quota_cooldown_seconds_per_day_is_all_day(provider):
 
 def test_is_invalid_key_error(provider):
     assert provider._is_invalid_key_error(status_code=403) is True
+    assert provider._is_invalid_key_error("403 upgrade your account to a paid plan", status_code=403) is False
     assert provider._is_invalid_key_error("API key not valid") is True
     assert provider._is_invalid_key_error("PERMISSION_DENIED") is True
     assert provider._is_invalid_key_error("transient network blip") is False
@@ -651,6 +907,7 @@ def test_is_proxy_connectivity_error(provider):
 @pytest.mark.parametrize(
     "model,expected",
     [
+        ("imagen-4.0-fast-generate-001", 25),
         ("gemma-3-27b", 14400),
         ("gemini-2.5-flash-lite", 1000),
         ("gemini-2.5-flash", 20),

@@ -26,7 +26,7 @@ import respx
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from unittest.mock import AsyncMock, Mock, patch
 from smolrouter.database import get_error_summary
 from smolrouter.facade_keys import FacadeKeyRegistry, RequestIdentity
@@ -36,6 +36,11 @@ from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvi
 from smolrouter.interfaces import ProxyConfig
 from smolrouter.request_metadata import RequestMetadata, apply_request_metadata
 from smolrouter.task_utils import create_logged_task
+from smolrouter.providers import OpenAIProvider, ProviderConfig
+from starlette.requests import Request
+
+
+from smolrouter import auth as auth_module
 
 
 def load_mock_json(filename):
@@ -159,6 +164,14 @@ async def test_openai_streaming_falls_back_to_non_streaming_provider_architectur
 
 
 @pytest.mark.asyncio
+async def test_openai_image_edits_and_variations_routes_return_not_implemented(async_client, disable_logging):
+    for path in ("/v1/images/edits", "/v1/images/variations"):
+        response = await async_client.post(path, json={"model": "gpt-image"})
+        assert response.status_code == 501
+        assert response.json()["error"]["type"] == "not_implemented"
+
+
+@pytest.mark.asyncio
 async def test_openai_embeddings_route_is_exposed_and_uses_shared_proxy(async_client, disable_logging, monkeypatch):
     captured = {}
 
@@ -178,6 +191,127 @@ async def test_openai_embeddings_route_is_exposed_and_uses_shared_proxy(async_cl
     assert captured["path"] == "/v1/embeddings"
     assert captured["body"]["model"] == "text-embedding-3-small"
     assert captured["body"]["input"] == ["hello", "world"]
+
+
+@pytest.mark.asyncio
+async def test_openai_images_generations_route_is_exposed_and_uses_shared_proxy(async_client, disable_logging, monkeypatch):
+    captured = {}
+
+    async def fake_proxy_request(path, request):
+        captured["path"] = path
+        captured["body"] = await request.json()
+        return {"data": [{"url": "https://example.com/generated.png"}]}
+
+    monkeypatch.setattr(app_module, "proxy_request", fake_proxy_request)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image", "prompt": "A cat wearing a hat"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"data": [{"url": "https://example.com/generated.png"}]}
+    assert captured["path"] == "/v1/images/generations"
+    assert captured["body"]["model"] == "gpt-image"
+    assert captured["body"]["prompt"] == "A cat wearing a hat"
+
+
+@pytest.mark.asyncio
+async def test_openai_images_generations_stream_true_is_rejected_before_streaming_path(async_client, disable_logging, monkeypatch):
+    fake_container = Mock()
+    fake_container.route_request = AsyncMock(
+        return_value=({"data": []}, 200, "provider:test", None),
+    )
+    fake_container.route_streaming_request = AsyncMock()
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    fake_route_request = AsyncMock(
+        side_effect=AssertionError("route_openai_request should not be called for image stream=true")
+    )
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+    monkeypatch.setattr(app_module, "_route_openai_request", fake_route_request)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image", "prompt": "stream test", "stream": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    fake_route_request.assert_not_awaited()
+    fake_container.route_request.assert_not_awaited()
+    fake_container.route_streaming_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openai_images_generations_does_not_append_no_think_when_disable_thinking_enabled(
+    async_client, disable_logging, monkeypatch
+):
+    captured = {}
+    fake_container = Mock()
+    fake_container.route_request = AsyncMock()
+    fake_container.get_facade_key_registry.return_value = FacadeKeyRegistry.from_sources()
+
+    async def fake_route_request(*args, **kwargs):
+        captured["payload"] = args[2]
+        return {"data": []}, 200, "provider:test", None
+
+    fake_container.route_request.side_effect = fake_route_request
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "DISABLE_THINKING", True)
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+
+    response = await async_client.post(
+        "/v1/images/generations",
+        json={"model": "gpt-image", "prompt": "A cat in a hat"},
+    )
+
+    assert response.status_code == 200
+    assert captured["payload"]["prompt"] == "A cat in a hat"
+    assert "/no_think" not in captured["payload"]["prompt"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/images/generations", "/v1/images/edits", "/v1/images/variations"])
+async def test_jwt_middleware_allows_image_routes_without_token(monkeypatch, path):
+    strong_secret = "0123456789abcdef0123456789abcdef"
+    call_next = AsyncMock(return_value=JSONResponse({"ok": True}, status_code=200))
+
+    monkeypatch.setenv("JWT_SECRET", strong_secret)
+    auth_module._jwt_auth_initialized = False
+    auth_module._jwt_auth_cached_secret = None
+    auth_module._jwt_auth_cached_state = "uninitialized"
+    auth_module._jwt_auth = None
+
+    middleware_class = auth_module.create_auth_middleware()
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        scope={
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "client": ("127.0.0.1", 12345),
+            "scheme": "http",
+        },
+        receive=receive,
+    )
+    middleware = middleware_class(app=Mock())
+    response = await middleware.dispatch(request, call_next)
+
+    assert response.status_code == 200
+    call_next.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1454,6 +1588,18 @@ def test_openapi_documents_proxy_and_project_api_error_responses():
     project_detail_responses = schema["paths"]["/api/projects/{project_id}"]["get"]["responses"]
     assert project_detail_responses["404"]["description"] == "Project not found"
 
+    image_generations_responses = schema["paths"]["/v1/images/generations"]["post"]["responses"]
+    assert image_generations_responses["400"]["description"] == "Invalid request payload"
+    assert image_generations_responses["401"]["description"] == "Invalid or mismatched local facade key"
+    assert image_generations_responses["503"]["description"] == "Routing unavailable"
+
+    image_edits_responses = schema["paths"]["/v1/images/edits"]["post"]["responses"]
+    assert image_edits_responses["501"]["description"] == "Image edits and variations are not implemented"
+    image_variations_responses = schema["paths"]["/v1/images/variations"]["post"]["responses"]
+    assert (
+        image_variations_responses["501"]["description"] == "Image edits and variations are not implemented"
+    )
+
 
 @pytest.mark.asyncio
 async def test_project_pages_and_api_support_slash_delimited_logical_ids(async_client, disable_logging):
@@ -1830,6 +1976,14 @@ def test_timeout_configuration():
         importlib.reload(app)
         assert app.REQUEST_TIMEOUT == pytest.approx(45.5)
         assert isinstance(app.REQUEST_TIMEOUT, float)
+
+
+def test_openai_provider_timeout_error_maps_to_504():
+    provider = OpenAIProvider(ProviderConfig(name="test", type="openai", url="https://api.openai.com"))
+    payload, status = provider._timeout_error_response(httpx.TimeoutException("timed out"))
+
+    assert status == 504
+    assert payload["error"]["code"] == "timeout"
 
 
 def test_strip_json_markdown_from_text():

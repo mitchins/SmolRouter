@@ -42,7 +42,48 @@ OPENAI_CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
 OPENAI_COMPLETIONS_ENDPOINT = "/v1/completions"
 OPENAI_RESPONSES_ENDPOINT = "/v1/responses"
 OPENAI_EMBEDDINGS_ENDPOINT = "/v1/embeddings"
+OPENAI_IMAGES_ENDPOINT = "/v1/images/generations"
+GOOGLE_GENAI_IMAGE_ENDPOINT = OPENAI_IMAGES_ENDPOINT
+GOOGLE_OPENAI_IMAGES_GENERATION_PATH = "/v1beta/openai/images/generations"
+GOOGLE_IMAGEN_PREDICT_PATH = "/v1beta/models/{model}:predict"
 GOOGLE_GENAI_STATIC_MODELS_SNAPSHOT = "google-genai-models-2026-july.json"
+GOOGLE_GENAI_IMAGE_MODEL_ALLOWLIST = {
+    "gemini-2.5-flash-image",
+    "gemini-3-pro-image-preview",
+    "gemini-3-pro-image",
+    "gemini-3.1-flash-image-preview",
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite-image",
+}
+GOOGLE_IMAGEN_IMAGE_MODEL_ALLOWLIST = {
+    "imagen-4.0-generate-001",
+    "imagen-4.0-ultra-generate-001",
+    "imagen-4.0-fast-generate-001",
+}
+GOOGLE_IMAGEN_SIZE_TO_ASPECT_RATIO = {
+    "1024x1024": "1:1",
+    "1024x1536": "3:4",
+    "1536x1024": "4:3",
+    "1024x1792": "9:16",
+    "1792x1024": "16:9",
+}
+GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS = {"1:1", "3:4", "4:3", "9:16", "16:9"}
+GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES = {"1K", "2K"}
+GOOGLE_IMAGEN_SUPPORTED_OUTPUT_MIME_TYPES = {"image/png", "image/jpeg"}
+GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES = {
+    "aspectRatio",
+    "guidanceScale",
+    "imageSize",
+    "includeRaiReason",
+    "includeSafetyAttributes",
+    "language",
+    "negativePrompt",
+    "outputOptions",
+    "personGeneration",
+    "safetySetting",
+}
+GOOGLE_IMAGE_RESPONSE_FORMATS = {"url", "b64_json"}
+OPENAI_IMAGE_REQUEST_FIELDS = {"model", "prompt", "n", "size", "response_format", "extra_body"}
 AUDIO_WAV_MIME_TYPE = "audio/wav"
 AUDIO_PCM_MIME_TYPE = "audio/pcm"
 AUDIO_MPEG_MIME_TYPE = "audio/mpeg"
@@ -749,6 +790,7 @@ class GoogleGenAIProvider(IModelProvider):
         model_lower = model_name.lower()
 
         limit_rules = [
+            ("imagen-4." in model_lower, 25),
             ("gemma" in model_lower and "3" in model_lower, 14400),
             ("gemini" in model_lower and ("3.0" in model_lower or "gemini-3" in model_lower), 20),
             ("2.5" in model_lower and "flash" in model_lower and "lite" in model_lower, 1000),
@@ -1257,9 +1299,34 @@ class GoogleGenAIProvider(IModelProvider):
         Returns:
             True if this error indicates an invalid/expired API key
         """
-        # CRITICAL FIX: 403 status code is an invalid key error even without error message
-        # This handles cases where Google returns 403 but no error text
         if status_code == 403:
+            if error_msg:
+                error_lower = error_msg.lower()
+                non_invalid_403_indicators = [
+                    "paid plan",
+                    "paid plans",
+                    "upgrade your account",
+                    "billing",
+                    "billed user",
+                    "not supported for predict",
+                    "forbidden for project",
+                    "model is not found",
+                ]
+                if any(indicator in error_lower for indicator in non_invalid_403_indicators):
+                    return False
+                invalid_key_indicators = [
+                    "permission denied",
+                    "permission_denied",
+                    "permissiondenied",
+                    "api key not valid",
+                    "invalid api key",
+                    "api_key_invalid",
+                    "authentication failed",
+                    "unauthorized",
+                    "credentials are missing or invalid",
+                    "api key expired",
+                ]
+                return any(indicator in error_lower for indicator in invalid_key_indicators)
             return True
 
         # Check error message for known invalid key indicators
@@ -1274,12 +1341,9 @@ class GoogleGenAIProvider(IModelProvider):
                 "api_key_invalid",
                 "authentication failed",
                 "unauthorized",
-                "forbidden",
                 "invalid_argument",  # Often used for bad keys in Google APIs
                 "credentials are missing or invalid",
                 "api key expired",
-                "403",  # Explicit 403 in error message
-                "denied access",  # "Your project has been denied access"
             ]
             return any(indicator in error_lower for indicator in invalid_key_indicators)
 
@@ -1485,10 +1549,9 @@ class GoogleGenAIProvider(IModelProvider):
         for model in model_list:
             # New API uses 'supported_actions' instead of 'supported_generation_methods'
             supported_actions = getattr(model, "supported_actions", [])
-            if not self._is_google_supported_action_model(supported_actions):
-                continue
-
             model_name = self._extract_google_model_name(getattr(model, "name", "") or "")
+            if not self._is_google_supported_action_model(model_name, supported_actions):
+                continue
 
             model_info = self._build_google_model_info(
                 model_name,
@@ -1554,10 +1617,9 @@ class GoogleGenAIProvider(IModelProvider):
             models = []
             for model_data in data.get("models", []):
                 supported_methods = model_data.get("supportedGenerationMethods") or model_data.get("supportedActions", [])
-                if not self._is_google_supported_action_model(supported_methods):
-                    continue
-
                 model_name = self._extract_google_model_name(model_data.get("name", ""))
+                if not self._is_google_supported_action_model(model_name, supported_methods):
+                    continue
                 model_info = self._build_google_model_info(
                     model_name,
                     self._build_static_google_model_metadata(model_data, supported_methods),
@@ -2289,6 +2351,519 @@ class GoogleGenAIProvider(IModelProvider):
             "total_tokens": getattr(genai_response.usage_metadata, "total_token_count", 0),
         }
 
+    @staticmethod
+    def _extract_openai_image_usage(response: Dict[str, Any]) -> int:
+        usage = response.get("usage", {}) if isinstance(response, dict) else None
+        if not isinstance(usage, dict):
+            return 0
+
+        total_tokens = usage.get("total_tokens")
+        if total_tokens is not None:
+            return int(total_tokens)
+
+        return int(usage.get("prompt_tokens", 0) or 0)
+
+    def _build_google_image_generation_headers(self, api_key: str, is_native_imagen: bool = False) -> Dict[str, str]:
+        if is_native_imagen:
+            return {
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            }
+
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _build_google_image_generation_url(self, model_name: Optional[str] = None) -> str:
+        if model_name and self._is_imagen_generation_model(model_name):
+            return f"{self.get_endpoint().rstrip('/')}{GOOGLE_IMAGEN_PREDICT_PATH.format(model=model_name)}"
+        return f"{self.get_endpoint().rstrip('/')}" f"{GOOGLE_OPENAI_IMAGES_GENERATION_PATH}"
+
+    def _is_image_generation_model(self, model_name: str) -> bool:
+        if not model_name:
+            return False
+        normalized_model_name = self._normalize_model_name(model_name).lower()
+        return (
+            normalized_model_name in GOOGLE_GENAI_IMAGE_MODEL_ALLOWLIST
+            or normalized_model_name in GOOGLE_IMAGEN_IMAGE_MODEL_ALLOWLIST
+        )
+
+    def _is_imagen_generation_model(self, model_name: str) -> bool:
+        if not model_name:
+            return False
+        return self._normalize_model_name(model_name).lower() in GOOGLE_IMAGEN_IMAGE_MODEL_ALLOWLIST
+
+    @staticmethod
+    def _normalize_imagen_response_format(response_format: Any) -> Optional[str]:
+        if response_format is None:
+            return None
+        normalized = str(response_format).strip().lower()
+        return normalized or None
+
+    @staticmethod
+    def _extract_imagen_native_config(openai_request: Dict[str, Any]) -> Dict[str, Any]:
+        extra_body = openai_request.get("extra_body")
+        if not isinstance(extra_body, dict):
+            return {}
+
+        google_body = extra_body.get("google")
+        if not isinstance(google_body, dict):
+            return {}
+
+        imagen_body = google_body.get("imagen")
+        if not isinstance(imagen_body, dict):
+            return {}
+
+        return {key: value for key, value in imagen_body.items()}
+
+    @staticmethod
+    def _normalize_imagen_parameter_name(parameter_name: str) -> str:
+        if parameter_name == "image_size":
+            return "imageSize"
+        if parameter_name == "aspect_ratio":
+            return "aspectRatio"
+        if parameter_name == "guidance_scale":
+            return "guidanceScale"
+        if parameter_name == "include_rai_reason":
+            return "includeRaiReason"
+        if parameter_name == "include_safety_attributes":
+            return "includeSafetyAttributes"
+        if parameter_name == "negative_prompt":
+            return "negativePrompt"
+        if parameter_name == "output_mime_type":
+            return "output_mime_type"
+        if parameter_name == "output_compression_quality":
+            return "output_compression_quality"
+        if parameter_name == "person_generation":
+            return "personGeneration"
+        if parameter_name == "safety_filter_level":
+            return "safetySetting"
+        return parameter_name
+
+    @classmethod
+    def _normalize_imagen_parameters(cls, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for raw_key, value in parameters.items():
+            key = cls._normalize_imagen_parameter_name(str(raw_key).strip())
+            if key == "output_mime_type":
+                output_options = normalized.setdefault("outputOptions", {})
+                if isinstance(output_options, dict):
+                    output_options["mimeType"] = value
+                continue
+            if key == "output_compression_quality":
+                output_options = normalized.setdefault("outputOptions", {})
+                if isinstance(output_options, dict):
+                    output_options["compressionQuality"] = value
+                continue
+            if key == "personGeneration":
+                normalized[key] = str(value).strip().lower()
+                continue
+            normalized[key] = value
+        return normalized
+
+    @staticmethod
+    def _map_imagen_size_to_aspect_ratio(size: Any) -> Optional[str]:
+        if not isinstance(size, str):
+            return None
+        return GOOGLE_IMAGEN_SIZE_TO_ASPECT_RATIO.get(size.strip().lower())
+
+    def _extract_imagen_aspect_ratio(self, imagen_parameters: Dict[str, Any]) -> Optional[str]:
+        aspect_ratio = imagen_parameters.get("aspectRatio")
+        if aspect_ratio is None:
+            return None
+        return str(aspect_ratio).strip()
+
+    @staticmethod
+    def _extract_imagen_output_options(imagen_parameters: Dict[str, Any]) -> Dict[str, Any]:
+        output_options = imagen_parameters.get("outputOptions")
+        if isinstance(output_options, dict):
+            return output_options
+        return {}
+
+    def _validate_imagen_native_parameters(
+        self,
+        imagen_parameters: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        unsupported_parameters = set(imagen_parameters.keys()) - GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES
+        if unsupported_parameters:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: unsupported Imagen parameter(s): " + ",".join(sorted(unsupported_parameters)),
+            )
+
+        aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
+        if aspect_ratio is not None and aspect_ratio not in GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body.google.imagen.aspect_ratio must be one of "
+                + ", ".join(sorted(GOOGLE_IMAGEN_SUPPORTED_ASPECT_RATIOS)),
+            )
+
+        image_size = imagen_parameters.get("imageSize")
+        if image_size is not None and str(image_size) not in GOOGLE_IMAGEN_SUPPORTED_IMAGE_SIZES:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body.google.imagen.image_size must be one of 1K or 2K",
+            )
+
+        person_generation = imagen_parameters.get("personGeneration")
+        if person_generation is not None and str(person_generation).strip().lower() not in {
+            "dont_allow",
+            "allow_adult",
+            "allow_all",
+        }:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body.google.imagen.person_generation is invalid",
+            )
+
+        safety_setting = imagen_parameters.get("safetySetting")
+        if safety_setting is not None and str(safety_setting) not in {
+            "BLOCK_LOW_AND_ABOVE",
+            "BLOCK_MEDIUM_AND_ABOVE",
+            "BLOCK_ONLY_HIGH",
+            "BLOCK_NONE",
+        }:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body.google.imagen.safety_filter_level is invalid",
+            )
+
+        output_options = self._extract_imagen_output_options(imagen_parameters)
+        mime_type = output_options.get("mimeType")
+        if mime_type is not None and str(mime_type) not in GOOGLE_IMAGEN_SUPPORTED_OUTPUT_MIME_TYPES:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: extra_body.google.imagen.output_mime_type must be image/png or image/jpeg",
+            )
+
+        compression_quality = output_options.get("compressionQuality")
+        if compression_quality is not None:
+            if not isinstance(compression_quality, int) or isinstance(compression_quality, bool):
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: extra_body.google.imagen.output_compression_quality must be an integer",
+                )
+            if compression_quality < 0 or compression_quality > 100:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: extra_body.google.imagen.output_compression_quality must be between 0 and 100",
+                )
+            if str(mime_type or "") != "image/jpeg":
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: extra_body.google.imagen.output_compression_quality requires output_mime_type=image/jpeg",
+                )
+
+    def _convert_imagen_response_to_openai_images(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        predictions = response.get("predictions") if isinstance(response, dict) else None
+        if not isinstance(predictions, list):
+            raise ValueError("400 invalid argument: image generation response is missing predictions")
+        if not predictions:
+            raise ValueError("400 invalid argument: image generation returned no predictions")
+
+        data = []
+        for prediction in predictions:
+            if not isinstance(prediction, dict):
+                continue
+            b64_data = prediction.get("bytesBase64Encoded")
+            if b64_data is None:
+                continue
+            data.append({"b64_json": str(b64_data)})
+
+        if not data:
+            raise ValueError("400 invalid argument: image generation response did not include base64 image data")
+
+        openai_response: Dict[str, Any] = {
+            "created": self._current_utc_unix_timestamp(),
+            "data": data,
+        }
+
+        tokens_used = self._extract_openai_image_usage(response)
+        if tokens_used:
+            openai_response["usage"] = {"total_tokens": tokens_used, "prompt_tokens": 0, "completion_tokens": 0}
+
+        return openai_response
+
+    @staticmethod
+    def _extract_image_error_message(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        if isinstance(payload, dict):
+            error_payload = payload.get("error")
+            if isinstance(error_payload, dict):
+                message = error_payload.get("message")
+                if message:
+                    return f"{response.status_code} {message}"
+
+        body_text = response.text.strip()
+        if body_text:
+            return f"{response.status_code} {body_text}"
+        return f"{response.status_code} {response.reason_phrase}"
+
+    async def _initialize_request_context(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+        endpoint: str,
+    ) -> GoogleGenAICompletionContext:
+        context.endpoint = endpoint
+        context.model_name = self._normalize_model_name(openai_request.get("model", ""))
+        context.api_key = await self._select_best_api_key(context.model_name)
+        context.api_key_suffix = redact_secret(context.api_key)
+        context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
+        context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
+            context.model_name
+        )
+        context.proxy_info = context.proxy_config if context.proxy_config else None
+        context.proxy_url = self._proxy_config_to_url(context.proxy_info)
+
+        if context.proxy_url and not self._proxy_available_for_use(context.proxy_url):
+            health = self._proxy_health_snapshot(context.proxy_url)
+            raise self._build_request_error_from_context(
+                context,
+                f"Configured proxy {self._mask_proxy_url(context.proxy_url)} is currently unhealthy"
+                + (f": {health['last_error']}" if health.get("last_error") else ""),
+            )
+
+        self._schedule_proxy_probe(context.proxy_url)
+        context.sync_transport, context.async_transport = self._create_proxy_transport(
+            context.proxy_config, context.observation_id
+        )
+
+        logger.debug(
+            "🚀 Outbound request: model=%s, api_key=%s key=%s, proxy=%s%s [obs=%s]",
+            context.model_name,
+            context.api_key_suffix,
+            f"#{context.api_key_index}/{context.api_key_total}" if context.api_key_index else "#unknown",
+            self._mask_proxy_url(context.proxy_url) if context.proxy_url else "direct",
+            context.pool_info,
+            context.observation_id,
+        )
+
+        return context
+
+    def _build_image_generation_request(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> Dict[str, Any]:
+        if self._is_imagen_generation_model(context.model_name):
+            return self._build_imagen_generation_request(openai_request, context)
+
+        image_request = {
+            "model": context.model_name,
+            "prompt": str(openai_request.get("prompt", "")).strip(),
+        }
+
+        if "n" in openai_request:
+            image_request["n"] = openai_request["n"]
+
+        if "size" in openai_request:
+            image_request["size"] = openai_request["size"]
+
+        if "response_format" in openai_request:
+            image_request["response_format"] = openai_request["response_format"]
+
+        if "extra_body" in openai_request:
+            image_request["extra_body"] = openai_request["extra_body"]
+
+        return image_request
+
+    def _build_imagen_generation_request(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> Dict[str, Any]:
+        prompt = str(openai_request.get("prompt", "")).strip()
+        imagen_parameters: Dict[str, Any] = self._normalize_imagen_parameters(self._extract_imagen_native_config(openai_request))
+        imagen_parameters["sampleCount"] = openai_request.get("n", 1)
+
+        if "size" in openai_request and str(openai_request["size"]).strip().lower() != "auto":
+            aspect_ratio = self._map_imagen_size_to_aspect_ratio(openai_request["size"])
+            if aspect_ratio is None:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: Imagen models only support top-level sizes that map to supported "
+                    "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
+                    "provider-native sizing",
+                )
+
+            existing_aspect_ratio = self._extract_imagen_aspect_ratio(imagen_parameters)
+            if existing_aspect_ratio and existing_aspect_ratio != aspect_ratio:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: top-level size and extra_body.google.imagen.aspect_ratio conflict",
+                )
+            imagen_parameters["aspectRatio"] = aspect_ratio
+
+        return {
+            "instances": [{"prompt": prompt}],
+            "parameters": imagen_parameters,
+        }
+
+    def _validate_image_generation_request(
+        self,
+        openai_request: Dict[str, Any],
+        context: GoogleGenAICompletionContext,
+    ) -> None:
+        if not context.model_name:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: image generation requests require a model",
+            )
+
+        if not self._is_image_generation_model(context.model_name):
+            raise self._build_request_error_from_context(
+                context,
+                f"400 invalid argument: model '{context.model_name}' does not support image generation",
+            )
+
+        unsupported_fields = set(openai_request.keys()) - OPENAI_IMAGE_REQUEST_FIELDS
+        if unsupported_fields:
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: unsupported image request field(s): "
+                + ",".join(sorted(unsupported_fields)),
+            )
+
+        prompt = openai_request.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise self._build_request_error_from_context(
+                context,
+                "400 invalid argument: image generation requests require a non-empty prompt",
+            )
+
+        if "n" in openai_request:
+            n = openai_request["n"]
+            if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: n must be a positive integer",
+                )
+            if self._is_imagen_generation_model(context.model_name) and n > 4:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: Imagen models only support 1 to 4 images per request",
+                )
+
+        response_format = None
+        if "response_format" in openai_request:
+            response_format = self._normalize_imagen_response_format(openai_request["response_format"])
+            if response_format is None or response_format not in GOOGLE_IMAGE_RESPONSE_FORMATS:
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: response_format must be one of 'url' or 'b64_json'",
+                )
+            if self._is_imagen_generation_model(context.model_name) and response_format == "url":
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: response_format='url' is unsupported for Imagen models; request 'b64_json' instead",
+                )
+
+        if self._is_imagen_generation_model(context.model_name):
+            size = openai_request.get("size")
+            if size is not None:
+                normalized_size = str(size).strip().lower() if isinstance(size, str) else ""
+                if normalized_size == "auto":
+                    pass
+                elif self._map_imagen_size_to_aspect_ratio(size) is None:
+                    raise self._build_request_error_from_context(
+                        context,
+                        "400 invalid argument: Imagen models only support top-level sizes that map to supported "
+                        "provider aspect ratios; use extra_body.google.imagen.aspect_ratio and image_size for "
+                        "provider-native sizing",
+                    )
+
+            extra_body = openai_request.get("extra_body")
+            if extra_body is not None and not isinstance(extra_body, dict):
+                raise self._build_request_error_from_context(
+                    context,
+                    "400 invalid argument: extra_body must be an object",
+                )
+
+            imagen_parameters = self._normalize_imagen_parameters(self._extract_imagen_native_config(openai_request))
+            self._validate_imagen_native_parameters(imagen_parameters, context)
+
+    async def _run_image_generation_request(
+        self,
+        context: GoogleGenAICompletionContext,
+        image_request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        client = httpx.AsyncClient(
+            timeout=self.config.timeout,
+            transport=context.async_transport,
+            trust_env=False,
+        )
+
+        try:
+            await self._rate_limiter.acquire_slot()
+            response = await client.post(
+                self._build_google_image_generation_url(context.model_name),
+                json=image_request,
+                headers=self._build_google_image_generation_headers(
+                    context.api_key, is_native_imagen=self._is_imagen_generation_model(context.model_name)
+                ),
+            )
+            if response.is_error:
+                raise RuntimeError(self._extract_image_error_message(response))
+            image_response = response.json()
+
+            if self._is_imagen_generation_model(context.model_name):
+                return self._convert_imagen_response_to_openai_images(image_response)
+
+            return image_response
+        finally:
+            await self._rate_limiter.release_slot()
+            await client.aclose()
+
+    async def _finalize_image_generation(
+        self,
+        context: GoogleGenAICompletionContext,
+        response: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
+        tokens_used = self._extract_openai_image_usage(response)
+        return response, await self._build_completion_metadata(context, tokens_used)
+
+    async def generate_image(
+        self,
+        openai_request: Dict[str, Any],
+        endpoint: str = OPENAI_IMAGES_ENDPOINT,
+    ) -> tuple[Dict[str, Any], Optional["RequestMetadata"]]:
+        import uuid
+
+        if endpoint != OPENAI_IMAGES_ENDPOINT:
+            raise ValueError(f"Unsupported endpoint for image generation: {endpoint}")
+
+        context = GoogleGenAICompletionContext(
+            original_model=openai_request.get("model", ""),
+            observation_id=f"obs_{uuid.uuid4().hex[:12]}",
+            endpoint=endpoint,
+            request_kind="generate_images",
+        )
+        context.model_name = self._normalize_model_name(openai_request.get("model", ""))
+
+        # Validate request contract first so malformed image requests get
+        # deterministic input validation errors before transport/key/proxy
+        # selection can fail for reasons unrelated to the image payload.
+        self._validate_image_generation_request(openai_request, context)
+
+        try:
+            context = await self._initialize_request_context(openai_request, context, endpoint)
+            image_request = self._build_image_generation_request(openai_request, context)
+            response = await self._run_image_generation_request(context, image_request)
+            return await self._finalize_image_generation(context, response)
+
+        except GoogleGenAIRequestError:
+            raise
+        except Exception as error:
+            raise await self._handle_completion_exception(context, error)
+
     async def generate_completion(
         self,
         openai_request: Dict[str, Any],
@@ -2529,9 +3104,14 @@ class GoogleGenAIProvider(IModelProvider):
         tokens_used = openai_response.get("usage", {}).get("total_tokens", 0)
         return openai_response, await self._build_completion_metadata(context, tokens_used)
 
-    @staticmethod
-    def _is_google_supported_action_model(supported_actions: List[str]) -> bool:
-        return "generateContent" in supported_actions or "embedContent" in supported_actions
+    @classmethod
+    def _is_google_supported_action_model(cls, model_name: str, supported_actions: List[str]) -> bool:
+        normalized_model_name = cls._extract_google_model_name(model_name).lower()
+        return (
+            "generateContent" in supported_actions
+            or "embedContent" in supported_actions
+            or ("predict" in supported_actions and normalized_model_name in GOOGLE_IMAGEN_IMAGE_MODEL_ALLOWLIST)
+        )
 
     def _convert_genai_to_embeddings_response(
         self,

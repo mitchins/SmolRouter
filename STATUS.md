@@ -53,6 +53,15 @@
     - a visual section (screenshots, GIF loop, or slide-like step gallery) showing request routing, dashboard visibility, and quota/accounting behavior.
     Keep the full env/config reference in the docs site and add strict deep links from README.
 
+- 🟠 ComfyUI OpenAI-compatible image provider bundle (TODO - planned, future)
+    Add a first-party, disabled-by-default ComfyUI image provider behind the existing OpenAI image ingress so clients keep using `POST /v1/images/generations` while a fixed operator-owned workflow does the downstream work. Keep the product intentionally narrow: one synchronous generation path, one image per request, and only a tiny override surface (prompt, supported size, maybe steps/seed and negative prompt under a namespaced extension). Important architectural guardrails:
+    - implement this as a bundled `comfyui` provider type first, not a general runtime plugin loader;
+    - move mediator image dispatch toward provider capabilities and add a typed `ComfyUIConfig`, so future image backends do not add more provider-type branching or untyped config sprawl;
+    - use ComfyUI’s WebSocket + history execution pattern internally, with explicit timeout/error mapping and no naive post-submit retries;
+    - add provider-local admission control so the synchronous facade cannot enqueue unbounded local GPU work before clients ever see backpressure; the first production slice should assume one SmolRouter process per ComfyUI backend unless stronger shared coordination is added;
+    - keep `response_format: "url"`, edits, variations, streaming, and batching out of scope for the first slice.
+    Full design: `docs/PROPOSAL_comfyui_openai_images.md`.
+
 - 🔵 Move from server-rendered dashboard pages to richer client/API UI
     Existing dashboard pages are server-rendered via Jinja templates with API-backed data sources. If a future SPA migration proceeds, target `/api/dashboard`, `/api/providers`, and `/api/stats` alongside `templates/index.html`, `templates/system.html`, and related views. Core dashboard endpoints already exist (`/api/dashboard`, `/api/stats`), while provider list data is currently exposed via `/api/upstreams` (not `/api/providers`).
 

@@ -387,6 +387,47 @@ async def test_google_genai_discover_models_falls_back_to_static_json():
 
 
 @pytest.mark.asyncio
+async def test_google_genai_discover_models_falls_back_to_static_json_with_imagen_models():
+    provider = _make_google_provider(api_keys=["key-1"])
+
+    with patch.object(provider, "_create_proxy_transport", return_value=(None, None)), patch(
+        "smolrouter.google_genai_provider.genai.Client", side_effect=RuntimeError("live discovery failed")
+    ), patch("pathlib.Path.exists", return_value=True), patch(
+        "builtins.open",
+        mock_open(
+            read_data=json.dumps(
+                {
+                    "models": [
+                        {
+                            "name": "models/imagen-4.0-generate-001",
+                            "displayName": "Imagen 4",
+                            "description": "Imagen 4 Native",
+                            "supportedActions": ["predict"],
+                            "inputTokenLimit": 8192,
+                            "outputTokenLimit": 1024,
+                            "version": "v1",
+                        },
+                        {
+                            "name": "models/gemini-2.5-flash",
+                            "displayName": "Gemini Flash",
+                            "description": "Fast",
+                            "supportedActions": ["generateContent"],
+                            "inputTokenLimit": 8192,
+                            "outputTokenLimit": 1024,
+                        },
+                    ]
+                }
+            )
+        ),
+    ):
+        models = await provider.discover_models()
+
+    model_names = [model.name for model in models]
+    assert "imagen-4.0-generate-001" in model_names
+    assert "gemini-2.5-flash" in model_names
+
+
+@pytest.mark.asyncio
 async def test_google_genai_generate_completion_orchestrates_helpers():
     provider = _make_google_provider()
     context = GoogleGenAICompletionContext(original_model="original", observation_id="obs-123")
@@ -546,6 +587,147 @@ async def test_google_genai_generate_completion_rejects_streaming_responses_endp
             {"model": "gemini-2.0-flash", "input": "Hi", "stream": True},
             endpoint="/v1/responses",
         )
+
+
+@pytest.mark.asyncio
+@patch("smolrouter.google_genai_provider.httpx.AsyncClient")
+async def test_google_genai_generate_image_routes_to_openai_compatible_endpoint(mock_client):
+    provider = _make_google_provider()
+    provider._update_api_key_stats = AsyncMock()
+    mock_response = Mock()
+    mock_response.is_error = False
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {
+        "created": 123,
+        "data": [{"url": "https://example.com/example.png"}],
+        "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+    }
+    mock_client.return_value.post = AsyncMock(return_value=mock_response)
+    mock_client.return_value.aclose = AsyncMock(return_value=None)
+
+    response_data, metadata = await provider.generate_image(
+        {
+            "model": "gemini-2.5-flash-image",
+            "prompt": "A neon astronaut riding a horse",
+            "n": 2,
+            "size": "1024x1024",
+            "response_format": "url",
+            "extra_body": {"google": {"safety_settings": []}},
+        }
+    )
+
+    assert response_data["created"] == 123
+    assert response_data["data"][0]["url"] == "https://example.com/example.png"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-2.5-flash-image"
+    assert metadata.api_key_index == 1
+    assert metadata.api_key_total == 1
+
+    called_url = mock_client.return_value.post.call_args.args[0]
+    called_json = mock_client.return_value.post.call_args.kwargs["json"]
+    called_headers = mock_client.return_value.post.call_args.kwargs["headers"]
+    assert called_url == "https://generativelanguage.googleapis.com/v1beta/openai/images/generations"
+    assert called_json["model"] == "gemini-2.5-flash-image"
+    assert called_json["prompt"] == "A neon astronaut riding a horse"
+    assert called_json["n"] == 2
+    assert called_json["size"] == "1024x1024"
+    assert called_json["response_format"] == "url"
+    assert called_json["extra_body"] == {"google": {"safety_settings": []}}
+    assert called_headers["Authorization"] == "Bearer test-key"
+    assert called_headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+@patch("smolrouter.google_genai_provider.httpx.AsyncClient")
+async def test_google_genai_generate_imagen_image_routes_to_openai_compatible_endpoint(mock_client):
+    provider = _make_google_provider()
+    provider._update_api_key_stats = AsyncMock()
+    provider._rate_limiter.acquire_slot = AsyncMock()
+    provider._rate_limiter.release_slot = AsyncMock()
+    mock_response = Mock()
+    mock_response.is_error = False
+    mock_response.raise_for_status.return_value = None
+    mock_response.json.return_value = {
+        "predictions": [
+            {"bytesBase64Encoded": "aW1hZ2VzL2JhdGNoLw=="},
+        ],
+    }
+    mock_client.return_value.post = AsyncMock(return_value=mock_response)
+    mock_client.return_value.aclose = AsyncMock(return_value=None)
+
+    response_data, metadata = await provider.generate_image(
+        {
+            "model": "imagen-4.0-generate-001",
+            "prompt": "A realistic portrait of a mountain cat",
+        }
+    )
+
+    assert response_data["created"] > 0
+    assert response_data["data"][0]["b64_json"] == "aW1hZ2VzL2JhdGNoLw=="
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "imagen-4.0-generate-001"
+    assert metadata.api_key_index == 1
+    assert metadata.api_key_total == 1
+    assert provider._rate_limiter.acquire_slot.await_count == 1
+    assert provider._rate_limiter.release_slot.await_count == 1
+
+    called_url = mock_client.return_value.post.call_args.args[0]
+    called_json = mock_client.return_value.post.call_args.kwargs["json"]
+    called_headers = mock_client.return_value.post.call_args.kwargs["headers"]
+    assert called_url == "https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict"
+    assert called_json == {
+        "instances": [{"prompt": "A realistic portrait of a mountain cat"}],
+        "parameters": {"sampleCount": 1},
+    }
+    assert called_headers["Content-Type"] == "application/json"
+    assert called_headers["x-goog-api-key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_google_genai_generate_imagen_rejects_unsupported_request_shape():
+    provider = _make_google_provider()
+
+    with pytest.raises(GoogleGenAIRequestError, match="unsupported image request field"):
+        await provider.generate_image(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "A cat",
+                "quality": "high",
+            }
+        )
+
+
+@pytest.mark.asyncio
+@patch("smolrouter.google_genai_provider.httpx.AsyncClient")
+async def test_google_genai_generate_imagen_releases_rate_limiter_on_error(mock_client):
+    provider = _make_google_provider()
+    provider._rate_limiter.acquire_slot = AsyncMock()
+    provider._rate_limiter.release_slot = AsyncMock()
+    provider._update_api_key_stats = AsyncMock()
+
+    mock_response = Mock()
+    mock_response.is_error = True
+    mock_response.status_code = 400
+    mock_response.reason_phrase = "Bad Request"
+    mock_response.json.return_value = {
+        "error": {"message": "Imagen 3 is only available on paid plans. Please upgrade your account at https://ai.dev/projects."}
+    }
+    mock_response.text = '{"error":{"message":"Imagen 3 is only available on paid plans. Please upgrade your account at https://ai.dev/projects."}}'
+    mock_client.return_value.post = AsyncMock(return_value=mock_response)
+    mock_client.return_value.aclose = AsyncMock(return_value=None)
+
+    with pytest.raises(GoogleGenAIRequestError, match="paid plans"):
+        await provider.generate_image(
+            {
+                "model": "imagen-4.0-generate-001",
+                "prompt": "A realistic portrait of a mountain cat",
+            }
+        )
+
+    assert provider._rate_limiter.acquire_slot.await_count == 1
+    assert provider._rate_limiter.release_slot.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -765,7 +947,22 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
         }
     )
 
-    provider._get_quota_record = AsyncMock(side_effect=[success_quota, invalid_quota, quota_exhausted, regular_quota])
+    entitlement_quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "imagen-4.0-fast-generate-001",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+
+    provider._get_quota_record = AsyncMock(
+        side_effect=[success_quota, invalid_quota, quota_exhausted, regular_quota, entitlement_quota]
+    )
 
     with patch("smolrouter.redis_backend.RedisApiKeyQuota.increment_usage", AsyncMock(return_value=None)), patch(
         "smolrouter.google_genai_provider.ApiKeyQuota", api_key_backend
@@ -807,6 +1004,19 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
         )
         assert regular_quota.error_count == 1
         assert api_key_backend.mark_error.await_count == 1
+
+        provider.config.api_keys = ["test-key"]
+        await provider._update_api_key_stats(
+            "test-key",
+            "imagen-4.0-fast-generate-001",
+            success=False,
+            error="403 upgrade your account to a paid plan",
+            status_code=403,
+        )
+        assert entitlement_quota.error_count == 1
+        assert api_key_backend.mark_invalid_by_hash.await_count == 1
+        assert api_key_backend.mark_error.await_count == 2
+        assert provider.config.api_keys == ["test-key"]
 
 
 @pytest.mark.asyncio
@@ -1614,7 +1824,7 @@ async def test_openai_provider_generate_completion_returns_http_error_payload_wh
             "502",
             "OpenAI API error: 502",
         ),
-        (httpx.TimeoutException("slow request"), 408, "timeout", "timed out"),
+        (httpx.TimeoutException("slow request"), 504, "timeout", "timed out"),
         (
             httpx.ConnectError(
                 "connection refused",
@@ -2096,6 +2306,247 @@ async def test_mediator_passes_embeddings_path_to_google_provider():
         {"model": "gemini-embedding-001", "input": "Hello embeddings"},
         "/v1/embeddings",
     )
+
+
+@pytest.mark.asyncio
+async def test_mediator_routes_google_image_generation_path():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemini-2.5-flash-image@test-google",
+        name="gemini-2.5-flash-image",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    provider.generate_image = AsyncMock(
+        return_value=(
+            {"created": 123, "data": []},
+            RequestMetadata(
+                provider_id="test-google",
+                model_name="gemini-2.5-flash-image",
+            ),
+        )
+    )
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemini-2.5-flash-image",
+        {"model": "gemini-2.5-flash-image", "prompt": "A cat"},
+        "/v1/images/generations",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 200
+    assert response_data["created"] == 123
+    assert upstream_used == "google-genai:test-google"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    provider.generate_image.assert_awaited_once_with(
+        {"model": "gemini-2.5-flash-image", "prompt": "A cat"},
+        "/v1/images/generations",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mediator_routes_google_imagen4_image_generation_path():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="imagen-4.0-generate-001@test-google",
+        name="imagen-4.0-generate-001",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    provider.generate_image = AsyncMock(
+        return_value=(
+            {"created": 456, "data": []},
+            RequestMetadata(
+                provider_id="test-google",
+                model_name="imagen-4.0-generate-001",
+            ),
+        )
+    )
+    provider._is_image_generation_model = lambda _model_name: True
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "imagen-4.0-generate-001",
+        {"model": "imagen-4.0-generate-001", "prompt": "A cat"},
+        "/v1/images/generations",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 200
+    assert response_data["created"] == 456
+    assert upstream_used == "google-genai:test-google"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    provider.generate_image.assert_awaited_once_with(
+        {"model": "imagen-4.0-generate-001", "prompt": "A cat"},
+        "/v1/images/generations",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mediator_rejects_imagen_request_with_unsupported_shape():
+    resolved_model = ModelInfo(
+        id="imagen-4.0-generate-001@test-google",
+        name="imagen-4.0-generate-001",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    provider._is_image_generation_model = lambda _model_name: True
+    mediator = ModelMediator(Mock(), SimpleModelStrategy({}), NoAccessControl())
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "imagen-4.0-generate-001",
+        {"model": "imagen-4.0-generate-001", "prompt": "A cat", "quality": "high"},
+        "/v1/images/generations",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 400
+    assert response_data["error"]["type"] == "invalid_request_error"
+    assert response_data["error"]["provider"] == "google-genai"
+    assert upstream_used == "google-genai:test-google"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "imagen-4.0-generate-001"
+
+
+@pytest.mark.asyncio
+async def test_mediator_image_route_rejects_non_image_models_with_400():
+    mediator = ModelMediator(Mock(), SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemini-2.0-flash@test-google",
+        name="gemini-2.0-flash",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+    provider = _make_google_provider()
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemini-2.0-flash",
+        {"model": "gemini-2.0-flash", "prompt": "bad"},
+        "/v1/images/generations",
+        {},
+        30.0,
+    )
+
+    assert status_code == 400
+    assert response_data["error"]["type"] == "invalid_request_error"
+    assert response_data["error"]["provider"] == "google-genai"
+    assert upstream_used == "google-genai:test-google"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-2.0-flash"
+
+
+@pytest.mark.asyncio
+async def test_mediator_image_route_rejects_non_image_models_with_400_even_when_proxy_unhealthy():
+    provider = _make_google_provider(proxy_config=ProxyConfig(https_proxy="http://127.0.0.1:8888"))
+    provider._mark_proxy_health("http://127.0.0.1:8888", success=False, error="proxy unavailable")
+
+    resolved_model = ModelInfo(
+        id="gemini-2.0-flash@test-google",
+        name="gemini-2.0-flash",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+
+    mediator = ModelMediator(Mock(), SimpleModelStrategy({}), NoAccessControl())
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, _upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemini-2.0-flash",
+        {"model": "gemini-2.0-flash", "prompt": "bad"},
+        "/v1/images/generations",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 400
+    assert response_data["error"]["type"] == "invalid_request_error"
+    assert response_data["error"]["provider"] == "google-genai"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemini-2.0-flash"
+
+
+@pytest.mark.asyncio
+async def test_mediator_populates_google_image_error_metadata():
+    aggregator = Mock()
+    aggregator.get_all_models = AsyncMock(return_value=[])
+    mediator = ModelMediator(aggregator, SimpleModelStrategy({}), NoAccessControl())
+    resolved_model = ModelInfo(
+        id="gemma-3-4b-it@test-google",
+        name="gemma-3-4b-it",
+        provider_id="test-google",
+        provider_type="google-genai",
+        endpoint="https://generativelanguage.googleapis.com",
+    )
+
+    provider_error = Exception("Google General image service outage")
+    provider_error.provider_id = "test-google"
+    provider_error.model_name = "gemma-3-4b-it"
+    provider_error.proxy_used = "http://127.0.0.1:8888"
+    provider_error.api_key_suffix = "abcd1234"
+    provider_error.api_key_index = 2
+    provider_error.api_key_total = 5
+    provider_error.api_key = "test-key"
+
+    provider = _make_google_provider()
+    provider.generate_image = AsyncMock(side_effect=provider_error)
+
+    mediator.resolve_model_for_request = AsyncMock(return_value=resolved_model)
+    mediator._get_provider_by_id = Mock(return_value=provider)
+
+    response_data, status_code, _upstream_used, metadata = await mediator.route_request(
+        "127.0.0.1",
+        "gemma-3-4b-it [test-google]",
+        {"model": "gemma-3-4b-it [test-google]", "prompt": "x"},
+        "/v1/images/generations",
+        {"authorization": "Bearer client-token"},
+        30.0,
+    )
+
+    assert status_code == 500
+    assert response_data["error"]["provider"] == "google-genai"
+    assert metadata is not None
+    assert metadata.provider_id == "test-google"
+    assert metadata.model_name == "gemma-3-4b-it"
+    assert metadata.proxy_used == "http://127.0.0.1:8888"
+    assert metadata.api_key_suffix == "abcd1234"
+    assert metadata.api_key_index == 2
+    assert metadata.api_key_total == 5
 
 
 @pytest.mark.asyncio
