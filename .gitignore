@@ -195,3 +195,4 @@ scripts/
 scripts/*.py
 scripts/README.md
 .DS_Store
+tmp_siege_blob_storage/

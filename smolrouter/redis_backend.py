@@ -29,6 +29,7 @@ STATS_SERVICE_TYPES_KEY = "stats:requests:service_types"
 INFLIGHT_SET_KEY = "stats:requests:inflight"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
+_BODY_STORAGE_UPDATE_UNSET = object()
 _COMPLETE_ONCE_LUA_SCRIPT = """
 local inflight_key = KEYS[1]
 local completed_key = KEYS[2]
@@ -219,6 +220,13 @@ def _load_blob_body(blob_storage: Any, key: Any) -> tuple[Any, str]:
         return None, "not_found"
 
     return data, "available"
+
+
+def _resolve_body_status(load_status: str, archival_status: Any) -> str:
+    archival_status_text = str(archival_status) if archival_status not in REDIS_EMPTY_VALUES else ""
+    if load_status == "not_stored" and archival_status_text:
+        return archival_status_text
+    return load_status
 
 
 def _prepare_quota_record_data(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -480,12 +488,16 @@ class LogRecord:
         from .storage import get_blob_storage
 
         blob_storage = get_blob_storage()
-        self.request_body, self.request_body_status = _load_blob_body(
+        stored_request_body_status = getattr(self, "request_body_status", None)
+        stored_response_body_status = getattr(self, "response_body_status", None)
+        self.request_body, request_body_status = _load_blob_body(
             blob_storage, getattr(self, "request_body_key", None)
         )
-        self.response_body, self.response_body_status = _load_blob_body(
+        self.request_body_status = _resolve_body_status(request_body_status, stored_request_body_status)
+        self.response_body, response_body_status = _load_blob_body(
             blob_storage, getattr(self, "response_body_key", None)
         )
+        self.response_body_status = _resolve_body_status(response_body_status, stored_response_body_status)
 
     def items(self):
         """Provide dict-like items() method for backward compatibility"""
@@ -754,6 +766,42 @@ class RedisRequestLog:
             return
         await client.hset(f"request:{request_id}", mapping=mapping)
         logger.debug(f"Updated Redis body keys: {request_id}")
+
+    @staticmethod
+    async def update_body_storage_result(
+        request_id: str,
+        request_body_key: Any = _BODY_STORAGE_UPDATE_UNSET,
+        response_body_key: Any = _BODY_STORAGE_UPDATE_UNSET,
+        request_body_status: Any = _BODY_STORAGE_UPDATE_UNSET,
+        request_body_error: Any = _BODY_STORAGE_UPDATE_UNSET,
+        response_body_status: Any = _BODY_STORAGE_UPDATE_UNSET,
+        response_body_error: Any = _BODY_STORAGE_UPDATE_UNSET,
+    ) -> None:
+        """Persist blob keys and any archival failure details."""
+        client = get_redis()
+        mapping = {}
+        clear_fields: list[str] = []
+
+        def _apply(field_name: str, value: Any) -> None:
+            if value is _BODY_STORAGE_UPDATE_UNSET:
+                return
+            if value in REDIS_EMPTY_VALUES:
+                clear_fields.append(field_name)
+                return
+            mapping[field_name] = value
+
+        _apply("request_body_key", request_body_key)
+        _apply("response_body_key", response_body_key)
+        _apply("request_body_status", request_body_status)
+        _apply("request_body_error", request_body_error)
+        _apply("response_body_status", response_body_status)
+        _apply("response_body_error", response_body_error)
+
+        if mapping:
+            await client.hset(f"request:{request_id}", mapping=mapping)
+        if clear_fields:
+            await client.hdel(f"request:{request_id}", *clear_fields)
+        logger.debug("Updated Redis body storage result: %s", request_id)
 
     @staticmethod
     async def get_by_id(request_id: str) -> Optional[LogRecord]:

@@ -126,3 +126,27 @@ async def test_drain_background_tasks_does_not_wait_for_service_loop():
 
     await asyncio.sleep(0)
     assert task not in task_utils._service_tasks
+
+
+@pytest.mark.asyncio
+async def test_drain_background_tasks_waits_for_nested_spawned_tasks():
+    child_finished = asyncio.Event()
+    steps: list[str] = []
+
+    async def child_task():
+        await asyncio.sleep(0)
+        steps.append("child")
+        child_finished.set()
+
+    async def parent_task():
+        await asyncio.sleep(0)
+        create_logged_task(child_task(), task_name="nested-child")
+        steps.append("parent")
+
+    parent = create_logged_task(parent_task(), task_name="nested-parent")
+    assert parent is not None
+
+    await drain_background_tasks()
+
+    assert child_finished.is_set()
+    assert steps == ["parent", "child"]

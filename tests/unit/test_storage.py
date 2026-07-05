@@ -1,4 +1,5 @@
 import asyncio
+import errno
 
 import pytest
 
@@ -13,8 +14,13 @@ async def test_filesystem_janitor_prunes_when_over_capacity(tmp_path, monkeypatc
     monkeypatch.setattr(storage_module, "KEEP_RECENT_HOURS", 0)
 
     storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
-    storage.store(b"a" * 60)
-    storage.store(b"b" * 60)
+    first = storage.base_path / "2026" / "07" / "04" / "01" / "a.blob"
+    second = storage.base_path / "2026" / "07" / "04" / "02" / "b.blob"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(b"a" * 60)
+    second.write_bytes(b"b" * 60)
+    storage._write_usage_bytes_locked(120)
 
     assert storage._total_size_bytes() > storage_module.MAX_TOTAL_STORAGE_SIZE
 
@@ -38,11 +44,10 @@ async def test_janitor_loop_reraises_cancelled_error(tmp_path, monkeypatch):
         await task
 
 
-def test_filesystem_store_uses_incremental_usage_counter_and_triggers_janitor(tmp_path, monkeypatch):
-    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 10)
+def test_filesystem_store_uses_incremental_usage_counter_without_scanning_under_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 100)
 
     storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
-    janitor_calls = []
     scan_calls = []
 
     real_dir_size_bytes = storage._dir_size_bytes
@@ -52,13 +57,9 @@ def test_filesystem_store_uses_incremental_usage_counter_and_triggers_janitor(tm
         return real_dir_size_bytes(path)
 
     monkeypatch.setattr(storage, "_dir_size_bytes", tracked_dir_size)
-    monkeypatch.setattr(storage, "_trigger_janitor", lambda: janitor_calls.append(True))
-    storage._adjust_usage_bytes(9)
-
     storage.store(b"12345")
 
-    assert janitor_calls == [True]
-    assert storage._total_size_bytes() == 14
+    assert storage._total_size_bytes() == 5
     assert scan_calls == []
 
 
@@ -204,3 +205,48 @@ def test_usage_counter_rebuilds_once_then_store_stays_incremental(tmp_path, monk
 
     assert len(scan_calls) == 1
     assert storage._total_size_bytes() == 5
+
+
+@pytest.mark.asyncio
+async def test_janitor_reconciles_stale_usage_counter_without_deleting_live_blobs(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 100)
+    monkeypatch.setattr(storage_module, "WATERMARK_FRACTION", 0.5)
+
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    key = storage.store(b"x" * 10)
+    storage._write_usage_bytes_locked(5000)
+
+    await storage._run_janitor_once()
+
+    assert storage._total_size_bytes() == 10
+    assert storage._get_blob_path(key).exists() is True
+
+
+def test_store_prunes_older_blobs_before_writing_new_blob(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 10)
+
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    old_path = storage.base_path / "2026" / "07" / "04" / "23" / "old.blob"
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_bytes(b"abcdefgh")
+    storage._write_usage_bytes_locked(8)
+    monkeypatch.setattr(storage, "_generate_key", lambda: "1783236000000-newblob")
+
+    key = storage.store(b"xyz")
+    new_path = storage._get_blob_path(key)
+
+    assert old_path.exists() is False
+    assert new_path.exists() is True
+    assert storage.retrieve(key) == b"xyz"
+    assert storage._total_size_bytes() == 3
+
+
+def test_store_raises_enospc_when_blob_cannot_fit_even_after_eviction(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 5)
+
+    storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+
+    with pytest.raises(OSError) as exc_info:
+        storage.store(b"123456")
+
+    assert exc_info.value.errno == errno.ENOSPC

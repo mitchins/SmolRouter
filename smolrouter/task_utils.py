@@ -90,12 +90,14 @@ async def _cancel_tasks(tasks: "set[Task[Any]]", *, wait: bool = True) -> None:
         await asyncio.gather(*pending, return_exceptions=True)
 
 
-async def _wait_for_tasks_with_timeout(tasks: "set[Task[Any]]") -> "set[Task[Any]]":
+async def _wait_for_tasks_with_timeout(
+    tasks: "set[Task[Any]]", *, timeout_seconds: float
+) -> "set[Task[Any]]":
     if not tasks:
         return set()
 
     try:
-        async with asyncio.timeout(BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS):
+        async with asyncio.timeout(timeout_seconds):
             _done, still_pending = await asyncio.wait(tasks)
             return still_pending
     except TimeoutError:
@@ -115,8 +117,24 @@ async def drain_background_tasks() -> None:
     outright - they never finish on their own, so waiting for them would just
     burn the timeout.
     """
-    drainable = {t for t in _background_tasks if not t.done() and t not in _service_tasks}
-    still_pending = await _wait_for_tasks_with_timeout(drainable)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + BACKGROUND_TASK_DRAIN_TIMEOUT_SECONDS
+    still_pending: "set[Task[Any]]" = set()
+
+    while True:
+        drainable = {t for t in _background_tasks if not t.done() and t not in _service_tasks}
+        if not drainable:
+            break
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            still_pending = drainable
+            break
+
+        still_pending = await _wait_for_tasks_with_timeout(drainable, timeout_seconds=remaining)
+        if still_pending:
+            break
+
     if still_pending:
         logger.warning(
             "Cancelling %d background task(s) after waiting %.1fs for shutdown",
