@@ -13,6 +13,7 @@ verifying the background scheduler.
 
 import asyncio
 import errno
+import itertools
 import os
 from datetime import datetime
 from unittest.mock import patch
@@ -202,9 +203,10 @@ async def test_background_small_file_siege_preserves_recent_request_bodies_under
 
     blob_storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
     monkeypatch.setattr(storage_module, "get_blob_storage", lambda: blob_storage)
+    key_counter = itertools.count(1)
+    monkeypatch.setattr(blob_storage, "_generate_key", lambda: f"2000000000000-{next(key_counter):08d}")
 
     request_payload = b"q" * 16384
-    entries = []
     total_entries = 80
 
     before = await RedisRequestLog.get_stats_counters()
@@ -232,25 +234,24 @@ async def test_background_small_file_siege_preserves_recent_request_bodies_under
     assert after["inflight"] == 0
     assert blob_storage._total_size_bytes() <= storage_module.MAX_TOTAL_STORAGE_SIZE
 
-    oldest_records = [await RedisRequestLog.get_by_id(entry.request_id) for entry in entries[:10]]
-    newest_records = [await RedisRequestLog.get_by_id(entry.request_id) for entry in entries[-10:]]
+    all_records = [await RedisRequestLog.get_by_id(entry.request_id) for entry in entries]
+    assert all(record is not None for record in all_records)
 
-    assert all(record is not None for record in oldest_records)
-    assert all(record is not None for record in newest_records)
-    assert all(record.status_code == 200 for record in newest_records if record is not None)
-    assert all(record.completed_at is not None for record in newest_records if record is not None)
-    assert all(record.request_body_status == "available" for record in newest_records if record is not None)
+    records_by_write_order = sorted(
+        (record for record in all_records if record is not None and getattr(record, "request_body_key", None)),
+        key=lambda record: getattr(record, "request_body_key"),
+    )
 
-    assert any(
-        record.request_body_status == "not_found"
-        for record in oldest_records
-        if record is not None
-    )
-    assert all(
-        getattr(record, "request_body_status", None) != "write_failed"
-        for record in oldest_records + newest_records
-        if record is not None
-    )
+    assert len(records_by_write_order) == total_entries
+
+    oldest_written = records_by_write_order[:10]
+    newest_written = records_by_write_order[-10:]
+
+    assert all(record.status_code == 200 for record in newest_written)
+    assert all(record.completed_at is not None for record in newest_written)
+    assert all(record.request_body_status == "available" for record in newest_written)
+    assert any(record.request_body_status == "not_found" for record in oldest_written)
+    assert all(record.request_body_status != "write_failed" for record in oldest_written + newest_written)
 
 
 def test_save_without_event_loop_archives_bodies(isolated_db, monkeypatch):
