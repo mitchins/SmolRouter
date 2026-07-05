@@ -167,6 +167,31 @@ async def test_save_async_records_explicit_disk_full_blob_failure(isolated_db, m
 
 
 @pytest.mark.asyncio
+async def test_save_async_retries_transient_body_storage_result_persistence(isolated_db, monkeypatch):
+    entry = await _pending_entry()
+    entry.request_body = b'{"messages":[{"role":"user","content":"hi"}]}'
+
+    calls = {"n": 0}
+    real_update = RedisRequestLog.update_body_storage_result
+
+    async def flaky(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("temporary redis outage")
+        return await real_update(*args, **kwargs)
+
+    monkeypatch.setattr(RedisRequestLog, "update_body_storage_result", staticmethod(flaky))
+
+    await entry.save_async()
+
+    rec = await RedisRequestLog.get_by_id(entry.request_id)
+    assert calls["n"] >= 2
+    assert rec is not None
+    assert getattr(rec, "request_body_key", None)
+    assert getattr(rec, "request_body_status", None) == "available"
+
+
+@pytest.mark.asyncio
 async def test_background_small_file_siege_preserves_recent_request_bodies_under_1mb_cap(
     isolated_db, monkeypatch, tmp_path
 ):

@@ -373,7 +373,10 @@ class FilesystemBlobStorage(BlobStorage):
         """Repair a stale usage counter from an on-disk scan when janitor work starts."""
         actual_total = self._dir_size_bytes(self.base_path)
         with self._usage_lock():
-            cached_total = expected_total if expected_total is not None else self._read_usage_bytes_locked()
+            cached_total = self._read_usage_bytes_locked()
+            if expected_total is not None and cached_total != expected_total:
+                actual_total = self._dir_size_bytes(self.base_path)
+                cached_total = self._read_usage_bytes_locked()
             if cached_total != actual_total:
                 logger.warning(
                     "Reconciled stale blob usage counter from %s to %s bytes",
@@ -450,7 +453,6 @@ class FilesystemBlobStorage(BlobStorage):
         for bucket in prune_candidates:
             if current_size + incoming_bytes <= cap:
                 break
-            current_size = self._reconcile_usage_bytes_locked(current_size)
             if not bucket.exists():
                 continue
             freed_bytes = self._delete_bucket_locked(bucket)
@@ -460,7 +462,6 @@ class FilesystemBlobStorage(BlobStorage):
             for bucket in [candidate for candidate in self._list_hour_buckets() if candidate.exists()]:
                 if current_size + incoming_bytes <= cap:
                     break
-                current_size = self._reconcile_usage_bytes_locked(current_size)
                 if not bucket.exists():
                     continue
                 bytes_needed = (current_size + incoming_bytes) - cap

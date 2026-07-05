@@ -779,9 +779,20 @@ class RequestLogEntry:
             or (getattr(self, "response_body", None) and not getattr(self, "response_body_key", None))
         )
 
+    async def _persist_body_storage_result(self, **update_kwargs: Any) -> None:
+        from .redis_backend import RedisRequestLog
+
+        for attempt in range(1, 4):
+            try:
+                await RedisRequestLog.update_body_storage_result(**update_kwargs)
+                return
+            except Exception:
+                if attempt >= 3:
+                    raise
+                await asyncio.sleep(0.05 * attempt)
+
     async def _archive_bodies_after_completion(self) -> None:
         from .storage import get_blob_storage
-        from .redis_backend import RedisRequestLog
 
         if not self._needs_body_archival():
             return
@@ -822,7 +833,7 @@ class RequestLogEntry:
                 update_kwargs["response_body_status"] = response_body_status
                 update_kwargs["response_body_error"] = response_body_error
 
-            await RedisRequestLog.update_body_storage_result(**update_kwargs)
+            await self._persist_body_storage_result(**update_kwargs)
         except Exception:
             logger.exception("Body storage failed for request %s after completion persisted", self.request_id)
 
