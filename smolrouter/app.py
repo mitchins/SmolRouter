@@ -2780,7 +2780,7 @@ def _decode_log_body(body: Any) -> Optional[str]:
 
 def _body_status(log_entry: Any, body_name: str) -> str:
     status = getattr(log_entry, f"{body_name}_status", None)
-    if status in {"available", "not_stored", "not_found", "storage_error"}:
+    if status in {"available", "not_stored", "not_found", "storage_error", "write_failed"}:
         return str(status)
 
     body = getattr(log_entry, body_name, None)
@@ -2838,6 +2838,8 @@ def _serialize_request_detail_response(log_entry: Any, duplicate_info: dict[str,
         "response_body": _decode_log_body(getattr(log_entry, "response_body", None)),
         "request_body_status": _body_status(log_entry, "request_body"),
         "response_body_status": _body_status(log_entry, "response_body"),
+        "request_body_error": getattr(log_entry, "request_body_error", None),
+        "response_body_error": getattr(log_entry, "response_body_error", None),
         "duplicate": duplicate_info,
     }
 
@@ -3835,6 +3837,8 @@ async def request_detail(request_id: str, request: Request):
                 else None,
                 "request_body_status": _body_status(log_entry, "request_body"),
                 "response_body_status": _body_status(log_entry, "response_body"),
+                "request_body_error": getattr(log_entry, "request_body_error", None),
+                "response_body_error": getattr(log_entry, "response_body_error", None),
                 "duplicates": duplicates,
             },
         )

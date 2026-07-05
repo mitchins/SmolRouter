@@ -447,6 +447,8 @@
                     <span class="detail-value">
                         {% if request_body_status == "storage_error" %}
                         Unable to retrieve request body (storage error)
+                        {% elif request_body_status == "write_failed" %}
+                        {{ request_body_error or "Unable to save request body" }}
                         {% elif request_body_status == "not_found" %}
                         Unable to retrieve request body (missing blob)
                         {% else %}
@@ -501,6 +503,8 @@
                     <span class="detail-value">
                         {% if response_body_status == "storage_error" %}
                         Unable to retrieve response body (storage error)
+                        {% elif response_body_status == "write_failed" %}
+                        {{ response_body_error or "Unable to save response body" }}
                         {% elif response_body_status == "not_found" %}
                         Unable to retrieve response body (missing blob)
                         {% else %}

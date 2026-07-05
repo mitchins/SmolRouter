@@ -5,6 +5,7 @@ import shutil
 import asyncio
 import time
 import secrets
+import errno
 from pathlib import Path
 from typing import Optional, Dict, List
 from abc import ABC, abstractmethod
@@ -184,7 +185,6 @@ class FilesystemBlobStorage(BlobStorage):
         while True:
             key = self._generate_key()
             blob_path = self._get_blob_path(key, record_id)
-            blob_path.parent.mkdir(parents=True, exist_ok=True)
             if not blob_path.exists():
                 break
             attempts += 1
@@ -193,13 +193,26 @@ class FilesystemBlobStorage(BlobStorage):
                 suffix = hashlib.sha256(data).hexdigest()[:8]
                 key = f"{key}-{suffix}"
                 blob_path = self._get_blob_path(key, record_id)
-                blob_path.parent.mkdir(parents=True, exist_ok=True)
                 break
 
-        with open(blob_path, "wb") as f:
-            f.write(data)
         stored_size = len(data)
-        current_size = self._adjust_usage_bytes(stored_size)
+        try:
+            with self._usage_lock():
+                current_size = self._read_usage_bytes_locked()
+                if current_size + stored_size > MAX_TOTAL_STORAGE_SIZE:
+                    current_size = self._make_room_for_write_locked(stored_size, current_size)
+
+                blob_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(blob_path, "wb") as f:
+                    f.write(data)
+                current_size = self._write_usage_bytes_locked(current_size + stored_size)
+        except Exception:
+            try:
+                blob_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
         if current_size > MAX_TOTAL_STORAGE_SIZE:
             self._trigger_janitor()
         logger.debug(f"Stored blob {key} ({stored_size} bytes) at {blob_path}")
@@ -356,6 +369,110 @@ class FilesystemBlobStorage(BlobStorage):
     def _total_size_bytes(self) -> int:
         return self._read_usage_bytes()
 
+    def _reconcile_usage_bytes_with_disk(self, expected_total: Optional[int] = None) -> int:
+        """Repair a stale usage counter from an on-disk scan when janitor work starts."""
+        actual_total = self._dir_size_bytes(self.base_path)
+        with self._usage_lock():
+            cached_total = expected_total if expected_total is not None else self._read_usage_bytes_locked()
+            if cached_total != actual_total:
+                logger.warning(
+                    "Reconciled stale blob usage counter from %s to %s bytes",
+                    cached_total,
+                    actual_total,
+                )
+                self._write_usage_bytes_locked(actual_total)
+        return actual_total
+
+    def _reconcile_usage_bytes_locked(self, expected_total: Optional[int] = None) -> int:
+        actual_total = self._dir_size_bytes(self.base_path)
+        cached_total = expected_total if expected_total is not None else self._read_usage_bytes_locked()
+        if cached_total != actual_total:
+            logger.warning(
+                "Reconciled stale blob usage counter from %s to %s bytes",
+                cached_total,
+                actual_total,
+            )
+            self._write_usage_bytes_locked(actual_total)
+        return actual_total
+
+    def _delete_bucket_locked(self, bucket: Path) -> int:
+        bucket_size = self._dir_size_bytes(bucket)
+        shutil.rmtree(bucket, ignore_errors=True)
+        if bucket_size > 0:
+            self._write_usage_bytes_locked(max(0, self._read_usage_bytes_locked() - bucket_size))
+            logger.info("Deleted bucket %s (freed %s bytes)", bucket, bucket_size)
+        return bucket_size
+
+    def _prune_bucket_files_locked(self, bucket: Path, bytes_needed: int) -> int:
+        files: list[tuple[Path, float, int]] = []
+        for blob_file in bucket.rglob(BLOB_FILE_GLOB):
+            try:
+                stats = blob_file.stat()
+                files.append((blob_file, stats.st_mtime, stats.st_size))
+            except Exception:
+                continue
+
+        files.sort(key=lambda entry: entry[1])
+        freed_bytes = 0
+        for blob_file, _, file_size in files:
+            if freed_bytes >= bytes_needed:
+                break
+            try:
+                blob_file.unlink()
+                freed_bytes += file_size
+            except FileNotFoundError:
+                continue
+            except Exception:
+                logger.exception("Failed pruning blob %s", blob_file)
+
+        if freed_bytes > 0:
+            self._write_usage_bytes_locked(max(0, self._read_usage_bytes_locked() - freed_bytes))
+            logger.info("Pruned %s bytes from bucket %s", freed_bytes, bucket)
+        return freed_bytes
+
+    def _make_room_for_write_locked(self, incoming_bytes: int, current_size: int) -> int:
+        cap = MAX_TOTAL_STORAGE_SIZE
+        if incoming_bytes > cap:
+            raise OSError(errno.ENOSPC, "Blob size exceeds total storage capacity")
+
+        current_size = self._reconcile_usage_bytes_locked(current_size)
+        if current_size + incoming_bytes <= cap:
+            return current_size
+
+        logger.warning(
+            "Blob write would exceed cap by %s bytes; pruning older blobs before write",
+            (current_size + incoming_bytes) - cap,
+        )
+
+        buckets = self._list_hour_buckets()
+        prune_candidates = self._get_prune_candidates(buckets)
+
+        for bucket in prune_candidates:
+            if current_size + incoming_bytes <= cap:
+                break
+            current_size = self._reconcile_usage_bytes_locked(current_size)
+            if not bucket.exists():
+                continue
+            freed_bytes = self._delete_bucket_locked(bucket)
+            current_size = max(0, current_size - freed_bytes)
+
+        if current_size + incoming_bytes > cap:
+            for bucket in [candidate for candidate in self._list_hour_buckets() if candidate.exists()]:
+                if current_size + incoming_bytes <= cap:
+                    break
+                current_size = self._reconcile_usage_bytes_locked(current_size)
+                if not bucket.exists():
+                    continue
+                bytes_needed = (current_size + incoming_bytes) - cap
+                freed_bytes = self._prune_bucket_files_locked(bucket, bytes_needed)
+                current_size = max(0, current_size - freed_bytes)
+
+        self._cleanup_empty_subdirectories()
+        current_size = self._reconcile_usage_bytes_locked(current_size)
+        if current_size + incoming_bytes > cap:
+            raise OSError(errno.ENOSPC, "Blob storage is at capacity after evicting older blobs")
+        return current_size
+
     def _get_prune_candidates(self, buckets: List[Path]) -> List[Path]:
         if KEEP_RECENT_HOURS > 0 and len(buckets) > KEEP_RECENT_HOURS:
             return buckets[:-KEEP_RECENT_HOURS]
@@ -416,6 +533,10 @@ class FilesystemBlobStorage(BlobStorage):
         try:
             current_size = await asyncio.to_thread(self._read_usage_bytes)
             cap = MAX_TOTAL_STORAGE_SIZE
+            if current_size <= cap:
+                return
+
+            current_size = await asyncio.to_thread(self._reconcile_usage_bytes_with_disk, current_size)
             if current_size <= cap:
                 return
 

@@ -12,6 +12,7 @@ verifying the background scheduler.
 """
 
 import asyncio
+import errno
 import os
 from datetime import datetime
 from unittest.mock import patch
@@ -19,8 +20,10 @@ from unittest.mock import patch
 import pytest
 
 import smolrouter.database as database_module
+import smolrouter.storage as storage_module
 from smolrouter.database import RequestLog
 from smolrouter.redis_backend import RedisRequestLog
+from smolrouter.storage import FilesystemBlobStorage
 from smolrouter.task_utils import drain_background_tasks
 
 
@@ -142,6 +145,87 @@ async def test_save_async_persists_request_body_key_when_response_archival_fails
     assert getattr(rec, "request_body_key", None) == "blob/request-body-1"
     assert getattr(rec, "response_body_key", None) in (None, "")
     assert rec.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_save_async_records_explicit_disk_full_blob_failure(isolated_db, monkeypatch):
+    entry = await _pending_entry()
+    entry.request_body = b'{"messages":[{"role":"user","content":"hi"}]}'
+
+    async def failing_request_body_store(self, _blob_storage):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(type(entry), "_store_request_body_if_needed", failing_request_body_store)
+
+    await entry.save_async()
+
+    rec = await RedisRequestLog.get_by_id(entry.request_id)
+    assert rec is not None
+    assert getattr(rec, "request_body_key", None) in (None, "")
+    assert getattr(rec, "request_body_status", None) == "write_failed"
+    assert "insufficient disk space" in (getattr(rec, "request_body_error", "") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_background_small_file_siege_preserves_recent_request_bodies_under_1mb_cap(
+    isolated_db, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(storage_module, "MAX_TOTAL_STORAGE_SIZE", 1_000_000)
+    monkeypatch.setattr(storage_module, "MAX_BLOB_SIZE", 1_000_000)
+    monkeypatch.setattr(storage_module, "KEEP_RECENT_HOURS", 1)
+    monkeypatch.setattr(storage_module, "WATERMARK_FRACTION", 0.8)
+
+    blob_storage = FilesystemBlobStorage(str(tmp_path / "blob_storage"))
+    monkeypatch.setattr(storage_module, "get_blob_storage", lambda: blob_storage)
+
+    request_payload = b"q" * 16384
+    entries = []
+    total_entries = 80
+
+    before = await RedisRequestLog.get_stats_counters()
+
+    async def create_and_schedule(i: int):
+        entry = await RequestLog.create(
+            source_ip=f"10.0.0.{i}",
+            method="POST",
+            path="/v1/chat/completions",
+            service_type="openai",
+            upstream_url="https://api.example/v1/chat/completions",
+        )
+        entry.status_code = 200
+        entry.completed_at = datetime.now()
+        entry.duration_ms = 5
+        entry.request_body = request_payload + f":req:{i:03d}".encode()
+        entry.save()
+        return entry
+
+    entries = await asyncio.gather(*[create_and_schedule(i) for i in range(total_entries)])
+    await drain_background_tasks()
+
+    after = await RedisRequestLog.get_stats_counters()
+    assert after["completed"] >= before["completed"] + total_entries
+    assert after["inflight"] == 0
+    assert blob_storage._total_size_bytes() <= storage_module.MAX_TOTAL_STORAGE_SIZE
+
+    oldest_records = [await RedisRequestLog.get_by_id(entry.request_id) for entry in entries[:10]]
+    newest_records = [await RedisRequestLog.get_by_id(entry.request_id) for entry in entries[-10:]]
+
+    assert all(record is not None for record in oldest_records)
+    assert all(record is not None for record in newest_records)
+    assert all(record.status_code == 200 for record in newest_records if record is not None)
+    assert all(record.completed_at is not None for record in newest_records if record is not None)
+    assert all(record.request_body_status == "available" for record in newest_records if record is not None)
+
+    assert any(
+        record.request_body_status == "not_found"
+        for record in oldest_records
+        if record is not None
+    )
+    assert all(
+        getattr(record, "request_body_status", None) != "write_failed"
+        for record in oldest_records + newest_records
+        if record is not None
+    )
 
 
 def test_save_without_event_loop_archives_bodies(isolated_db, monkeypatch):

@@ -8,6 +8,7 @@ eliminating SQLite complexity and tech debt.
 import os
 import logging
 import asyncio
+import errno
 import json
 import re
 import traceback
@@ -188,6 +189,17 @@ def _to_str(value):
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8")
     return str(value)
+
+
+def _format_body_storage_error(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return "write_failed", "Blob storage write failed: insufficient disk space (ENOSPC)"
+
+    message = str(exc).strip() or exc.__class__.__name__
+    if "No space left on device" in message:
+        return "write_failed", "Blob storage write failed: insufficient disk space (ENOSPC)"
+
+    return "write_failed", f"Blob storage write failed: {message}"
 
 
 def _safe_json_loads(value, default=None):
@@ -776,23 +788,41 @@ class RequestLogEntry:
 
         request_body_key = None
         response_body_key = None
+        request_body_status = None
+        request_body_error = None
+        response_body_status = None
+        response_body_error = None
+        request_body_attempted = False
+        response_body_attempted = False
         try:
             blob_storage = get_blob_storage()
-            try:
-                request_body_key = await self._store_request_body_if_needed(blob_storage)
-            except Exception:
-                logger.exception("Request body storage failed for request %s", self.request_id)
+            if getattr(self, "request_body", None) and not getattr(self, "request_body_key", None):
+                request_body_attempted = True
+                try:
+                    request_body_key = await self._store_request_body_if_needed(blob_storage)
+                except Exception as exc:
+                    request_body_status, request_body_error = _format_body_storage_error(exc)
+                    logger.exception("%s for request %s", request_body_error, self.request_id)
 
-            try:
-                response_body_key = await self._store_response_body_if_present(blob_storage)
-            except Exception:
-                logger.exception("Response body storage failed for request %s", self.request_id)
+            if getattr(self, "response_body", None) and not getattr(self, "response_body_key", None):
+                response_body_attempted = True
+                try:
+                    response_body_key = await self._store_response_body_if_present(blob_storage)
+                except Exception as exc:
+                    response_body_status, response_body_error = _format_body_storage_error(exc)
+                    logger.exception("%s for request %s", response_body_error, self.request_id)
 
-            await RedisRequestLog.update_body_keys(
-                request_id=self.request_id,
-                request_body_key=request_body_key,
-                response_body_key=response_body_key,
-            )
+            update_kwargs: dict[str, Any] = {"request_id": self.request_id}
+            if request_body_attempted:
+                update_kwargs["request_body_key"] = request_body_key
+                update_kwargs["request_body_status"] = request_body_status
+                update_kwargs["request_body_error"] = request_body_error
+            if response_body_attempted:
+                update_kwargs["response_body_key"] = response_body_key
+                update_kwargs["response_body_status"] = response_body_status
+                update_kwargs["response_body_error"] = response_body_error
+
+            await RedisRequestLog.update_body_storage_result(**update_kwargs)
         except Exception:
             logger.exception("Body storage failed for request %s after completion persisted", self.request_id)
 

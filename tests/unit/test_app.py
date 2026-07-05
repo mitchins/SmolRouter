@@ -2354,6 +2354,12 @@ def test_body_status_treats_empty_payload_as_not_found():
     assert app_module._body_status(log_entry, "request_body") == "not_found"
 
 
+def test_body_status_preserves_write_failed_when_archival_failed():
+    log_entry = SimpleNamespace(request_body=None, request_body_key=None, request_body_status="write_failed")
+
+    assert app_module._body_status(log_entry, "request_body") == "write_failed"
+
+
 def test_serialize_request_detail_response_reuses_summary_and_provider_metadata():
     timestamp = app_module.datetime.now()
     log_entry = SimpleNamespace(
@@ -2380,6 +2386,8 @@ def test_serialize_request_detail_response_reuses_summary_and_provider_metadata(
         api_key_total=5,
         request_body=b'{"model": "gpt-4o"}',
         response_body=b'{"choices": []}',
+        request_body_error="Blob storage write failed: insufficient disk space (ENOSPC)",
+        response_body_error=None,
     )
 
     payload = app_module._serialize_request_detail_response(
@@ -2397,6 +2405,7 @@ def test_serialize_request_detail_response_reuses_summary_and_provider_metadata(
     assert payload["identity_display_name"] == "Project A"
     assert payload["request_body"] == '{"model": "gpt-4o"}'
     assert payload["response_body"] == '{"choices": []}'
+    assert payload["request_body_error"] == "Blob storage write failed: insufficient disk space (ENOSPC)"
 
 
 def test_serialize_performance_point_uses_summary_fields():
