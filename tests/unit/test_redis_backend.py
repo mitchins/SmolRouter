@@ -522,6 +522,10 @@ async def test_api_key_quota_round_trip_and_usage_markers(monkeypatch):
     assert provider_a_usage[0].last_error == "daily limit"
     assert provider_a_usage[0].invalid_key is True
     assert provider_a_usage[0].quota_exhausted_at is not None
+    assert await redis_client.sismember(
+        RedisApiKeyQuota.google_invalid_keys_key("provider-a"),
+        RedisApiKeyQuota.hash_api_key("sk-test"),
+    )
     assert len(provider_b_usage) == 1
     assert provider_b_usage[0].invalid_key is False
 
@@ -532,6 +536,7 @@ async def test_mark_quota_cooldown_round_trips_and_clears_on_daily_reset(monkeyp
     monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())
     monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
     monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
     monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
 
     await RedisApiKeyQuota.get_or_create_quota("sk-cool", "provider-c", "gemini-3.1-flash-lite")
@@ -556,3 +561,179 @@ async def test_mark_quota_cooldown_round_trips_and_clears_on_daily_reset(monkeyp
 
     usage_after = await RedisApiKeyQuota.get_provider_usage("provider-c")
     assert usage_after[0].quota_cooldown_until is None
+
+
+@pytest.mark.asyncio
+async def test_select_google_api_key_uses_serial_rotary_order_per_model(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    first = await RedisApiKeyQuota.select_google_api_key(
+        provider_id="provider-rr",
+        model_name="gemini-2.5-flash-lite",
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+    second = await RedisApiKeyQuota.select_google_api_key(
+        provider_id="provider-rr",
+        model_name="gemini-2.5-flash-lite",
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+    third = await RedisApiKeyQuota.select_google_api_key(
+        provider_id="provider-rr",
+        model_name="gemini-2.5-flash-lite",
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+    other_model = await RedisApiKeyQuota.select_google_api_key(
+        provider_id="provider-rr",
+        model_name="gemini-2.0-flash",
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+
+    assert first["status"] == "ok"
+    assert first["selected_index"] == 0
+    assert second["selected_index"] == 1
+    assert third["selected_index"] == 0
+    assert other_model["selected_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_select_google_api_key_skips_cooling_and_observed_exhausted_keys(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    model_name = "gemini-2.5-flash-lite"
+    provider_id = "provider-skip"
+    await RedisApiKeyQuota.get_or_create_quota("key-1", provider_id, model_name)
+    await RedisApiKeyQuota.get_or_create_quota("key-2", provider_id, model_name)
+
+    cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=30)
+    await RedisApiKeyQuota.mark_quota_cooldown("key-1", provider_id, model_name, cooldown_until, "per-minute limit")
+
+    exhausted_key_hash = RedisApiKeyQuota.hash_api_key("key-2")
+    exhausted_quota_key = f"quota:{provider_id}:{exhausted_key_hash}:{model_name}"
+    await redis_client.hset(
+        exhausted_quota_key,
+        mapping={
+            "quota_exhausted_at": datetime.now(timezone.utc).isoformat(),
+            "last_reset": redis_backend_module._current_pacific_date(),
+            "last_reset_date": redis_backend_module._current_pacific_date(),
+        },
+    )
+
+    selection = await RedisApiKeyQuota.select_google_api_key(
+        provider_id=provider_id,
+        model_name=model_name,
+        api_keys=["key-1", "key-2", "key-3"],
+        model_limit=1000,
+    )
+
+    assert selection["status"] == "ok"
+    assert selection["selected_index"] == 2
+
+
+@pytest.mark.asyncio
+async def test_select_google_api_key_does_not_preemptively_exclude_by_request_count(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    provider_id = "provider-count"
+    model_name = "gemini-2.5-flash-lite"
+    await RedisApiKeyQuota.get_or_create_quota("key-1", provider_id, model_name)
+
+    quota_key = f"quota:{provider_id}:{RedisApiKeyQuota.hash_api_key('key-1')}:{model_name}"
+    await redis_client.hset(
+        quota_key,
+        mapping={
+            "requests_today": "1000",
+            "last_reset": redis_backend_module._current_pacific_date(),
+            "last_reset_date": redis_backend_module._current_pacific_date(),
+        },
+    )
+
+    selection = await RedisApiKeyQuota.select_google_api_key(
+        provider_id=provider_id,
+        model_name=model_name,
+        api_keys=["key-1"],
+        model_limit=1000,
+    )
+
+    assert selection["status"] == "ok"
+    assert selection["selected_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_select_google_api_key_returns_retry_when_all_keys_cooling_down(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    provider_id = "provider-cool"
+    model_name = "gemini-3.1-flash-lite"
+    await RedisApiKeyQuota.get_or_create_quota("key-1", provider_id, model_name)
+    await RedisApiKeyQuota.get_or_create_quota("key-2", provider_id, model_name)
+
+    await RedisApiKeyQuota.mark_quota_cooldown(
+        "key-1",
+        provider_id,
+        model_name,
+        datetime.now(timezone.utc) + timedelta(seconds=60),
+        "per-minute limit",
+    )
+    await RedisApiKeyQuota.mark_quota_cooldown(
+        "key-2",
+        provider_id,
+        model_name,
+        datetime.now(timezone.utc) + timedelta(seconds=20),
+        "per-minute limit",
+    )
+
+    selection = await RedisApiKeyQuota.select_google_api_key(
+        provider_id=provider_id,
+        model_name=model_name,
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+
+    assert selection["status"] == "none_available"
+    assert selection["cooling_down_count"] == 2
+    assert selection["exhausted_count"] == 0
+    assert 0 < selection["retry_after_seconds"] <= 25
+
+
+@pytest.mark.asyncio
+async def test_select_google_api_key_skips_provider_invalid_key_even_without_model_quota(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_google_selector_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    provider_id = "provider-invalid"
+    invalid_hash = RedisApiKeyQuota.hash_api_key("key-1")
+    await redis_client.sadd(RedisApiKeyQuota.google_invalid_keys_key(provider_id), invalid_hash)
+
+    selection = await RedisApiKeyQuota.select_google_api_key(
+        provider_id=provider_id,
+        model_name="gemini-2.5-flash-lite",
+        api_keys=["key-1", "key-2"],
+        model_limit=1000,
+    )
+
+    assert selection["status"] == "ok"
+    assert selection["selected_index"] == 1
+    assert selection["invalid_count"] == 1

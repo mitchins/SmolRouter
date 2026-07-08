@@ -8,7 +8,7 @@ for high-throughput concurrent operations, replacing SQLite bottlenecks.
 import logging
 import os
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Mapping, TypedDict, Unpack
 from zoneinfo import ZoneInfo
 
@@ -59,6 +59,95 @@ for _, request_id in ipairs(ids) do
 end
 
 return records
+"""
+GOOGLE_ROTARY_SELECTOR_LUA_SCRIPT = """
+local counter_key = KEYS[1]
+local provider_id = ARGV[1]
+local model_name = ARGV[2]
+local today = ARGV[3]
+local now_iso = ARGV[4]
+local model_limit = tonumber(ARGV[5]) or 0
+local key_count = #ARGV - 5
+
+if key_count <= 0 then
+    return {
+        "status", "no_keys",
+        "selected_index", "",
+        "selected_key_hash", "",
+        "invalid_count", "0",
+        "cooling_down_count", "0",
+        "exhausted_count", "0",
+        "soonest_cooldown_until", ""
+    }
+end
+
+local counter = tonumber(redis.call("GET", counter_key) or "0")
+local invalid_key_set = "google_invalid_keys:" .. provider_id
+local invalid_count = 0
+local cooling_down_count = 0
+local exhausted_count = 0
+local soonest_cooldown_until = ""
+
+for offset = 0, key_count - 1 do
+    local idx = (counter + offset) % key_count
+    local key_hash = ARGV[6 + idx]
+    local quota_key = "quota:" .. provider_id .. ":" .. key_hash .. ":" .. model_name
+
+    if redis.call("SISMEMBER", invalid_key_set, key_hash) == 1 then
+        invalid_count = invalid_count + 1
+    else
+    local invalid_key = redis.call("HGET", quota_key, "invalid_key")
+    if invalid_key ~= "true" and invalid_key ~= "1" then
+        local last_reset = redis.call("HGET", quota_key, "last_reset")
+        if not last_reset or last_reset == "" then
+            last_reset = redis.call("HGET", quota_key, "last_reset_date")
+        end
+
+        local quota_exhausted_at = redis.call("HGET", quota_key, "quota_exhausted_at")
+        local cooldown_until = redis.call("HGET", quota_key, "quota_cooldown_until")
+        local reset_is_today = last_reset == today
+        local quota_exhausted_today = reset_is_today and quota_exhausted_at and quota_exhausted_at ~= ""
+        local is_cooling_down = cooldown_until and cooldown_until ~= "" and cooldown_until > now_iso
+
+        if is_cooling_down then
+            cooling_down_count = cooling_down_count + 1
+            if soonest_cooldown_until == "" or cooldown_until < soonest_cooldown_until then
+                soonest_cooldown_until = cooldown_until
+            end
+        elseif quota_exhausted_today then
+            exhausted_count = exhausted_count + 1
+        else
+            redis.call("SET", counter_key, tostring(idx + 1))
+            return {
+                "status", "ok",
+                "selected_index", tostring(idx),
+                "selected_key_hash", key_hash,
+                "invalid_count", tostring(invalid_count),
+                "cooling_down_count", tostring(cooling_down_count),
+                "exhausted_count", tostring(exhausted_count),
+                "soonest_cooldown_until", soonest_cooldown_until
+            }
+        end
+    else
+        invalid_count = invalid_count + 1
+    end
+    end
+end
+
+local status = "none_available"
+if invalid_count == key_count then
+    status = "all_invalid"
+end
+
+return {
+    "status", status,
+    "selected_index", "",
+    "selected_key_hash", "",
+    "invalid_count", tostring(invalid_count),
+    "cooling_down_count", tostring(cooling_down_count),
+    "exhausted_count", tostring(exhausted_count),
+    "soonest_cooldown_until", soonest_cooldown_until
+}
 """
 REQUEST_LOG_CREATE_OPTION_KEYS = frozenset(
     {
@@ -114,6 +203,13 @@ REQUEST_LOG_COMPLETION_NUMERIC_FIELDS = ("api_key_index", "api_key_total")
 
 def _current_pacific_date() -> str:
     return datetime.now(PACIFIC_TZ).strftime("%Y-%m-%d")
+
+
+def _seconds_until_pacific_midnight(now_utc: Optional[datetime] = None) -> int:
+    now = now_utc or datetime.now(timezone.utc)
+    now_pacific = now.astimezone(PACIFIC_TZ)
+    tomorrow_pacific = (now_pacific + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((tomorrow_pacific - now_pacific).total_seconds())
 
 
 def _to_pacific_datetime(value: datetime, assume_utc: bool = False) -> datetime:
@@ -998,6 +1094,7 @@ class RedisApiKeyQuota:
     """Redis-based API key quota tracking with atomic counters"""
 
     _script_sha: Optional[str] = None  # Class variable to store loaded script SHA
+    _google_selector_script_sha: Optional[str] = None
     _script_initialized: bool = False
     _lua_disabled: bool = False  # When true, use pipeline fallback (e.g., FakeRedis/tests)
 
@@ -1022,8 +1119,13 @@ class RedisApiKeyQuota:
 
         try:
             cls._script_sha = await redis_client.script_load(QUOTA_UPDATE_SCRIPT)
+            cls._google_selector_script_sha = await redis_client.script_load(GOOGLE_ROTARY_SELECTOR_LUA_SCRIPT)
             cls._script_initialized = True
-            logger.info(f"✅ Lua script loaded successfully: {cls._script_sha}")
+            logger.info(
+                "✅ Lua scripts loaded successfully: quota=%s selector=%s",
+                cls._script_sha,
+                cls._google_selector_script_sha,
+            )
         except Exception as e:
             logger.exception("❌ FATAL: Failed to load Lua script into Redis")
             logger.critical("⚠️  Server CANNOT start without functional quota tracking")
@@ -1033,6 +1135,14 @@ class RedisApiKeyQuota:
     def hash_api_key(api_key: str) -> str:
         """Create hash of API key for identification"""
         return hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def google_rotary_counter_key(provider_id: str, model_name: str) -> str:
+        return f"google_rr:{provider_id}:{model_name}"
+
+    @staticmethod
+    def google_invalid_keys_key(provider_id: str) -> str:
+        return f"google_invalid_keys:{provider_id}"
 
     @staticmethod
     async def get_or_create_quota(
@@ -1191,6 +1301,176 @@ class RedisApiKeyQuota:
 
         return quota_data
 
+    @classmethod
+    async def _select_google_api_key_with_pipeline_fallback(
+        cls,
+        client: Any,
+        provider_id: str,
+        model_name: str,
+        key_hashes: List[str],
+        today: str,
+        now_iso: str,
+        model_limit: int,
+    ) -> Dict[str, Any]:
+        counter_key = cls.google_rotary_counter_key(provider_id, model_name)
+        invalid_key_set = cls.google_invalid_keys_key(provider_id)
+        counter_raw = await client.get(counter_key)
+        counter = int(counter_raw or 0)
+        now_dt = _normalize_datetime(now_iso) or datetime.now(timezone.utc)
+        invalid_key_hashes = {str(key_hash) for key_hash in (await client.smembers(invalid_key_set))}
+        invalid_count = 0
+        soonest_cooldown_until: Optional[datetime] = None
+        cooling_down_count = 0
+        exhausted_count = 0
+
+        for offset in range(len(key_hashes)):
+            idx = (counter + offset) % len(key_hashes)
+            key_hash = key_hashes[idx]
+            quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
+
+            if key_hash in invalid_key_hashes:
+                invalid_count += 1
+                continue
+
+            quota_data = await client.hgetall(quota_key)
+
+            if not quota_data:
+                await client.set(counter_key, idx + 1)
+                return {
+                    "status": "ok",
+                    "selected_index": idx,
+                    "selected_key_hash": key_hash,
+                    "invalid_count": invalid_count,
+                    "cooling_down_count": cooling_down_count,
+                    "exhausted_count": exhausted_count,
+                    "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
+                    "retry_after_seconds": 0,
+                }
+
+            quota = QuotaRecord(quota_data)
+            if quota.invalid_key:
+                invalid_count += 1
+                continue
+
+            reset_is_today = quota.last_reset_date == today
+            if quota.quota_cooldown_until and quota.quota_cooldown_until > now_dt:
+                cooling_down_count += 1
+                if soonest_cooldown_until is None or quota.quota_cooldown_until < soonest_cooldown_until:
+                    soonest_cooldown_until = quota.quota_cooldown_until
+                continue
+
+            if reset_is_today and quota.quota_exhausted_at:
+                exhausted_count += 1
+                continue
+
+            await client.set(counter_key, idx + 1)
+            return {
+                "status": "ok",
+                "selected_index": idx,
+                "selected_key_hash": key_hash,
+                "invalid_count": invalid_count,
+                "cooling_down_count": cooling_down_count,
+                "exhausted_count": exhausted_count,
+                "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
+                "retry_after_seconds": 0,
+            }
+
+        retry_after_seconds = (
+            max(int((soonest_cooldown_until - now_dt).total_seconds()), 0) if soonest_cooldown_until else _seconds_until_pacific_midnight(now_dt)
+        )
+        status = "all_invalid" if invalid_count == len(key_hashes) else "none_available"
+        return {
+            "status": status,
+            "selected_index": None,
+            "selected_key_hash": "",
+            "invalid_count": invalid_count,
+            "cooling_down_count": cooling_down_count,
+            "exhausted_count": exhausted_count,
+            "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
+            "retry_after_seconds": retry_after_seconds,
+        }
+
+    @classmethod
+    async def select_google_api_key(
+        cls,
+        provider_id: str,
+        model_name: str,
+        api_keys: List[str],
+        model_limit: int,
+    ) -> Dict[str, Any]:
+        """Atomically select the next eligible Google API key in serial rotary order."""
+        if not api_keys:
+            return {
+                "status": "no_keys",
+                "selected_index": None,
+                "selected_key_hash": "",
+                "invalid_count": 0,
+                "cooling_down_count": 0,
+                "exhausted_count": 0,
+                "soonest_cooldown_until": "",
+                "retry_after_seconds": 0,
+            }
+
+        client = get_redis()
+        today = _current_pacific_date()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        now_dt = _normalize_datetime(now_iso) or datetime.now(timezone.utc)
+        key_hashes = [cls.hash_api_key(api_key) for api_key in api_keys]
+        counter_key = cls.google_rotary_counter_key(provider_id, model_name)
+
+        if not cls._script_initialized or cls._google_selector_script_sha is None:
+            if not _is_lua_fallback_enabled(cls._lua_disabled):
+                error_msg = "❌ FATAL: Google selector script not initialized - call initialize_lua_script() during startup"
+                logger.critical(error_msg)
+                raise RuntimeError(error_msg)
+            return await cls._select_google_api_key_with_pipeline_fallback(
+                client, provider_id, model_name, key_hashes, today, now_iso, model_limit
+            )
+
+        try:
+            result = await client.evalsha(
+                cls._google_selector_script_sha,
+                1,
+                counter_key,
+                provider_id,
+                model_name,
+                today,
+                now_iso,
+                str(model_limit),
+                *key_hashes,
+            )
+            selection = _flat_pairs_to_dict(result)
+        except Exception as e:
+            if _should_use_increment_fallback(e, cls._lua_disabled):
+                return await cls._select_google_api_key_with_pipeline_fallback(
+                    client, provider_id, model_name, key_hashes, today, now_iso, model_limit
+                )
+            logger.exception("❌ FATAL: Google selector Lua script execution failed")
+            raise RuntimeError(f"Google selector BROKEN - Lua script failed: {e}") from e
+
+        selected_index_raw = selection.get("selected_index")
+        selected_index = int(selected_index_raw) if selected_index_raw not in REDIS_EMPTY_VALUES else None
+        soonest_cooldown_until = str(selection.get("soonest_cooldown_until") or "")
+        retry_after_seconds = 0
+        if selection.get("status") != "ok":
+            if soonest_cooldown_until:
+                cooldown_dt = _normalize_datetime(soonest_cooldown_until)
+                if cooldown_dt is not None:
+                    retry_after_seconds = max(int((cooldown_dt - now_dt).total_seconds()), 0)
+            if retry_after_seconds == 0:
+                retry_after_seconds = _seconds_until_pacific_midnight(now_dt)
+
+        return {
+            "status": str(selection.get("status") or "none_available"),
+            "selected_index": selected_index,
+            "selected_key_hash": str(selection.get("selected_key_hash") or ""),
+            "invalid_count": int(selection.get("invalid_count") or 0),
+            "cooling_down_count": int(selection.get("cooling_down_count") or 0),
+            "exhausted_count": int(selection.get("exhausted_count") or 0),
+            "soonest_cooldown_until": soonest_cooldown_until,
+            "retry_after_seconds": retry_after_seconds,
+        }
+
     @staticmethod
     async def get_provider_usage(provider_id: str) -> List["QuotaRecord"]:
         """Get all quota entries for a provider"""
@@ -1221,6 +1501,7 @@ class RedisApiKeyQuota:
 
         # Get all quota keys for this key hash
         quota_keys = await client.smembers(f"quotas:by_key:{api_key_hash}")
+        await client.sadd(RedisApiKeyQuota.google_invalid_keys_key(provider_name), api_key_hash)
 
         count = 0
         for quota_key in quota_keys:
