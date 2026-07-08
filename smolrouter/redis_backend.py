@@ -66,6 +66,9 @@ local provider_id = ARGV[1]
 local model_name = ARGV[2]
 local today = ARGV[3]
 local now_iso = ARGV[4]
+-- Reserved for future predictive heuristics. Rotary selection intentionally
+-- does not preempt keys by request count; availability wins until a key is
+-- actually cooling down, exhausted for the day, or invalid.
 local model_limit = tonumber(ARGV[5]) or 0
 local key_count = #ARGV - 5
 
@@ -1312,6 +1315,9 @@ class RedisApiKeyQuota:
         now_iso: str,
         model_limit: int,
     ) -> Dict[str, Any]:
+        # Keep the fallback signature aligned with the Lua selector even though
+        # rotary selection no longer uses predictive request-count exclusion.
+        _ = model_limit
         counter_key = cls.google_rotary_counter_key(provider_id, model_name)
         invalid_key_set = cls.google_invalid_keys_key(provider_id)
         counter_raw = await client.get(counter_key)
@@ -1398,7 +1404,11 @@ class RedisApiKeyQuota:
         api_keys: List[str],
         model_limit: int,
     ) -> Dict[str, Any]:
-        """Atomically select the next eligible Google API key in serial rotary order."""
+        """Atomically select the next eligible Google API key in serial rotary order.
+
+        ``model_limit`` is intentionally threaded through for selector parity, but
+        rotary selection does not preemptively exclude keys by request count.
+        """
         if not api_keys:
             return {
                 "status": "no_keys",
