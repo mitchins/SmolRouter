@@ -1154,9 +1154,19 @@ class GoogleGenAIProvider(IModelProvider):
             return
 
         quota_percentage = (quota.requests_today / model_limit) * 100
-        if quota.requests_today >= model_limit:
+        if quota.quota_exhausted_at is not None:
             logger.error(
                 f"🚫 API key {redact_secret(api_key)} / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
+            )
+        elif quota.requests_today >= model_limit:
+            logger.warning(
+                "API key %s / %s exceeded configured daily estimate after a successful request: %s/%s (%.1f%%). "
+                "Not treating this as confirmed exhaustion without a provider 429.",
+                redact_secret(api_key),
+                model_name,
+                quota.requests_today,
+                model_limit,
+                quota_percentage,
             )
         elif quota.requests_today >= (model_limit * 0.8):
             logger.warning(
@@ -3232,7 +3242,11 @@ class GoogleGenAIProvider(IModelProvider):
 
             model_limit = self.get_model_daily_limit(model)
             quota_percentage = (quota.requests_today / model_limit) * 100
-            is_exhausted = quota.requests_today >= model_limit or quota.quota_exhausted_at is not None
+            # Requests can legitimately exceed our configured estimate if Google's
+            # live limit changed or our heuristic is conservative. Only a provider-
+            # confirmed exhaustion marker should surface as "exhausted".
+            is_exhausted = quota.quota_exhausted_at is not None
+            daily_limit_estimate_exceeded = quota.requests_today >= model_limit
             last_request = _format_optional_datetime(quota.updated_at)
             quota_exhausted_at = _format_optional_datetime(quota.quota_exhausted_at)
 
@@ -3245,6 +3259,7 @@ class GoogleGenAIProvider(IModelProvider):
                 "quota_percentage": quota_percentage,
                 "quota_exhausted": is_exhausted,
                 "quota_exhausted_at": quota_exhausted_at,
+                "daily_limit_estimate_exceeded": daily_limit_estimate_exceeded,
                 "status": _quota_status(quota.invalid_key, is_exhausted),
             }
 

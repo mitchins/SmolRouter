@@ -1052,6 +1052,59 @@ async def test_google_genai_get_api_key_stats_groups_used_and_unused_keys():
     assert used_entry["quota_exhausted"] is True
 
 
+def test_google_genai_log_quota_status_treats_estimate_overage_as_warning(caplog):
+    provider = _make_google_provider()
+    quota = QuotaRecord(
+        {
+            "api_key_hash": "abcdef1234567890",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 43,
+            "tokens_today": 11,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+
+    with caplog.at_level(logging.WARNING, logger="smolrouter.google_genai_provider"):
+        provider._log_quota_status("used-key", "gemini-3.1-flash-lite", quota)
+
+    assert "DAILY LIMIT REACHED" not in caplog.text
+    assert "exceeded configured daily estimate after a successful request" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_google_genai_get_api_key_stats_does_not_mark_estimate_only_overage_as_exhausted():
+    provider = _make_google_provider(api_keys=["used-key"])
+    used_quota = QuotaRecord(
+        {
+            "api_key_hash": "abcdef1234567890",
+            "model_name": "gemini-3.1-flash-lite",
+            "requests_today": 43,
+            "tokens_today": 11,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    api_key_backend = SimpleNamespace(
+        get_provider_usage=AsyncMock(return_value=[used_quota]),
+        hash_api_key=lambda api_key: "abcdef1234567890",
+    )
+
+    with patch("smolrouter.google_genai_provider.ApiKeyQuota", api_key_backend):
+        stats = await provider.get_api_key_stats(include_unused_models=True)
+
+    used_entry = stats["abcdef12..."]["models"]["gemini-3.1-flash-lite"]
+    assert used_entry["quota_percentage"] == 215.0
+    assert used_entry["quota_exhausted"] is False
+    assert used_entry["daily_limit_estimate_exceeded"] is True
+    assert used_entry["status"] == "available"
+
+
 @pytest.mark.asyncio
 async def test_google_genai_probe_proxy_url_marks_invalid_and_successful_hosts():
     provider = _make_google_provider()
