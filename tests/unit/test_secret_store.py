@@ -11,6 +11,7 @@ from smolrouter.secret_store import (
     reload_secrets,
     redact_secret,
     resolve_config_file,
+    secret_suffix,
     secrets_search_paths,
 )
 
@@ -267,3 +268,11 @@ def test_redact_secret_no_full_key_leaked_in_google_provider_init_logs(caplog):
         GoogleGenAIProvider(config)
 
     assert full_key not in caplog.text
+
+
+def test_redact_secret_uses_suffix_for_distinguishing_google_keys():
+    full_key = "AIzaSyExampleKey1234567890abcdefgh"
+
+    assert secret_suffix(full_key) == "abcdefgh"
+    assert redact_secret(full_key) == "…abcdefgh"
+    assert "AIzaS" not in redact_secret(full_key)

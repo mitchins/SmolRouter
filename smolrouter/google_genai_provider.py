@@ -27,7 +27,7 @@ from google.api_core.exceptions import ResourceExhausted, PermissionDenied, Inva
 
 from .config_loading import load_config_entries
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
-from .secret_store import redact_secret, resolve_config_file, secrets_search_paths
+from .secret_store import redact_secret, resolve_config_file, secret_suffix, secrets_search_paths
 from .database import ApiKeyQuota
 from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
@@ -2509,7 +2509,7 @@ class GoogleGenAIProvider(IModelProvider):
         context.endpoint = endpoint
         context.model_name = self._normalize_model_name(openai_request.get("model", ""))
         context.api_key = await self._select_best_api_key(context.model_name)
-        context.api_key_suffix = redact_secret(context.api_key)
+        context.api_key_suffix = secret_suffix(context.api_key)
         context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
         context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
             context.model_name
@@ -2849,7 +2849,7 @@ class GoogleGenAIProvider(IModelProvider):
         context.tts_audio_format = self._get_tts_audio_format(openai_request) if context.tts_request else "pcm"
         context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request, endpoint)
         context.api_key = await self._select_best_api_key(context.model_name)
-        context.api_key_suffix = redact_secret(context.api_key)
+        context.api_key_suffix = secret_suffix(context.api_key)
         context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
         context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
             context.model_name

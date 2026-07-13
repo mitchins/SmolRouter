@@ -181,17 +181,26 @@ def get_facade_key_secrets(facade_key_id: str) -> List[str]:
     return list((load_facade_key_secrets() if facade_key_id else {}).get(facade_key_id, []))
 
 
-def redact_secret(value: str | None) -> str:
-    """Redact a secret for logging."""
+def secret_suffix(value: str | None, width: int = 8) -> str:
+    """Return a non-sensitive trailing fragment for correlation."""
 
     if not value:
-        return "***"
+        return ""
 
     text = value.strip()
     if not text:
-        return "***"
+        return ""
 
-    if len(text) <= 5:
-        return "***"
+    if len(text) <= width:
+        return text if len(text) > 4 else ""
 
-    return f"{text[:5]}…"
+    return text[-width:]
+
+
+def redact_secret(value: str | None) -> str:
+    """Redact a secret for logging."""
+
+    suffix = secret_suffix(value)
+    if not suffix:
+        return "***"
+    return f"…{suffix}"
