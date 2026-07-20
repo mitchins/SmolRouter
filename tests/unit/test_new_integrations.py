@@ -2738,9 +2738,10 @@ def test_google_genai_config_loads_env_style_api_keys_file(tmp_path):
 def test_google_genai_config_rejects_empty_api_key_file(tmp_path):
     key_file = tmp_path / "google_keys.txt"
     key_file.write_text("# still empty\n\n")
+    config_kwargs = {"name": "test", "type": "google-genai", "enabled": True, "api_keys_file": str(key_file)}
 
     with pytest.raises(ValueError, match="No valid API keys found"):
-        GoogleGenAIConfig(name="test", type="google-genai", enabled=True, api_keys_file=str(key_file))
+        GoogleGenAIConfig(**config_kwargs)
 
 
 def test_anthropic_config_loads_api_keys_file_once_during_init(tmp_path):
@@ -2778,15 +2779,16 @@ def test_anthropic_config_loads_env_style_api_keys_file(tmp_path):
 
 def test_anthropic_config_raises_when_api_keys_file_is_missing(tmp_path):
     missing_file = tmp_path / "missing.txt"
+    config_kwargs = {
+        "name": "test",
+        "type": "anthropic",
+        "enabled": True,
+        "url": "https://api.anthropic.com",
+        "api_keys_file": str(missing_file),
+    }
 
     with pytest.raises(ValueError, match="API key file not found"):
-        AnthropicConfig(
-            name="test",
-            type="anthropic",
-            enabled=True,
-            url="https://api.anthropic.com",
-            api_keys_file=str(missing_file),
-        )
+        AnthropicConfig(**config_kwargs)
 
 
 def test_anthropic_request_format_conversion():

@@ -1324,74 +1324,80 @@ class RedisApiKeyQuota:
         counter = int(counter_raw or 0)
         now_dt = _normalize_datetime(now_iso) or datetime.now(timezone.utc)
         invalid_key_hashes = {str(key_hash) for key_hash in (await client.smembers(invalid_key_set))}
-        invalid_count = 0
+        counts = {"invalid": 0, "cooling_down": 0, "exhausted": 0}
         soonest_cooldown_until: Optional[datetime] = None
-        cooling_down_count = 0
-        exhausted_count = 0
 
         for offset in range(len(key_hashes)):
             idx = (counter + offset) % len(key_hashes)
             key_hash = key_hashes[idx]
-            quota_key = f"quota:{provider_id}:{key_hash}:{model_name}"
+            availability, cooldown_until = await cls._get_google_api_key_fallback_availability(
+                client, provider_id, model_name, key_hash, invalid_key_hashes, today, now_dt
+            )
 
-            if key_hash in invalid_key_hashes:
-                invalid_count += 1
-                continue
-
-            quota_data = await client.hgetall(quota_key)
-
-            if not quota_data:
-                await client.set(counter_key, idx + 1)
-                return {
-                    "status": "ok",
-                    "selected_index": idx,
-                    "selected_key_hash": key_hash,
-                    "invalid_count": invalid_count,
-                    "cooling_down_count": cooling_down_count,
-                    "exhausted_count": exhausted_count,
-                    "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
-                    "retry_after_seconds": 0,
-                }
-
-            quota = QuotaRecord(quota_data)
-            if quota.invalid_key:
-                invalid_count += 1
-                continue
-
-            reset_is_today = quota.last_reset_date == today
-            if quota.quota_cooldown_until and quota.quota_cooldown_until > now_dt:
-                cooling_down_count += 1
-                if soonest_cooldown_until is None or quota.quota_cooldown_until < soonest_cooldown_until:
-                    soonest_cooldown_until = quota.quota_cooldown_until
-                continue
-
-            if reset_is_today and quota.quota_exhausted_at:
-                exhausted_count += 1
+            if availability != "available":
+                counts[availability] += 1
+                if cooldown_until is not None:
+                    soonest_cooldown_until = cls._earlier_cooldown(soonest_cooldown_until, cooldown_until)
                 continue
 
             await client.set(counter_key, idx + 1)
-            return {
-                "status": "ok",
-                "selected_index": idx,
-                "selected_key_hash": key_hash,
-                "invalid_count": invalid_count,
-                "cooling_down_count": cooling_down_count,
-                "exhausted_count": exhausted_count,
-                "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
-                "retry_after_seconds": 0,
-            }
+            return cls._google_api_key_selection_result("ok", idx, key_hash, counts, soonest_cooldown_until, 0)
 
         retry_after_seconds = (
             max(int((soonest_cooldown_until - now_dt).total_seconds()), 0) if soonest_cooldown_until else _seconds_until_pacific_midnight(now_dt)
         )
-        status = "all_invalid" if invalid_count == len(key_hashes) else "none_available"
+        status = "all_invalid" if counts["invalid"] == len(key_hashes) else "none_available"
+        return cls._google_api_key_selection_result(status, None, "", counts, soonest_cooldown_until, retry_after_seconds)
+
+    @staticmethod
+    async def _get_google_api_key_fallback_availability(
+        client: Any,
+        provider_id: str,
+        model_name: str,
+        key_hash: str,
+        invalid_key_hashes: set[str],
+        today: str,
+        now_dt: datetime,
+    ) -> tuple[str, Optional[datetime]]:
+        """Classify one fallback key using the same order as the Lua selector."""
+        if key_hash in invalid_key_hashes:
+            return "invalid", None
+
+        quota_data = await client.hgetall(f"quota:{provider_id}:{key_hash}:{model_name}")
+        if not quota_data:
+            return "available", None
+
+        quota = QuotaRecord(quota_data)
+        if quota.invalid_key:
+            return "invalid", None
+        if quota.quota_cooldown_until and quota.quota_cooldown_until > now_dt:
+            return "cooling_down", quota.quota_cooldown_until
+        if quota.last_reset_date == today and quota.quota_exhausted_at:
+            return "exhausted", None
+        return "available", None
+
+    @staticmethod
+    def _earlier_cooldown(current: Optional[datetime], candidate: datetime) -> datetime:
+        if current is None or candidate < current:
+            return candidate
+        return current
+
+    @staticmethod
+    def _google_api_key_selection_result(
+        status: str,
+        selected_index: Optional[int],
+        selected_key_hash: str,
+        counts: Mapping[str, int],
+        soonest_cooldown_until: Optional[datetime],
+        retry_after_seconds: int,
+    ) -> Dict[str, Any]:
         return {
             "status": status,
-            "selected_index": None,
-            "selected_key_hash": "",
-            "invalid_count": invalid_count,
-            "cooling_down_count": cooling_down_count,
-            "exhausted_count": exhausted_count,
+            "selected_index": selected_index,
+            "selected_key_hash": selected_key_hash,
+            "invalid_count": counts["invalid"],
+            "cooling_down_count": counts["cooling_down"],
+            "exhausted_count": counts["exhausted"],
             "soonest_cooldown_until": soonest_cooldown_until.isoformat() if soonest_cooldown_until else "",
             "retry_after_seconds": retry_after_seconds,
         }
@@ -1410,16 +1416,9 @@ class RedisApiKeyQuota:
         rotary selection does not preemptively exclude keys by request count.
         """
         if not api_keys:
-            return {
-                "status": "no_keys",
-                "selected_index": None,
-                "selected_key_hash": "",
-                "invalid_count": 0,
-                "cooling_down_count": 0,
-                "exhausted_count": 0,
-                "soonest_cooldown_until": "",
-                "retry_after_seconds": 0,
-            }
+            return cls._google_api_key_selection_result(
+                "no_keys", None, "", {"invalid": 0, "cooling_down": 0, "exhausted": 0}, None, 0
+            )
 
         client = get_redis()
         today = _current_pacific_date()
@@ -1428,14 +1427,31 @@ class RedisApiKeyQuota:
         key_hashes = [cls.hash_api_key(api_key) for api_key in api_keys]
         counter_key = cls.google_rotary_counter_key(provider_id, model_name)
 
+        selection = await cls._run_google_api_key_selector(
+            client, counter_key, provider_id, model_name, key_hashes, today, now_iso, model_limit
+        )
+        return cls._format_google_api_key_selection(selection, now_dt)
+
+    @classmethod
+    async def _run_google_api_key_selector(
+        cls,
+        client: Any,
+        counter_key: str,
+        provider_id: str,
+        model_name: str,
+        key_hashes: List[str],
+        today: str,
+        now_iso: str,
+        model_limit: int,
+    ) -> Dict[str, Any]:
         if not cls._script_initialized or cls._google_selector_script_sha is None:
-            if not _is_lua_fallback_enabled(cls._lua_disabled):
-                error_msg = "❌ FATAL: Google selector script not initialized - call initialize_lua_script() during startup"
-                logger.critical(error_msg)
-                raise RuntimeError(error_msg)
-            return await cls._select_google_api_key_with_pipeline_fallback(
-                client, provider_id, model_name, key_hashes, today, now_iso, model_limit
-            )
+            if _is_lua_fallback_enabled(cls._lua_disabled):
+                return await cls._select_google_api_key_with_pipeline_fallback(
+                    client, provider_id, model_name, key_hashes, today, now_iso, model_limit
+                )
+            error_msg = "❌ FATAL: Google selector script not initialized - call initialize_lua_script() during startup"
+            logger.critical(error_msg)
+            raise RuntimeError(error_msg)
 
         try:
             result = await client.evalsha(
@@ -1449,26 +1465,21 @@ class RedisApiKeyQuota:
                 str(model_limit),
                 *key_hashes,
             )
-            selection = _flat_pairs_to_dict(result)
-        except Exception as e:
-            if _should_use_increment_fallback(e, cls._lua_disabled):
+        except Exception as error:
+            if _should_use_increment_fallback(error, cls._lua_disabled):
                 return await cls._select_google_api_key_with_pipeline_fallback(
                     client, provider_id, model_name, key_hashes, today, now_iso, model_limit
                 )
             logger.exception("❌ FATAL: Google selector Lua script execution failed")
-            raise RuntimeError(f"Google selector BROKEN - Lua script failed: {e}") from e
+            raise RuntimeError(f"Google selector BROKEN - Lua script failed: {error}") from error
+        return _flat_pairs_to_dict(result)
 
+    @staticmethod
+    def _format_google_api_key_selection(selection: Mapping[str, Any], now_dt: datetime) -> Dict[str, Any]:
         selected_index_raw = selection.get("selected_index")
         selected_index = int(selected_index_raw) if selected_index_raw not in REDIS_EMPTY_VALUES else None
         soonest_cooldown_until = str(selection.get("soonest_cooldown_until") or "")
-        retry_after_seconds = 0
-        if selection.get("status") != "ok":
-            if soonest_cooldown_until:
-                cooldown_dt = _normalize_datetime(soonest_cooldown_until)
-                if cooldown_dt is not None:
-                    retry_after_seconds = max(int((cooldown_dt - now_dt).total_seconds()), 0)
-            if retry_after_seconds == 0:
-                retry_after_seconds = _seconds_until_pacific_midnight(now_dt)
+        retry_after_seconds = RedisApiKeyQuota._google_api_key_retry_after(selection, soonest_cooldown_until, now_dt)
 
         return {
             "status": str(selection.get("status") or "none_available"),
@@ -1480,6 +1491,17 @@ class RedisApiKeyQuota:
             "soonest_cooldown_until": soonest_cooldown_until,
             "retry_after_seconds": retry_after_seconds,
         }
+
+    @staticmethod
+    def _google_api_key_retry_after(selection: Mapping[str, Any], cooldown_until: str, now_dt: datetime) -> int:
+        if selection.get("status") == "ok":
+            return 0
+        cooldown_dt = _normalize_datetime(cooldown_until) if cooldown_until else None
+        if cooldown_dt is not None:
+            retry_after_seconds = max(int((cooldown_dt - now_dt).total_seconds()), 0)
+            if retry_after_seconds:
+                return retry_after_seconds
+        return _seconds_until_pacific_midnight(now_dt)
 
     @staticmethod
     async def get_provider_usage(provider_id: str) -> List["QuotaRecord"]:
