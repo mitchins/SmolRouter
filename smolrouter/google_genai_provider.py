@@ -259,7 +259,8 @@ class GoogleGenAIConfig(ProviderConfig):
     proxy_pool: Optional[List[Optional["ProxyConfig"]]] = None
     proxy_pool_enabled: bool = False  # Master switch for proxy pooling
 
-    # Predictive 429 configuration (defaults to disabled)
+    # Deprecated compatibility flag. Rotary selection no longer preempts keys from
+    # dead-reckoned usage; runtime handling is driven by observed cooldown/exhaustion.
     predictive_429_enabled: bool = False
 
     def __post_init__(self):
@@ -367,7 +368,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         logger.info(f"Initialized GoogleGenAI provider with {len(self.config.api_keys)} API keys")
         logger.info(f"Rate limiting: {'enabled' if self.config.rate_limiting_enabled else 'disabled'}")
-        logger.info(f"Predictive 429: {'enabled' if self.config.predictive_429_enabled else 'disabled'}")
+        logger.info("Predictive 429 config: deprecated/ignored; rotary selection uses observed cooldown/exhaustion only")
         if self.config.proxy_pool_enabled and self.config.proxy_pool:
             pool_size = len(self.config.proxy_pool)
             direct_count = sum(1 for p in self.config.proxy_pool if p is None)
@@ -1005,15 +1006,15 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Check if this is a quota exhaustion error
             elif self._is_quota_exhausted_error(error_message):
-                cooldown_seconds = self._quota_cooldown_seconds(error_message)
-                if cooldown_seconds is not None:
-                    # Transient per-minute (RPM) limit: short cooldown, not an all-day bench.
+                if self._is_per_day_quota_error(error_message):
+                    # Only explicit per-day (RPD) signals should hard-bench a key.
+                    await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
+                else:
+                    # Explicit RPM and ambiguous quota 429s are treated as transient cooldowns.
+                    cooldown_seconds = self._quota_cooldown_seconds(error_message)
                     await self._record_rate_limit_cooldown(
                         ApiKeyQuota, quota, api_key, model_name, error_message, cooldown_seconds
                     )
-                else:
-                    # Per-day (RPD) / unrecognized quota exhaustion: bench until midnight Pacific.
-                    await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
             else:
                 await self._record_regular_error(ApiKeyQuota, quota, api_key, model_name, error_message, status_code)
 
@@ -1078,12 +1079,12 @@ class GoogleGenAIProvider(IModelProvider):
         error_message: str,
         cooldown_seconds: float,
     ) -> None:
-        """Handle a transient per-minute (RPM) 429.
+        """Handle a transient quota 429.
 
-        Sets a short cooldown window (driven by Google's RetryInfo) after which the key
-        returns to the selection pool, instead of benching it until midnight Pacific the
-        way genuine per-day (RPD) exhaustion does. This is the fix for RPM 429s cascading
-        into "all keys exhausted" and pinning every request onto api_keys[0].
+        Sets a short cooldown window after which the key returns to the selection pool,
+        instead of benching it until midnight Pacific. Explicit RPM uses Google's
+        RetryInfo when available; ambiguous quota 429s also land here because they are
+        too weak a signal to justify all-day exclusion.
         """
         cooldown_until = self._utc_now() + timedelta(seconds=cooldown_seconds)
         quota.mark_rate_limited(cooldown_until, error=error_message)
@@ -1096,7 +1097,7 @@ class GoogleGenAIProvider(IModelProvider):
             logger.exception("Failed to persist quota cooldown to Redis")
 
         logger.warning(
-            "🕒 API key %s rate limited (per-minute) for %s: cooling down %.0fs (until %s)",
+            "🕒 API key %s rate limited for %s: cooling down %.0fs (until %s)",
             redact_secret(api_key),
             model_name,
             cooldown_seconds,
@@ -1242,19 +1243,14 @@ class GoogleGenAIProvider(IModelProvider):
         error_lower = error_msg.lower()
         return "perday" in error_lower or "per day" in error_lower or "requests per day" in error_lower
 
-    def _quota_cooldown_seconds(self, error_msg: Optional[str] = None) -> Optional[float]:
-        """Return a transient cooldown (seconds) for a quota 429, or None for all-day exhaustion.
+    def _quota_cooldown_seconds(self, error_msg: Optional[str] = None) -> float:
+        """Return a transient cooldown (seconds) for a quota 429.
 
         - Explicit per-minute (RPM) → cooldown driven by Google's retryDelay (or default).
-        - Everything else (explicit per-day, or no PerMinute quotaId) → None, i.e. the
-          caller treats it as all-day exhaustion. Real Google free-tier 429s always carry
-          a quotaId, so RPM is reliably detectable; we stay conservative for anything else.
+        - Ambiguous quota 429s → also transient cooldown, because they are not strong
+          enough evidence for all-day exhaustion.
+        - Explicit per-day (RPD) is handled by the caller before reaching this helper.
         """
-        if not self._is_per_minute_quota_error(error_msg):
-            return None
-        if self._is_per_day_quota_error(error_msg):
-            return None
-
         retry_delay = self._extract_retry_delay(error_msg)
         base = retry_delay if retry_delay is not None else self.DEFAULT_RPM_COOLDOWN_SECONDS
         return base + self.RPM_COOLDOWN_BUFFER_SECONDS

@@ -894,6 +894,7 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
     api_key_backend = SimpleNamespace(
         hash_api_key=lambda api_key: f"hash-{api_key}",
         mark_invalid_by_hash=AsyncMock(),
+        mark_quota_cooldown=AsyncMock(),
         mark_quota_exhausted=AsyncMock(),
         mark_error=AsyncMock(),
     )
@@ -911,6 +912,18 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
         }
     )
     invalid_quota = QuotaRecord(
+        {
+            "api_key_hash": "hash-test-key",
+            "model_name": "gemini-2.0-flash",
+            "requests_today": 0,
+            "tokens_today": 0,
+            "error_count": 0,
+            "last_reset_date": provider._get_pacific_date(),
+            "invalid_key": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+    )
+    cooldown_quota = QuotaRecord(
         {
             "api_key_hash": "hash-test-key",
             "model_name": "gemini-2.0-flash",
@@ -961,7 +974,7 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
     )
 
     provider._get_quota_record = AsyncMock(
-        side_effect=[success_quota, invalid_quota, quota_exhausted, regular_quota, entitlement_quota]
+        side_effect=[success_quota, invalid_quota, cooldown_quota, quota_exhausted, regular_quota, entitlement_quota]
     )
 
     with patch("smolrouter.redis_backend.RedisApiKeyQuota.increment_usage", AsyncMock(return_value=None)), patch(
@@ -988,6 +1001,19 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
             "gemini-2.0-flash",
             success=False,
             error="429 quota exceeded retry in 12s",
+            status_code=429,
+        )
+        assert cooldown_quota.quota_exhausted_at is None
+        assert cooldown_quota.quota_cooldown_until is not None
+        assert api_key_backend.mark_quota_cooldown.await_count == 1
+        assert api_key_backend.mark_quota_exhausted.await_count == 0
+
+        provider.config.api_keys = ["test-key"]
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-2.0-flash",
+            success=False,
+            error="429 quota exceeded requests per day",
             status_code=429,
         )
         assert quota_exhausted.error_count == 1
