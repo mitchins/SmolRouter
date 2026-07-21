@@ -16,10 +16,9 @@ from .facade_key_store import (
     append_facade_key_secret,
     generate_facade_key_secret,
     load_facade_key_secrets_from_path,
-    reload_facade_key_secrets,
     resolve_facade_key_config_path,
-    save_facade_key_secrets,
 )
+from .project_key_manager import ProjectKeyManager
 
 def configure_create_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--routes-config", default=os.getenv("ROUTES_CONFIG"))
@@ -120,8 +119,8 @@ def run_create(args: argparse.Namespace) -> int:
         print(f"project_id={project_id}, generated_secret={generated}")
         return 0
 
-    save_facade_key_secrets(secret_file_path, updated)
-    reload_facade_key_secrets()
+    manager = ProjectKeyManager(routes_path=routes_path, secrets_path=secret_file_path)
+    generated, _key_id = manager.create_key(project_id, generated)
     print(f"Generated facade key for project: {project_id}")
     print(f"secret (copy exactly once): {generated}")
     print(f"wrote facade-key secrets to: {secret_file_path}")
