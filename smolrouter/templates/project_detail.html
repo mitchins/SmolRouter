@@ -102,6 +102,12 @@
             padding: 2rem;
             font-size: 0.95rem;
         }
+        .management-panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:1rem 1.5rem; margin-bottom:1rem; }
+        .management-row { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
+        .management-message { color:#b91c1c; min-height:1.2rem; margin-top:.5rem; }
+        .secret-panel { display:none; background:#fffbeb; border:1px solid #f59e0b; border-radius:8px; padding:1rem; margin-top:.75rem; }
+        .secret-value, .fingerprint { font-family:"Monaco","Menlo",monospace; overflow-wrap:anywhere; }
+        .danger { background:#b91c1c !important; color:#fff !important; }
     </style>
     {% include 'responsive_shell.html' %}
 </head>
@@ -131,6 +137,35 @@
     </div>
 
     <div class="container">
+        {% if project.configured %}
+        <section class="management-panel" aria-labelledby="key-management-heading">
+            <h2 id="key-management-heading">API keys</h2>
+            <div class="management-row"><button id="create-key" class="action-btn" type="button">Create API key</button></div>
+            <div id="secret-panel" class="secret-panel" aria-live="polite">
+                <strong>Copy this key now. It will not be shown again.</strong>
+                <div id="secret-value" class="secret-value"></div>
+                <button id="copy-secret" class="action-btn" type="button">Copy key</button>
+                <button id="dismiss-secret" class="action-btn secondary" type="button">I have copied it</button>
+            </div>
+            <div id="key-message" class="management-message" role="alert"></div>
+            <table>
+                <thead><tr><th>Fingerprint</th><th>Action</th></tr></thead>
+                <tbody>
+                {% for key in project["keys"] %}
+                    <tr><td class="fingerprint">{{ key.key_id }}</td><td><button class="action-btn secondary revoke-key" data-key-id="{{ key.key_id }}" type="button">Revoke</button></td></tr>
+                {% else %}
+                    <tr><td colspan="2" class="project-empty">No active API keys.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </section>
+        <section class="management-panel" aria-labelledby="delete-project-heading">
+            <h2 id="delete-project-heading">Delete project</h2>
+            <p>Type <strong>{{ project.id }}</strong> to confirm. Active API keys will be revoked first.</p>
+            <div class="management-row"><label for="delete-confirmation">Project ID</label><input id="delete-confirmation" autocomplete="off"><button id="delete-project" class="action-btn danger" type="button">Delete project</button></div>
+            <div id="delete-message" class="management-message" role="alert"></div>
+        </section>
+        {% endif %}
         <div class="project-summary">
             <div class="project-summary-item">
                 <div class="label">Secret Count</div>
@@ -206,5 +241,44 @@
             </div>
         </div>
     </div>
+    {% include 'project_mutation.html' %}
+    {% if project.configured %}
+    <script>
+    (() => {
+      const projectId = {{ project.id | tojson }};
+      const keyMessage = document.getElementById('key-message');
+      const secretPanel = document.getElementById('secret-panel');
+      const secretValue = document.getElementById('secret-value');
+      document.getElementById('create-key').addEventListener('click', async (event) => {
+        const button = event.currentTarget; if (button.disabled) return; button.disabled = true; keyMessage.textContent = '';
+        try { const result = await window.smolrouterProjectMutation('/api/project-management/keys', 'POST', {project_id:projectId}); secretValue.textContent = result.secret; secretPanel.style.display = 'block'; }
+        catch (error) { keyMessage.textContent = error.message || 'Key creation failed'; button.disabled = false; }
+      });
+      document.getElementById('copy-secret').addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(secretValue.textContent);
+          keyMessage.textContent = 'API key copied.';
+        } catch (_) {
+          keyMessage.textContent = 'Copy failed. Select and copy the key manually before dismissing it.';
+        }
+      });
+      document.getElementById('dismiss-secret').addEventListener('click', () => { secretValue.textContent = ''; secretPanel.remove(); window.location.reload(); });
+      window.addEventListener('pagehide', () => { secretValue.textContent = ''; });
+      document.querySelectorAll('.revoke-key').forEach(button => button.addEventListener('click', async () => {
+        if (button.disabled || !window.confirm('Revoke this API key? Existing clients will immediately stop authenticating.')) return;
+        button.disabled = true; keyMessage.textContent = '';
+        try { await window.smolrouterProjectMutation('/api/project-management/keys', 'DELETE', {project_id:projectId, key_id:button.dataset.keyId}); window.location.reload(); }
+        catch (error) { keyMessage.textContent = error.message || 'Key revocation failed'; button.disabled = false; }
+      }));
+      document.getElementById('delete-project').addEventListener('click', async (event) => {
+        const button = event.currentTarget, message = document.getElementById('delete-message');
+        if (document.getElementById('delete-confirmation').value !== projectId) { message.textContent = 'Project ID does not match.'; return; }
+        if (button.disabled) return; button.disabled = true; message.textContent = '';
+        try { await window.smolrouterProjectMutation('/api/project-management/projects', 'DELETE', {project_id:projectId}); window.location.assign('/projects'); }
+        catch (error) { message.textContent = error.message || 'Project deletion failed'; button.disabled = false; }
+      });
+    })();
+    </script>
+    {% endif %}
 </body>
 </html>

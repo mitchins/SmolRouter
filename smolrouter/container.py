@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from .interfaces import ClientContext
 from .facade_keys import FacadeKeyRegistry, RequestIdentity, load_facade_key_registry
+from .project_key_manager import ProjectKeyManager
 from .request_rate_limits import (
     RequestRateLimitConfig,
     RequestRateLimitPolicy,
@@ -99,9 +100,15 @@ class SmolRouterContainer:
     """
 
     def __init__(self, config: Optional[SmolRouterConfig] = None):
+        uses_default_config = config is None
         self.config = config or self._create_default_config()
+        self._project_key_manager = ProjectKeyManager() if uses_default_config else None
         if self.config.facade_key_registry is None:
-            self.config.facade_key_registry = load_facade_key_registry(self.config.facade_keys)
+            self.config.facade_key_registry = (
+                self._project_key_manager.get_registry()
+                if self._project_key_manager is not None
+                else load_facade_key_registry(self.config.facade_keys)
+            )
         self._providers = None
         self._mediator = None
         self._cache = None
@@ -422,7 +429,14 @@ class SmolRouterContainer:
         )
 
     def get_facade_key_registry(self) -> FacadeKeyRegistry:
+        if self._project_key_manager is not None:
+            return self._project_key_manager.get_registry()
         return self.config.facade_key_registry or load_facade_key_registry(self.config.facade_keys)
+
+    def get_project_key_manager(self) -> ProjectKeyManager:
+        if self._project_key_manager is None:
+            raise RuntimeError("Project/key management is unavailable for an injected static configuration")
+        return self._project_key_manager
 
     def get_request_rate_limit_config(self) -> RequestRateLimitConfig:
         """Return the validated global request-rate-limit configuration."""

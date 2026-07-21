@@ -1,5 +1,7 @@
 """Unit tests for facade key provisioning CLI."""
 
+from unittest.mock import Mock
+
 import pytest
 
 from smolrouter import facade_key_cli
@@ -202,3 +204,85 @@ def test_manage_facade_keys_requires_subcommand(capsys):
     output = capsys.readouterr().out
     assert result == 2
     assert "create" in output
+
+
+@pytest.mark.parametrize(
+    "error",
+    [facade_key_cli.ProjectKeyManagementError("managed failure"), OSError("disk failure")],
+)
+def test_cli_reports_manager_failures_without_printing_generated_secret(
+    tmp_path, routes_yaml, monkeypatch, capsys, error
+):
+    monkeypatch.setattr(facade_key_cli, "generate_facade_key_secret", lambda: "srk-must-not-leak")
+    fake_manager = Mock()
+    fake_manager.create_key.side_effect = error
+    monkeypatch.setattr(facade_key_cli, "ProjectKeyManager", Mock(return_value=fake_manager))
+
+    result = facade_key_cli.main(
+        [
+            "--routes-config",
+            str(routes_yaml),
+            "--facade-keys-file",
+            str(tmp_path / "facade_keys.yaml"),
+            "--project",
+            "project-a",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert result == 4
+    assert "Failed to create facade key for project project-a" in output
+    assert "srk-must-not-leak" not in output
+    assert "Generated facade key" not in output
+    assert "wrote facade-key secrets to" not in output
+    fake_manager.list_keys.assert_not_called()
+
+
+def test_cli_reports_secret_count_from_persisted_manager_state(tmp_path, routes_yaml, monkeypatch, capsys):
+    monkeypatch.setattr(facade_key_cli, "generate_facade_key_secret", lambda: "srk-persisted")
+    fake_manager = Mock()
+    fake_manager.create_key.return_value = ("srk-persisted", "sha256:fingerprint")
+    fake_manager.list_keys.return_value = [{"key_id": f"sha256:{index}"} for index in range(7)]
+    monkeypatch.setattr(facade_key_cli, "ProjectKeyManager", Mock(return_value=fake_manager))
+
+    result = facade_key_cli.main(
+        [
+            "--routes-config",
+            str(routes_yaml),
+            "--facade-keys-file",
+            str(tmp_path / "facade_keys.yaml"),
+            "--project",
+            "project-a",
+        ]
+    )
+
+    assert result == 0
+    assert "secret_count: 7" in capsys.readouterr().out
+    fake_manager.list_keys.assert_called_once_with("project-a")
+
+
+def test_cli_delivers_persisted_secret_when_count_refresh_fails(tmp_path, routes_yaml, monkeypatch, capsys):
+    monkeypatch.setattr(facade_key_cli, "generate_facade_key_secret", lambda: "srk-persisted-once")
+    fake_manager = Mock()
+    fake_manager.create_key.return_value = ("srk-persisted-once", "sha256:fingerprint")
+    fake_manager.list_keys.side_effect = facade_key_cli.ProjectKeyManagementError("count refresh failed")
+    monkeypatch.setattr(facade_key_cli, "ProjectKeyManager", Mock(return_value=fake_manager))
+    destination = tmp_path / "facade_keys.yaml"
+
+    result = facade_key_cli.main(
+        [
+            "--routes-config",
+            str(routes_yaml),
+            "--facade-keys-file",
+            str(destination),
+            "--project",
+            "project-a",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert output.count("srk-persisted-once") == 1
+    assert f"wrote facade-key secrets to: {destination}" in output
+    assert "secret_count: unavailable (count refresh failed)" in output
+    fake_manager.create_key.assert_called_once_with("project-a", "srk-persisted-once")

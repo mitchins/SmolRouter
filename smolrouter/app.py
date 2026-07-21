@@ -12,14 +12,15 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Annotated, Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
 import httpx
 from contextlib import asynccontextmanager
 
@@ -48,6 +49,7 @@ from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
 from smolrouter.facade_keys import RequestIdentity
+from smolrouter.project_key_manager import ProjectKeyManagementError, facade_key_id
 from smolrouter.redis_config import is_fake_redis
 from smolrouter.request_rate_limits import (
     RateLimitDecision,
@@ -1407,7 +1409,7 @@ async def _handle_request_without_local_facade_key(
     )
 
 
-def _resolve_request_identity(
+async def _resolve_request_identity(
     active_container: Any,
     request: Request,
     presented_key: Optional[str] = None,
@@ -1416,7 +1418,7 @@ def _resolve_request_identity(
     if not presented_key:
         return None
 
-    registry = active_container.get_facade_key_registry()
+    registry = await asyncio.to_thread(active_container.get_facade_key_registry)
     resolved = registry.resolve_secret(presented_key)
     if resolved is None or resolved.identity is None:
         raise HTTPException(status_code=401, detail=_invalid_local_facade_key_detail())
@@ -1450,6 +1452,7 @@ def _build_project_inventory_entry(
     secret_count: int = 0,
     effective_rate_limit: Any = None,
     rate_limits_enabled: Optional[bool] = None,
+    keys: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, Any]:
     if config is None:
         display_name = None
@@ -1481,6 +1484,7 @@ def _build_project_inventory_entry(
         "enabled": enabled,
         "display_name": display_name,
         "secret_count": int(secret_count),
+        "keys": list(keys or []),
         "default_class": default_class,
         "tags": list(tags),
         "quota": quota_payload,
@@ -1498,13 +1502,14 @@ async def _get_facade_key_registry_data() -> dict[str, Any]:
     if active_container is None:
         return {}
 
-    registry = active_container.get_facade_key_registry()
+    registry = await asyncio.to_thread(active_container.get_facade_key_registry)
     rate_limit_config = _request_rate_limit_config(active_container)
 
     return {
         key_id: {
             "config": config,
             "secret_count": len(registry.get_secrets(key_id)),
+            "keys": [{"key_id": facade_key_id(secret)} for secret in registry.get_secrets(key_id)],
             "effective_rate_limit": config.rate_limit or rate_limit_config.project_default,
             "rate_limits_enabled": rate_limit_config.enabled,
         }
@@ -1524,6 +1529,7 @@ async def _load_facade_key_inventory() -> dict[str, dict[str, Any]]:
             secret_count=entry["secret_count"],
             effective_rate_limit=entry["effective_rate_limit"],
             rate_limits_enabled=entry["rate_limits_enabled"],
+            keys=entry["keys"],
         )
         for project_id, entry in sorted(registry_data.items(), key=lambda item: item[0])
     }
@@ -1711,7 +1717,7 @@ def _build_request_tracking_headers(log_entry: Any) -> Dict[str, str]:
     return headers
 
 
-def _resolve_presented_facade_identity(
+async def _resolve_presented_facade_identity(
     active_container: Any,
     request: Request,
     presented_facade_key: Optional[str],
@@ -1719,12 +1725,12 @@ def _resolve_presented_facade_identity(
     resolved_facade_key: Optional[str],
 ) -> Optional[RequestIdentity]:
     if presented_facade_key and presented_authorization_facade_key:
-        header_identity = _resolve_request_identity(
+        header_identity = await _resolve_request_identity(
             active_container,
             request,
             presented_key=presented_facade_key,
         )
-        authorization_identity = _resolve_request_identity(
+        authorization_identity = await _resolve_request_identity(
             active_container,
             request,
             presented_key=presented_authorization_facade_key,
@@ -1733,7 +1739,7 @@ def _resolve_presented_facade_identity(
             raise HTTPException(status_code=401, detail="Mismatched local facade key values")
         return authorization_identity
 
-    return _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
+    return await _resolve_request_identity(active_container, request, presented_key=resolved_facade_key)
 
 
 async def _prepare_proxy_request_context(
@@ -1801,7 +1807,7 @@ async def _prepare_proxy_request_context(
         )
 
     try:
-        identity = _resolve_presented_facade_identity(
+        identity = await _resolve_presented_facade_identity(
             active_container,
             request,
             presented_facade_key,
@@ -2522,6 +2528,56 @@ PROJECT_DETAIL_API_RESPONSES = {
     404: {"description": PROJECT_NOT_FOUND_DETAIL},
 }
 
+PROJECT_MANAGEMENT_BASE_RESPONSES = {
+    401: {"description": "Web UI authentication required"},
+    403: {"description": "Web UI access denied or request origin rejected"},
+    415: {"description": "Content-Type must be application/json"},
+    422: {"description": "Invalid mutation request"},
+    500: {"description": "Project/key management unavailable or durable mutation failed"},
+}
+CREATE_PROJECT_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    409: {"description": "Project already exists or configuration changed concurrently"},
+}
+DELETE_PROJECT_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": PROJECT_NOT_FOUND_DETAIL},
+    409: {"description": "Historical-only project or configuration conflict"},
+}
+CREATE_KEY_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": PROJECT_NOT_FOUND_DETAIL},
+    409: {"description": "Configuration conflict"},
+}
+DELETE_KEY_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": "Project or key not found"},
+    409: {"description": "Ambiguous key fingerprint or configuration conflict"},
+}
+
+
+class _StrictMutationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProjectCreateBody(_StrictMutationBody):
+    project_id: str
+    display_name: Optional[str] = None
+    tags: Optional[list[str]] = None
+
+
+class ProjectDeleteBody(_StrictMutationBody):
+    project_id: str
+
+
+class ProjectKeyCreateBody(_StrictMutationBody):
+    project_id: str
+
+
+class ProjectKeyDeleteBody(_StrictMutationBody):
+    project_id: str
+    key_id: str
+
 
 @app.post("/v1/chat/completions", responses=OPENAI_PROXY_ROUTE_RESPONSES)
 async def chat_completions(request: Request):
@@ -2867,6 +2923,140 @@ async def api_projects(request: Request):
     except Exception:
         logger.exception("Error loading project inventory")
         raise HTTPException(status_code=500, detail="Failed to load project inventory")
+
+
+def _single_raw_header(request: Request, name: bytes) -> str:
+    values = [value.decode("latin-1") for key, value in request.scope.get("headers", []) if key.lower() == name]
+    if len(values) != 1 or not values[0].strip():
+        raise HTTPException(status_code=403, detail=f"Exactly one {name.decode()} header is required")
+    return values[0].strip()
+
+
+def _canonical_origin(value: str) -> tuple[str, str, int]:
+    try:
+        parsed = urlparse(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError
+        return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Malformed Origin header") from exc
+
+
+def _check_project_mutation_request(request: Request) -> None:
+    get_webui_security().check_webui_access(request)
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=415, detail="Content-Type must be application/json")
+    origin = _single_raw_header(request, b"origin")
+    _single_raw_header(request, b"host")
+    if origin.lower() == "null" or _canonical_origin(origin) != _canonical_origin(str(request.base_url).rstrip("/")):
+        raise HTTPException(status_code=403, detail="Origin must exactly match the request origin")
+
+
+async def _project_key_manager():
+    active_container = await _get_active_container(False)
+    if active_container is None:
+        raise HTTPException(status_code=500, detail="Project/key management is unavailable")
+    try:
+        return active_container.get_project_key_manager()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Project/key management is unavailable") from exc
+
+
+def _management_error(exc: ProjectKeyManagementError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+def _project_mutation_guard(request: Request) -> None:
+    _check_project_mutation_request(request)
+
+
+ProjectMutationGuard = Annotated[None, Depends(_project_mutation_guard)]
+
+
+def _mutation_response(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        payload,
+        status_code=status_code,
+        headers={"Cache-Control": "no-store, no-cache", "Pragma": "no-cache"},
+    )
+
+
+@app.post(
+    "/api/project-management/projects",
+    status_code=201,
+    responses=CREATE_PROJECT_RESPONSES,
+)
+async def create_managed_project(
+    body: ProjectCreateBody,
+    _guard: ProjectMutationGuard,
+):
+    manager = await _project_key_manager()
+    try:
+        project = await asyncio.to_thread(manager.create_project, body.project_id, body.display_name, body.tags)
+        return _mutation_response({"project": project}, 201)
+    except ProjectKeyManagementError as exc:
+        raise _management_error(exc)
+
+
+@app.delete("/api/project-management/projects", responses=DELETE_PROJECT_RESPONSES)
+async def delete_managed_project(
+    body: ProjectDeleteBody,
+    _guard: ProjectMutationGuard,
+):
+    manager = await _project_key_manager()
+    try:
+        registry = await asyncio.to_thread(manager.get_registry)
+        if not registry.has_key(body.project_id):
+            historical = await RequestLog.get_by_identity("facade_key", body.project_id, limit=1)
+            if historical:
+                raise HTTPException(status_code=409, detail="Historical-only projects cannot be deleted")
+        await asyncio.to_thread(manager.delete_project, body.project_id)
+        return _mutation_response({"deleted": True, "project_id": body.project_id})
+    except ProjectKeyManagementError as exc:
+        raise _management_error(exc)
+
+
+@app.post(
+    "/api/project-management/keys",
+    status_code=201,
+    responses=CREATE_KEY_RESPONSES,
+)
+async def create_managed_key(
+    body: ProjectKeyCreateBody,
+    _guard: ProjectMutationGuard,
+):
+    manager = await _project_key_manager()
+    try:
+        secret, key_id = await asyncio.to_thread(manager.create_key, body.project_id)
+        return _mutation_response(
+            {"project_id": body.project_id, "key_id": key_id, "secret": secret},
+            201,
+        )
+    except ProjectKeyManagementError as exc:
+        raise _management_error(exc)
+
+
+@app.delete("/api/project-management/keys", responses=DELETE_KEY_RESPONSES)
+async def delete_managed_key(
+    body: ProjectKeyDeleteBody,
+    _guard: ProjectMutationGuard,
+):
+    manager = await _project_key_manager()
+    try:
+        await asyncio.to_thread(manager.revoke_key, body.project_id, body.key_id)
+        return _mutation_response({"deleted": True, "project_id": body.project_id, "key_id": body.key_id})
+    except ProjectKeyManagementError as exc:
+        raise _management_error(exc)
 
 
 @app.get("/api/projects/{project_id:path}", responses=PROJECT_DETAIL_API_RESPONSES)

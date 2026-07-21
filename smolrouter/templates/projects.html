@@ -63,6 +63,11 @@
             font-size: 0.72rem;
             padding: 0.15rem 0.5rem;
         }
+        .management-panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:1rem 1.5rem; margin-bottom:1rem; }
+        .management-form { display:flex; gap:.6rem; flex-wrap:wrap; align-items:flex-end; }
+        .management-form label { display:flex; flex-direction:column; gap:.25rem; font-size:.8rem; color:#475569; }
+        .management-form input { min-width:190px; padding:.55rem; border:1px solid #cbd5e1; border-radius:6px; }
+        .management-message { margin-top:.6rem; color:#b91c1c; min-height:1.2rem; }
     </style>
     {% include 'responsive_shell.html' %}
 </head>
@@ -70,6 +75,17 @@
     {% include 'navigation.html' %}
 
     <div class="container">
+        <section class="management-panel" aria-labelledby="create-project-heading">
+            <h2 id="create-project-heading">Create project</h2>
+            <form id="create-project-form" class="management-form">
+                <label>Project ID <input name="project_id" required maxlength="128" autocomplete="off"></label>
+                <label>Display name <input name="display_name" maxlength="100" autocomplete="off"></label>
+                <label>Tags (comma-separated) <input name="tags" autocomplete="off"></label>
+                <button class="action-btn" type="submit">Create project</button>
+            </form>
+            <div id="create-project-message" class="management-message" role="alert"></div>
+            <p class="filter-help">Projects remain file-backed. Saving through this page normalizes the routes YAML/JSON, so YAML comments and hand formatting may not be retained.</p>
+        </section>
         <div class="stats">
             <div class="stat-card">
                 <div class="number" style="color: #1976d2;" id="project-count">{{ projects|length }}</div>
@@ -185,5 +201,28 @@
             </div>
         </div>
     </div>
+    {% include 'project_mutation.html' %}
+    <script>
+    (() => {
+      const form = document.getElementById('create-project-form');
+      const message = document.getElementById('create-project-message');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const button = form.querySelector('button');
+        if (button.disabled) return;
+        button.disabled = true; message.textContent = '';
+        const data = new FormData(form);
+        const tags = String(data.get('tags') || '').split(',').map(v => v.trim()).filter(Boolean);
+        const payload = {project_id: String(data.get('project_id') || '').trim()};
+        const displayName = String(data.get('display_name') || '').trim();
+        if (displayName) payload.display_name = displayName;
+        if (tags.length) payload.tags = tags;
+        try {
+          await window.smolrouterProjectMutation('/api/project-management/projects', 'POST', payload, 'Project creation failed');
+          window.location.assign('/projects/' + encodeURIComponent(payload.project_id));
+        } catch (error) { message.textContent = error.message || 'Project creation failed'; button.disabled = false; }
+      });
+    })();
+    </script>
 </body>
 </html>

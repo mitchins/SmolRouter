@@ -250,7 +250,8 @@ For OpenAI-compatible providers, a configured provider `api_key` takes precedenc
 - Use `-C/--config` or `ROUTES_CONFIG` for deterministic routing config selection.
 - Use `SMOLROUTER_SECRETS` for deterministic secrets file selection; otherwise SmolRouter searches `./secrets.yaml`, the user config dir, then the site config dir.
 - Use `SMOLROUTER_FACADE_KEYS` for dedicated facade-key storage (`./facade_keys.yaml`, user config dir, then site config dir).
-- Provision facade keys with `python -m smolrouter.manage_facade_keys create --project <id> --routes-config <routes.yaml>` (generates `srk-...` secrets; default append behavior avoids clobbering old secrets).
+- Manage projects and facade API keys from **Projects** in the Web UI. Project metadata stays in the routes YAML/JSON and secrets stay in `facade_keys.yaml`; new keys are shown once for copying, while existing keys are represented only by SHA-256 fingerprints. Saving project metadata normalizes the routes file, so YAML comments and hand formatting may not be retained.
+- For non-interactive automation, `python -m smolrouter.manage_facade_keys create --project <id> --routes-config <routes.yaml>` remains available and uses the same locked file-management path as the UI.
 - Use `BLOB_STORAGE_PATH` explicitly in production if you want a location other than the safe default under `~/.smolrouter/blob_storage`.
 - For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
 - `docker-compose.yml` mounts `./logs:/app/logs`, so rotated ERROR logs persist across container restarts.
@@ -263,7 +264,7 @@ Configure `request_rate_limits` in the routes config. The anonymous and project 
 
 Requests with invalid or mismatched local keys receive `401` before consuming a bucket. An admitted request consumes capacity before its JSON body is parsed or sent upstream. A rejected request receives `429` with OpenAI-style error code `anonymous_rate_limit_exceeded` or `project_rate_limit_exceeded`, a whole-second `Retry-After`, and policy/bucket-class headers that contain no project key or identity. Redis failures fail closed with `503` and code `rate_limiter_unavailable`; production startup also verifies the limiter and refuses FakeRedis when limiting is enabled.
 
-The Projects UI and API expose each configured project's effective two-window policy and whether it comes from the project default or a whole-project override. They do not expose live Redis counters. Request graphs, filters, and drilldowns only cover logs still present in the configured request-log retention window, so they are not authoritative rate-limit accounting.
+The Projects UI can create and delete projects and create or revoke their facade API keys. It also exposes each configured project's effective two-window policy and whether it comes from the project default or a whole-project override. Stored secrets are never returned after creation; the UI and read APIs expose only full SHA-256 fingerprints and counts. They do not expose live Redis counters. Request graphs, filters, and drilldowns only cover logs still present in the configured request-log retention window, so they are not authoritative rate-limit accounting.
 
 ## Testing
 
