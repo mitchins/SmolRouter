@@ -718,9 +718,11 @@ async def test_project_ui_has_management_controls_but_never_secret_values(async_
     assert "async function mutate" not in detail.text
     assert "typeof result.detail === 'string' ? result.detail : fallbackMessage" in detail.text
     assert 'for="delete-confirmation"' in detail.text
-    assert "Copy key" in detail.text
-    assert "navigator.clipboard.writeText" in detail.text
-    assert "Copy failed. Select and copy the key manually" in detail.text
-    assert "pagehide" in detail.text
+    assert 'aria-label="Generated API key"' in detail.text
+    assert 'aria-label="Copy API key"' in detail.text
+    assert 'aria-label="Dismiss generated key"' in detail.text
+    assert 'aria-live="polite"' in detail.text
+    assert "content_copy" in detail.text
+    assert "/static/vendor/api-key-copy.js" in detail.text
     assert "sha256:" in detail.text
     assert "srk-never-render-this" not in listing.text + detail.text

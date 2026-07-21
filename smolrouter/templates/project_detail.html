@@ -105,8 +105,19 @@
         .management-panel { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:1rem 1.5rem; margin-bottom:1rem; }
         .management-row { display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
         .management-message { color:#b91c1c; min-height:1.2rem; margin-top:.5rem; }
-        .secret-panel { display:none; background:#fffbeb; border:1px solid #f59e0b; border-radius:8px; padding:1rem; margin-top:.75rem; }
+        .secret-panel { position:relative; background:#fffbeb; border:1px solid #f59e0b; border-radius:8px; padding:1rem; margin-top:.75rem; }
+        .secret-panel[hidden] { display:none; }
+        .secret-title { display:block; padding-right:2.5rem; margin-bottom:.5rem; }
+        .secret-row { display:flex; gap:.4rem; align-items:stretch; }
+        .secret-value { flex:1; min-width:0; border:1px solid #d1d5db; border-radius:6px; background:#fff; padding:.55rem .65rem; }
         .secret-value, .fingerprint { font-family:"Monaco","Menlo",monospace; overflow-wrap:anywhere; }
+        .icon-button { display:inline-flex; align-items:center; justify-content:center; min-width:2.6rem; padding:.45rem; }
+        .dismiss-secret { position:absolute; right:.55rem; top:.55rem; border:0; background:transparent; color:#475569; border-radius:5px; cursor:pointer; }
+        .dismiss-secret:hover { background:#fef3c7; color:#0f172a; }
+        .icon-button:focus-visible, .dismiss-secret:focus-visible, .secret-value:focus-visible { outline:3px solid #2563eb; outline-offset:2px; }
+        .copy-status { min-height:1.2rem; margin-top:.4rem; color:#475569; font-size:.9rem; }
+        .copy-status.success { color:#166534; }
+        .copy-status.warning { color:#b45309; }
         .danger { background:#b91c1c !important; color:#fff !important; }
     </style>
     {% include 'responsive_shell.html' %}
@@ -141,11 +152,14 @@
         <section class="management-panel" aria-labelledby="key-management-heading">
             <h2 id="key-management-heading">API keys</h2>
             <div class="management-row"><button id="create-key" class="action-btn" type="button">Create API key</button></div>
-            <div id="secret-panel" class="secret-panel" aria-live="polite">
-                <strong>Copy this key now. It will not be shown again.</strong>
-                <div id="secret-value" class="secret-value"></div>
-                <button id="copy-secret" class="action-btn" type="button">Copy key</button>
-                <button id="dismiss-secret" class="action-btn secondary" type="button">I have copied it</button>
+            <div id="secret-panel" class="secret-panel" hidden>
+                <label class="secret-title" for="secret-value"><strong>Copy this key now. It will not be shown again.</strong></label>
+                <button id="dismiss-secret" class="dismiss-secret icon-button" type="button" aria-label="Dismiss generated key" title="Dismiss generated key"><span class="material-icons" aria-hidden="true">close</span></button>
+                <div class="secret-row">
+                    <input id="secret-value" class="secret-value" type="text" readonly aria-label="Generated API key">
+                    <button id="copy-secret" class="action-btn icon-button" type="button" aria-label="Copy API key" title="Copy API key"><span id="copy-secret-icon" class="material-icons" aria-hidden="true">content_copy</span></button>
+                </div>
+                <div id="copy-status" class="copy-status" role="status" aria-live="polite"></div>
             </div>
             <div id="key-message" class="management-message" role="alert"></div>
             <table>
@@ -243,27 +257,28 @@
     </div>
     {% include 'project_mutation.html' %}
     {% if project.configured %}
+    <script src="/static/vendor/api-key-copy.js"></script>
     <script>
     (() => {
       const projectId = {{ project.id | tojson }};
       const keyMessage = document.getElementById('key-message');
       const secretPanel = document.getElementById('secret-panel');
       const secretValue = document.getElementById('secret-value');
+      const secretController = window.smolrouterApiKeyCopy.createController({
+        window,
+        document,
+        input: secretValue,
+        panel: secretPanel,
+        copyButton: document.getElementById('copy-secret'),
+        copyIcon: document.getElementById('copy-secret-icon'),
+        dismissButton: document.getElementById('dismiss-secret'),
+        status: document.getElementById('copy-status')
+      });
       document.getElementById('create-key').addEventListener('click', async (event) => {
         const button = event.currentTarget; if (button.disabled) return; button.disabled = true; keyMessage.textContent = '';
-        try { const result = await window.smolrouterProjectMutation('/api/project-management/keys', 'POST', {project_id:projectId}); secretValue.textContent = result.secret; secretPanel.style.display = 'block'; }
+        try { const result = await window.smolrouterProjectMutation('/api/project-management/keys', 'POST', {project_id:projectId}); secretController.showSecret(result.secret); }
         catch (error) { keyMessage.textContent = error.message || 'Key creation failed'; button.disabled = false; }
       });
-      document.getElementById('copy-secret').addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(secretValue.textContent);
-          keyMessage.textContent = 'API key copied.';
-        } catch (_) {
-          keyMessage.textContent = 'Copy failed. Select and copy the key manually before dismissing it.';
-        }
-      });
-      document.getElementById('dismiss-secret').addEventListener('click', () => { secretValue.textContent = ''; secretPanel.remove(); window.location.reload(); });
-      window.addEventListener('pagehide', () => { secretValue.textContent = ''; });
       document.querySelectorAll('.revoke-key').forEach(button => button.addEventListener('click', async () => {
         if (button.disabled || !window.confirm('Revoke this API key? Existing clients will immediately stop authenticating.')) return;
         button.disabled = true; keyMessage.textContent = '';
