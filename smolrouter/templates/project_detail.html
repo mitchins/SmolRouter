@@ -187,7 +187,13 @@
                             <td data-label="Time"><a href="/request/{{ log.id }}">{{ log.timestamp[:19] if log.timestamp else "-" }}</a></td>
                             <td data-label="Source">{{ log.source_ip }}</td>
                             <td data-label="Path">{{ log.path }}</td>
-                            <td data-label="Model">{{ log.mapped_model or log.original_model or "-" }}</td>
+                            <td data-label="Model">
+                                {% if log.model_observation_status == "not_inspected_rate_limit" %}
+                                Not inspected (rate limited before body)
+                                {% else %}
+                                {{ log.mapped_model or log.original_model or "-" }}
+                                {% endif %}
+                            </td>
                             <td data-label="Status">{{ log.status_code if log.status_code else "pending" }}</td>
                         </tr>
                         {% else %}

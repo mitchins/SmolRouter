@@ -447,7 +447,10 @@
             `;
         }
 
-        function formatModel(originalModel, mappedModel) {
+        function formatModel(originalModel, mappedModel, observationStatus) {
+            if (observationStatus === 'not_inspected_rate_limit') {
+                return '<span class="cell-secondary">Not inspected (rate limited before body)</span>';
+            }
             const resolvedOriginal = originalModel || mappedModel;
             const resolvedMapped = mappedModel || originalModel;
 
@@ -527,7 +530,7 @@
                     <td data-label="Project Identity">${renderProjectCell(log)}</td>
                     <td data-label="Provider">${renderProviderCell(log)}</td>
                     <td data-label="Path">${escapeHtml(log.path || '-')}</td>
-                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model, log.model_observation_status)}</td>
                     <td data-label="Size">${formatSize(log.request_size)}</td>
                     <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
                     <td data-label="Status">${formatStatus(log.status_code)}</td>

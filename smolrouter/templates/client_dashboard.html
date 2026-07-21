@@ -201,7 +201,10 @@
             return `<span class="status status-${category}">${statusCode}</span>`;
         }
 
-        function formatModel(originalModel, mappedModel) {
+        function formatModel(originalModel, mappedModel, observationStatus) {
+            if (observationStatus === 'not_inspected_rate_limit') {
+                return '<span class="cell-secondary">Not inspected (rate limited before body)</span>';
+            }
             if (mappedModel && mappedModel !== originalModel) {
                 return `
                     <div class="model-info">
@@ -400,7 +403,7 @@
                     </td>
                     <td data-label="Project Identity">${renderProjectCell(log)}</td>
                     <td data-label="Path">${log.path || '-'}</td>
-                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model)}</td>
+                    <td data-label="Model">${formatModel(log.original_model, log.mapped_model, log.model_observation_status)}</td>
                     <td data-label="Size">${formatSize(log.request_size)}</td>
                     <td data-label="Duration" class="duration">${formatDuration(log.duration_ms)}</td>
                     <td data-label="Status">${formatStatus(log.status_code)}</td>
@@ -548,7 +551,7 @@
                 </td>
                 <td data-label="Project Identity">${renderProjectCell(request)}</td>
                 <td data-label="Path">${request.path || '-'}</td>
-                <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                <td data-label="Model">${formatModel(request.original_model, request.mapped_model, request.model_observation_status)}</td>
                 <td data-label="Size">${formatSize(request.request_size)}</td>
                 <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
                 <td data-label="Status">${formatStatus(request.status_code)}</td>
@@ -582,7 +585,7 @@
                         </td>
                         <td data-label="Project Identity">${renderProjectCell(request)}</td>
                         <td data-label="Path">${request.path || '-'}</td>
-                        <td data-label="Model">${formatModel(request.original_model, request.mapped_model)}</td>
+                        <td data-label="Model">${formatModel(request.original_model, request.mapped_model, request.model_observation_status)}</td>
                         <td data-label="Size">${formatSize(request.request_size)}</td>
                         <td data-label="Duration" class="duration">${formatDuration(request.duration_ms)}</td>
                         <td data-label="Status">${formatStatus(request.status_code)}</td>

@@ -379,7 +379,14 @@
                 </div>
             </div>
             
-            {% if log.original_model or log.mapped_model %}
+            {% if model_observation_status == "not_inspected_rate_limit" %}
+            <div class="detail-section">
+                <h2>Model</h2>
+                <div class="detail-row">
+                    <span class="detail-value">Not inspected (rate limited before body)</span>
+                </div>
+            </div>
+            {% elif log.original_model or log.mapped_model %}
             <div class="detail-section">
                 <h2>Model Mapping</h2>
                 <div class="detail-row">
