@@ -3,6 +3,7 @@ import httpx
 import asyncio
 import logging
 import uuid
+from html.parser import HTMLParser
 from urllib.parse import quote
 from types import SimpleNamespace
 import smolrouter.database as database
@@ -49,6 +50,31 @@ from starlette.requests import Request
 
 
 from smolrouter import auth as auth_module
+
+
+class _VisibleTextParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.hidden_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style"}:
+            self.hidden_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"} and self.hidden_depth:
+            self.hidden_depth -= 1
+
+    def handle_data(self, data):
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+def _visible_text(html):
+    parser = _VisibleTextParser()
+    parser.feed(html)
+    return " ".join(parser.parts)
 
 
 def load_mock_json(filename):
@@ -1882,10 +1908,20 @@ async def test_projects_pages_and_api_are_facade_key_read_only_and_do_not_leak_s
     projects_body = projects_response.text
     assert "Project A" in projects_body
     assert "project-a" in projects_body
-    assert "configured facade-key identities" in projects_body
+    assert "configured projects" in projects_body
     assert "effective two-window request limits" in projects_body
+    assert "<th>Identity</th>" not in projects_body
+    assert 'data-label="Identity"' not in projects_body
     assert "srk-project-a-1" not in projects_body
     assert "srk-project-a-2" not in projects_body
+
+    fake_container.get_facade_key_registry.return_value = FacadeKeyRegistry.from_sources()
+    with (
+        patch("smolrouter.app._get_active_container", _get_active_container),
+        patch("smolrouter.app.get_webui_security", return_value=fake_security),
+    ):
+        empty_projects_response = await async_client.get("/projects")
+    assert 'colspan="6"' in empty_projects_response.text
 
     assert api_response.status_code == 200
     api_payload = api_response.json()
@@ -2020,6 +2056,8 @@ async def test_project_pages_and_api_support_slash_delimited_logical_ids(async_c
     registry = FacadeKeyRegistry.from_sources(
         facade_key_configs={
             project_id: {"display_name": "Team Project"},
+            "plain-project": {},
+            "evil/<id>": {"display_name": "<img src=x onerror=alert(1)>"},
         },
         facade_key_secrets={
             project_id: ["srk-team-proj-1"],
@@ -2051,21 +2089,65 @@ async def test_project_pages_and_api_support_slash_delimited_logical_ids(async_c
     ):
         projects_response = await async_client.get("/projects")
         detail_response = await async_client.get(f"/projects/{encoded_project_id}")
+        request_response = await async_client.get("/request/slash-project-1")
+        dashboard_response = await async_client.get("/")
+        client_response = await async_client.get("/clients/127.0.0.1")
         api_response = await async_client.get(f"/api/projects/{encoded_project_id}")
 
     assert projects_response.status_code == 200
     assert f"/projects/{encoded_project_id}" in projects_response.text
+    assert projects_response.text.count("plain-project") == 2
+    assert "/projects/evil%2F%3Cid%3E" in projects_response.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in projects_response.text
+    assert "<img src=x onerror=alert(1)>" not in projects_response.text
 
     assert detail_response.status_code == 200
     assert "Team Project" in detail_response.text
-    assert "facade_key:team/proj" in detail_response.text
+    assert "Project ID: team/proj" in detail_response.text
+    assert "requests for this project" in detail_response.text
     assert "/v1/chat/completions" in detail_response.text
     assert "/request/slash-project-1" in detail_response.text
+
+    assert request_response.status_code == 200
+    assert f'/projects/{encoded_project_id}' in request_response.text
+    assert "Team Project" in request_response.text
+    assert "team/proj" in request_response.text
+    assert 'class="project-id-secondary"' in request_response.text
+
+    for response in (projects_response, detail_response, request_response, dashboard_response, client_response):
+        visible_text = _visible_text(response.text).lower()
+        assert "facade_key" not in visible_text
+        assert "facade-key" not in visible_text
+        assert "facade key" not in visible_text
 
     assert api_response.status_code == 200
     api_payload = api_response.json()
     assert api_payload["project"]["id"] == project_id
     assert api_payload["logs"][0]["id"] == "slash-project-1"
+
+
+@pytest.mark.asyncio
+async def test_request_detail_renders_unknown_identity_as_unlinked_canonical_identity(async_client, disable_logging):
+    await app_module.RequestLog.create(
+        source_ip="127.0.0.1",
+        method="POST",
+        path="/v1/chat/completions",
+        identity_kind="service_account",
+        identity_subject_id="ops/<admin>",
+        identity_display_name="Should not replace canonical",
+        request_id="unknown-identity-detail",
+    )
+    fake_security = Mock()
+    fake_security.check_webui_access.return_value = None
+
+    with patch("smolrouter.app.get_webui_security", return_value=fake_security):
+        response = await async_client.get("/request/unknown-identity-detail")
+
+    assert response.status_code == 200
+    assert "Identity:" in response.text
+    assert "service_account:ops/&lt;admin&gt;" in response.text
+    assert "Should not replace canonical" not in response.text
+    assert "/projects/" not in response.text
 
 
 @pytest.mark.asyncio

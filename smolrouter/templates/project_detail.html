@@ -131,7 +131,9 @@
 
     <div class="project-header">
         <h1>{{ project.display_name or project.id }}</h1>
-        <div class="project-identity">facade_key:{{ project.id }}</div>
+        {% if project.display_name and project.display_name != project.id %}
+        <div class="project-identity">Project ID: {{ project.id }}</div>
+        {% endif %}
         <div class="project-meta">
             {% if project.configured and project.enabled %}
             <span class="project-meta-item ok">Enabled</span>
@@ -209,14 +211,14 @@
 
         <div class="table-container">
             <div class="table-header">
-                <h2>Recent Facade-Key Requests</h2>
+                <h2>Recent Project Requests</h2>
                 <div class="action-buttons">
                     <a class="action-btn secondary" href="/projects">Back to Projects</a>
                 </div>
             </div>
 
             <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
-                This page shows recent requests attributed to <strong>facade_key:{{ project.id }}</strong> within the retained request-log window. The displayed {{ project.request_rate_limit.source | default("historical", true) | replace('_', ' ') }} request policy is effective configuration, not a live Redis counter.
+                This page shows recent requests for this project within the retained request-log window. The displayed {{ project.request_rate_limit.source | default("historical", true) | replace('_', ' ') }} request policy is effective configuration, not a live Redis counter.
             </div>
 
             <div class="table-scroll">

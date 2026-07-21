@@ -111,14 +111,14 @@
 
         <div class="table-container">
             <div class="table-header">
-                <h2>Facade-Key Projects</h2>
+                <h2>Projects</h2>
                 <div class="action-buttons">
                     <a class="action-btn secondary" href="/">Back to Dashboard</a>
                 </div>
             </div>
 
             <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
-                This inventory lists configured facade-key identities and their effective two-window request limits. The values are policy, not live counters; request history is limited to the retained request-log window.
+                This inventory lists configured projects and their effective two-window request limits. The values are policy, not live counters; request history is limited to the retained request-log window.
             </div>
 
             <div class="table-scroll">
@@ -126,7 +126,6 @@
                     <thead>
                         <tr>
                             <th>Project</th>
-                            <th>Identity</th>
                             <th>Tags</th>
                             <th>Quota</th>
                             <th>Request limit</th>
@@ -141,12 +140,8 @@
                                 <div>
                                     <a href="/projects/{{ project.id | pathencode }}"><strong>{{ project.display_name or project.id }}</strong></a>
                                 </div>
+                                {% if project.display_name and project.display_name != project.id %}
                                 <div class="project-identity">{{ project.id }}</div>
-                            </td>
-                            <td data-label="Identity">
-                                <span class="identity-badge">facade_key:{{ project.id }}</span>
-                                {% if project.display_name %}
-                                <div class="project-identity">{{ project.display_name }}</div>
                                 {% endif %}
                             </td>
                             <td data-label="Tags">
@@ -193,7 +188,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="7" class="no-data">No projects are configured</td>
+                            <td colspan="6" class="no-data">No projects are configured</td>
                         </tr>
                         {% endfor %}
                     </tbody>

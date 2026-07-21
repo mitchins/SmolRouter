@@ -89,6 +89,11 @@
             color: #333;
             word-break: break-all;
         }
+
+        .project-id-secondary {
+            color: #666;
+            font-size: 0.8rem;
+        }
         
         .status-badge {
             padding: 0.25rem 0.75rem;
@@ -306,17 +311,18 @@
 
                     {% if request_identity %}
                     <div class="detail-row">
-                        <span class="detail-label">Project Identity:</span>
+                        {% if request_identity.kind == 'facade_key' %}
+                        <span class="detail-label">Project:</span>
                         <span class="detail-value">
-                            {% if request_identity.kind == 'facade_key' %}
-                            <a href="/projects/{{ request_identity.subject_id | pathencode }}">{{ request_identity.canonical }}</a>
-                            {% else %}
-                            {{ request_identity.canonical }}
-                            {% endif %}
-                            {% if request_identity.display_name %}
-                            &nbsp;&nbsp;<em>({{ request_identity.display_name }})</em>
+                            <a href="/projects/{{ request_identity.subject_id | pathencode }}">{{ request_identity.display_name or request_identity.subject_id }}</a>
+                            {% if request_identity.display_name and request_identity.display_name != request_identity.subject_id %}
+                            <br><span class="project-id-secondary">{{ request_identity.subject_id }}</span>
                             {% endif %}
                         </span>
+                        {% else %}
+                        <span class="detail-label">Identity:</span>
+                        <span class="detail-value" title="Identity">{{ request_identity.canonical }}</span>
+                        {% endif %}
                     </div>
                     {% endif %}
                 </div>
