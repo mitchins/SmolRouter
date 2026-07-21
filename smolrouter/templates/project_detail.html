@@ -241,6 +241,7 @@
             </div>
         </div>
     </div>
+    {% include 'project_mutation.html' %}
     {% if project.configured %}
     <script>
     (() => {
@@ -248,15 +249,9 @@
       const keyMessage = document.getElementById('key-message');
       const secretPanel = document.getElementById('secret-panel');
       const secretValue = document.getElementById('secret-value');
-      async function mutate(url, method, payload) {
-        const response = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-        const result = await response.json();
-        if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Request failed');
-        return result;
-      }
       document.getElementById('create-key').addEventListener('click', async (event) => {
         const button = event.currentTarget; if (button.disabled) return; button.disabled = true; keyMessage.textContent = '';
-        try { const result = await mutate('/api/project-management/keys', 'POST', {project_id:projectId}); secretValue.textContent = result.secret; secretPanel.style.display = 'block'; }
+        try { const result = await window.smolrouterProjectMutation('/api/project-management/keys', 'POST', {project_id:projectId}); secretValue.textContent = result.secret; secretPanel.style.display = 'block'; }
         catch (error) { keyMessage.textContent = error.message || 'Key creation failed'; button.disabled = false; }
       });
       document.getElementById('copy-secret').addEventListener('click', async () => {
@@ -272,14 +267,14 @@
       document.querySelectorAll('.revoke-key').forEach(button => button.addEventListener('click', async () => {
         if (button.disabled || !window.confirm('Revoke this API key? Existing clients will immediately stop authenticating.')) return;
         button.disabled = true; keyMessage.textContent = '';
-        try { await mutate('/api/project-management/keys', 'DELETE', {project_id:projectId, key_id:button.dataset.keyId}); window.location.reload(); }
+        try { await window.smolrouterProjectMutation('/api/project-management/keys', 'DELETE', {project_id:projectId, key_id:button.dataset.keyId}); window.location.reload(); }
         catch (error) { keyMessage.textContent = error.message || 'Key revocation failed'; button.disabled = false; }
       }));
       document.getElementById('delete-project').addEventListener('click', async (event) => {
         const button = event.currentTarget, message = document.getElementById('delete-message');
         if (document.getElementById('delete-confirmation').value !== projectId) { message.textContent = 'Project ID does not match.'; return; }
         if (button.disabled) return; button.disabled = true; message.textContent = '';
-        try { await mutate('/api/project-management/projects', 'DELETE', {project_id:projectId}); window.location.assign('/projects'); }
+        try { await window.smolrouterProjectMutation('/api/project-management/projects', 'DELETE', {project_id:projectId}); window.location.assign('/projects'); }
         catch (error) { message.textContent = error.message || 'Project deletion failed'; button.disabled = false; }
       });
     })();

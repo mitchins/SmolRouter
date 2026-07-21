@@ -1,0 +1,19 @@
+<script>
+window.smolrouterProjectMutation = async function(url, method, payload, fallbackMessage = 'Request failed') {
+  const response = await fetch(url, {
+    method,
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload),
+  });
+  let result = {};
+  try {
+    result = await response.json();
+  } catch (_) {
+    // The status and caller-provided fallback remain actionable for non-JSON failures.
+  }
+  if (!response.ok) {
+    throw new Error(typeof result.detail === 'string' ? result.detail : fallbackMessage);
+  }
+  return result;
+};
+</script>

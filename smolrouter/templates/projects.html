@@ -201,6 +201,7 @@
             </div>
         </div>
     </div>
+    {% include 'project_mutation.html' %}
     <script>
     (() => {
       const form = document.getElementById('create-project-form');
@@ -217,9 +218,7 @@
         if (displayName) payload.display_name = displayName;
         if (tags.length) payload.tags = tags;
         try {
-          const response = await fetch('/api/project-management/projects', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-          const result = await response.json();
-          if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : 'Project creation failed');
+          await window.smolrouterProjectMutation('/api/project-management/projects', 'POST', payload, 'Project creation failed');
           window.location.assign('/projects/' + encodeURIComponent(payload.project_id));
         } catch (error) { message.textContent = error.message || 'Project creation failed'; button.disabled = false; }
       });

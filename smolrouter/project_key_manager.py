@@ -207,23 +207,39 @@ def _validate_project_id(project_id: Any) -> str:
     return value
 
 
+def _normalize_display_name(display_name: Any) -> str:
+    if not isinstance(display_name, str):
+        raise ProjectKeyValidationError("display_name must be a non-empty string of at most 100 characters")
+    normalized = display_name.strip()
+    if not normalized or len(normalized) > 100:
+        raise ProjectKeyValidationError("display_name must be a non-empty string of at most 100 characters")
+    return normalized
+
+
+def _normalize_tag(tag: Any) -> str:
+    if not isinstance(tag, str):
+        raise ProjectKeyValidationError("each tag must be a non-empty string of at most 40 characters")
+    normalized = tag.strip()
+    if not normalized or len(normalized) > 40:
+        raise ProjectKeyValidationError("each tag must be a non-empty string of at most 40 characters")
+    return normalized
+
+
+def _normalize_tags(tags: Any) -> list[str]:
+    if not isinstance(tags, list) or len(tags) > 20:
+        raise ProjectKeyValidationError("tags must be a list containing at most 20 values")
+    normalized = [_normalize_tag(tag) for tag in tags]
+    if len(normalized) != len(set(normalized)):
+        raise ProjectKeyValidationError("tags must be unique")
+    return normalized
+
+
 def _project_config(display_name: Any = None, tags: Any = None) -> dict[str, Any]:
     result: dict[str, Any] = {"enabled": True}
     if display_name is not None:
-        if not isinstance(display_name, str) or not display_name.strip() or len(display_name.strip()) > 100:
-            raise ProjectKeyValidationError("display_name must be a non-empty string of at most 100 characters")
-        result["display_name"] = display_name.strip()
+        result["display_name"] = _normalize_display_name(display_name)
     if tags is not None:
-        if not isinstance(tags, list) or len(tags) > 20:
-            raise ProjectKeyValidationError("tags must be a list containing at most 20 values")
-        cleaned: list[str] = []
-        for tag in tags:
-            if not isinstance(tag, str) or not tag.strip() or len(tag.strip()) > 40:
-                raise ProjectKeyValidationError("each tag must be a non-empty string of at most 40 characters")
-            if tag.strip() in cleaned:
-                raise ProjectKeyValidationError("tags must be unique")
-            cleaned.append(tag.strip())
-        result["tags"] = cleaned
+        result["tags"] = _normalize_tags(tags)
     return result
 
 
@@ -265,6 +281,9 @@ class ProjectKeyManager:
     def _read_sources(self) -> tuple[dict[str, Any], dict[str, list[str]]]:
         routes = _read_mapping(self.routes_path)
         raw_projects = routes.get("facade_keys", {})
+        if raw_projects is None:
+            raw_projects = {}
+            routes["facade_keys"] = raw_projects
         if not isinstance(raw_projects, dict):
             raise ProjectKeyManagementError("routes facade_keys must be a mapping")
         _reject_symlink(self.secrets_path)

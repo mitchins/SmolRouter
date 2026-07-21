@@ -18,7 +18,7 @@ from .facade_key_store import (
     load_facade_key_secrets_from_path,
     resolve_facade_key_config_path,
 )
-from .project_key_manager import ProjectKeyManager
+from .project_key_manager import ProjectKeyManagementError, ProjectKeyManager
 
 def configure_create_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--routes-config", default=os.getenv("ROUTES_CONFIG"))
@@ -120,11 +120,18 @@ def run_create(args: argparse.Namespace) -> int:
         return 0
 
     manager = ProjectKeyManager(routes_path=routes_path, secrets_path=secret_file_path)
-    generated, _key_id = manager.create_key(project_id, generated)
+    try:
+        generated, _key_id = manager.create_key(project_id, generated)
+    except (ProjectKeyManagementError, OSError) as exc:
+        print(f"Failed to create facade key for project {project_id}: {exc}")
+        return 4
     print(f"Generated facade key for project: {project_id}")
     print(f"secret (copy exactly once): {generated}")
     print(f"wrote facade-key secrets to: {secret_file_path}")
-    print(f"secret_count: {len(updated.get(project_id, []))}")
+    try:
+        print(f"secret_count: {len(manager.list_keys(project_id))}")
+    except (ProjectKeyManagementError, OSError) as exc:
+        print(f"secret_count: unavailable ({exc})")
     return 0
 
 

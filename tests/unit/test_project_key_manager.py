@@ -70,6 +70,46 @@ def test_new_project_ids_accept_supported_corpus(tmp_path, project_id):
     assert manager.create_project(project_id)["project_id"] == project_id
 
 
+def test_project_config_preserves_omitted_tags_vs_explicit_empty_tags(tmp_path):
+    manager, routes = _manager(tmp_path)
+    manager.create_project("omitted")
+    manager.create_project("empty", tags=[])
+    projects = yaml.safe_load(routes.read_text(encoding="utf-8"))["facade_keys"]
+    assert "tags" not in projects["omitted"]
+    assert projects["empty"]["tags"] == []
+
+
+def test_project_config_trims_display_name_and_tags_at_boundaries(tmp_path):
+    manager, routes = _manager(tmp_path)
+    manager.create_project("bounded", f" {'d' * 100} ", [f" {'t' * 40} ", *[f"tag-{i}" for i in range(19)]])
+    config = yaml.safe_load(routes.read_text(encoding="utf-8"))["facade_keys"]["bounded"]
+    assert config["display_name"] == "d" * 100
+    assert config["tags"][0] == "t" * 40
+    assert len(config["tags"]) == 20
+
+
+@pytest.mark.parametrize(
+    ("display_name", "tags", "message"),
+    [
+        (123, None, "display_name"),
+        (" ", None, "display_name"),
+        ("x" * 101, None, "display_name"),
+        (None, "tag", "tags must be a list"),
+        (None, ["tag"] * 21, "at most 20"),
+        (None, [123], "each tag"),
+        (None, [" "], "each tag"),
+        (None, ["x" * 41], "each tag"),
+        (None, [" tag ", "tag"], "unique"),
+    ],
+)
+def test_project_config_rejects_invalid_types_bounds_and_trimmed_duplicates(
+    tmp_path, display_name, tags, message
+):
+    manager, _ = _manager(tmp_path)
+    with pytest.raises(ProjectKeyValidationError, match=message):
+        manager.create_project("project-a", display_name=display_name, tags=tags)
+
+
 @pytest.mark.parametrize("phase", ["open", "fsync"])
 def test_directory_fsync_ignores_only_supported_platform_errors(tmp_path, phase):
     open_mock = Mock(return_value=42)
@@ -148,6 +188,27 @@ def test_manager_rejects_malformed_routes_sources(tmp_path, routes_name, routes_
     manager = ProjectKeyManager(routes, tmp_path / "facade_keys.yaml")
     with pytest.raises(ProjectKeyManagementError, match=error):
         manager.get_registry()
+
+
+@pytest.mark.parametrize(
+    ("routes_name", "routes_text"),
+    [("routes.yaml", "facade_keys:\n"), ("routes.json", '{"facade_keys": null}\n')],
+)
+def test_manager_accepts_and_replaces_explicit_null_facade_key_sections(tmp_path, routes_name, routes_text):
+    routes = tmp_path / routes_name
+    routes.write_text(routes_text, encoding="utf-8")
+    manager = ProjectKeyManager(routes, tmp_path / "facade_keys.yaml")
+    assert manager.get_registry().key_ids() == ()
+    manager.create_project("project-a")
+    stored = json.loads(routes.read_text()) if routes.suffix == ".json" else yaml.safe_load(routes.read_text())
+    assert stored["facade_keys"]["project-a"] == {"enabled": True}
+
+
+def test_manager_accepts_truly_blank_yaml_for_read_and_create(tmp_path):
+    manager, routes = _manager(tmp_path, "")
+    assert manager.get_registry().key_ids() == ()
+    manager.create_project("project-a")
+    assert yaml.safe_load(routes.read_text())["facade_keys"]["project-a"] == {"enabled": True}
 
 
 def test_json_routes_preserve_unrelated_fields(tmp_path):
@@ -650,6 +711,12 @@ async def test_project_ui_has_management_controls_but_never_secret_values(async_
         detail = await async_client.get("/projects/project-a")
     assert listing.status_code == 200 and "Create project" in listing.text
     assert detail.status_code == 200 and "Create API key" in detail.text and "Delete project" in detail.text
+    assert listing.text.count("window.smolrouterProjectMutation =") == 1
+    assert detail.text.count("window.smolrouterProjectMutation =") == 1
+    assert "fallbackMessage = 'Request failed'" in listing.text
+    assert "smolrouterProjectMutation('/api/project-management/projects', 'POST', payload, 'Project creation failed')" in listing.text
+    assert "async function mutate" not in detail.text
+    assert "typeof result.detail === 'string' ? result.detail : fallbackMessage" in detail.text
     assert 'for="delete-confirmation"' in detail.text
     assert "Copy key" in detail.text
     assert "navigator.clipboard.writeText" in detail.text
