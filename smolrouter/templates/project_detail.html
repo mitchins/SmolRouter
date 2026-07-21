@@ -145,8 +145,16 @@
                 <div class="value">{{ project.quota.action if project.quota else "observe" }}</div>
             </div>
             <div class="project-summary-item">
-                <div class="label">Records Loaded</div>
-                <div class="value">{{ logs | length }}</div>
+                <div class="label">Request Limit</div>
+                <div class="value">
+                    {% if project.request_rate_limit.enabled and project.request_rate_limit.policy %}
+                        {% for window in project.request_rate_limit.policy.windows %}
+                        <div>{{ window.requests }} / {{ window.seconds }}s</div>
+                        {% endfor %}
+                    {% else %}
+                    disabled
+                    {% endif %}
+                </div>
             </div>
         </div>
 
@@ -159,7 +167,7 @@
             </div>
 
             <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
-                This page shows recent requests attributed to <strong>facade_key:{{ project.id }}</strong> within the retained request-log window. It does not provide quota accounting or enforcement yet.
+                This page shows recent requests attributed to <strong>facade_key:{{ project.id }}</strong> within the retained request-log window. The displayed {{ project.request_rate_limit.source | default("historical", true) | replace('_', ' ') }} request policy is effective configuration, not a live Redis counter.
             </div>
 
             <div class="table-scroll">

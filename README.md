@@ -255,6 +255,16 @@ For OpenAI-compatible providers, a configured provider `api_key` takes precedenc
 - For dev checkouts, `BLOB_STORAGE_PATH=./blob_storage` keeps blobs next to the repo as before.
 - `docker-compose.yml` mounts `./logs:/app/logs`, so rotated ERROR logs persist across container restarts.
 
+### Project request rate limits
+
+SmolRouter applies an atomic, Redis-backed two-window request limit to the five inference POST routes backed by the shared proxy: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/images/generations`. Image edits and variations, model listing, Ollama compatibility routes, and dashboard/API routes are outside this limiter.
+
+Configure `request_rate_limits` in the routes config. The anonymous and project defaults are each 1 request per second and 3 requests per 10 seconds when omitted. Anonymous requests share one global Redis bucket across source IPs, processes, and instances. Identified projects receive isolated buckets. A project's `rate_limit` is a complete replacement for `project_default`; it must specify both windows rather than partially merging them. Set `request_rate_limits.enabled: false` to skip enforcement.
+
+Requests with invalid or mismatched local keys receive `401` before consuming a bucket. An admitted request consumes capacity before its JSON body is parsed or sent upstream. A rejected request receives `429` with OpenAI-style error code `anonymous_rate_limit_exceeded` or `project_rate_limit_exceeded`, a whole-second `Retry-After`, and policy/bucket-class headers that contain no project key or identity. Redis failures fail closed with `503` and code `rate_limiter_unavailable`; production startup also verifies the limiter and refuses FakeRedis when limiting is enabled.
+
+The Projects UI and API expose each configured project's effective two-window policy and whether it comes from the project default or a whole-project override. They do not expose live Redis counters. Request graphs, filters, and drilldowns only cover logs still present in the configured request-log retention window, so they are not authoritative rate-limit accounting.
+
 ## Testing
 
 SmolRouter ships with an automated pytest suite covering model remapping, routing, logging, and quota enforcement:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from .facade_key_store import load_facade_key_secrets
+from .request_rate_limits import RequestRateLimitPolicy, parse_request_rate_limit_policy
 
 
 DEFAULT_FACADE_KEY_ACTION = "observe"
@@ -41,6 +42,7 @@ class FacadeKeyConfig:
     tags: tuple[str, ...] = ()
     default_class: Optional[str] = None
     quota: FacadeQuotaPolicy = field(default_factory=FacadeQuotaPolicy)
+    rate_limit: Optional[RequestRateLimitPolicy] = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ class RequestIdentity:
     tags: tuple[str, ...] = ()
     default_class: Optional[str] = None
     quota_policy: Dict[str, Any] = field(default_factory=dict)
+    rate_limit_policy: Optional[RequestRateLimitPolicy] = None
     token_accounting_state: Optional[str] = None
 
 
@@ -149,6 +152,14 @@ def _normalize_facade_key_config(key_id: str, raw_config: Any) -> FacadeKeyConfi
         tags=_normalize_tags(raw_config.get("tags"), key_id=key_id),
         default_class=(str(raw_config.get("default_class")).strip() if raw_config.get("default_class") not in (None, "") else None),
         quota=_normalize_quota_policy(raw_config.get("quota"), key_id=key_id),
+        rate_limit=(
+            parse_request_rate_limit_policy(
+                raw_config["rate_limit"],
+                field_name=f"facade_keys.{key_id}.rate_limit",
+            )
+            if raw_config.get("rate_limit") not in (None, "")
+            else None
+        ),
     )
 
 
@@ -265,6 +276,7 @@ class FacadeKeyRegistry:
                 tags=config.tags,
                 default_class=config.default_class,
                 quota_policy=config.quota.to_dict(),
+                rate_limit_policy=config.rate_limit,
                 token_accounting_state="untracked",
             ),
         )
@@ -283,6 +295,7 @@ class FacadeKeyRegistry:
                 "tags": list(config.tags),
                 "default_class": config.default_class,
                 "quota": config.quota.to_dict(),
+                "rate_limit": config.rate_limit.to_dict() if config.rate_limit is not None else None,
                 "secret_count": len(self.secrets.get(key_id, ())),
             }
             for key_id, config in self.configs.items()

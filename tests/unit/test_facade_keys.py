@@ -162,3 +162,57 @@ def test_registry_resolves_presented_secret_to_identity():
     assert resolved.identity.display_name == "Project A"
     assert resolved.identity.tags == ("team:ml",)
     assert resolved.identity.quota_policy["daily_tokens_soft"] == 1000
+
+
+def test_registry_parses_complete_project_rate_limit_override():
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            "project-a": {
+                "rate_limit": {
+                    "windows": [
+                        {"requests": 5, "seconds": 1},
+                        {"requests": 30, "seconds": 10},
+                    ]
+                }
+            }
+        },
+        facade_key_secrets={"project-a": ["srk-a"]},
+    )
+
+    config = registry.get_config("project-a")
+    assert config is not None
+    assert config.rate_limit is not None
+    assert config.rate_limit.to_dict() == {
+        "windows": [
+            {"requests": 5, "seconds": 1},
+            {"requests": 30, "seconds": 10},
+        ]
+    }
+    assert registry.to_dict()["project-a"]["rate_limit"] == config.rate_limit.to_dict()
+    assert registry.resolve_secret("srk-a").identity.rate_limit_policy == config.rate_limit
+
+
+def test_registry_keeps_missing_project_rate_limit_as_inherited():
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {}},
+        facade_key_secrets={},
+    )
+
+    assert registry.get_config("project-a").rate_limit is None
+    assert registry.to_dict()["project-a"]["rate_limit"] is None
+
+
+@pytest.mark.parametrize(
+    "rate_limit",
+    [
+        {"windows": [{"requests": 5, "seconds": 1}]},
+        {"windows": [{"requests": 5, "seconds": 1}, {"requests": 30}]},
+        {"requests": 5, "seconds": 1},
+    ],
+)
+def test_registry_rejects_malformed_or_partial_project_rate_limit(rate_limit):
+    with pytest.raises(ValueError, match=r"facade_keys\.project-a\.rate_limit"):
+        FacadeKeyRegistry.from_sources(
+            facade_key_configs={"project-a": {"rate_limit": rate_limit}},
+            facade_key_secrets={},
+        )

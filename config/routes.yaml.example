@@ -2,6 +2,36 @@
 # This file defines routing rules to intelligently direct requests
 # to different upstream servers based on source host and model.
 
+# Request limits use two complete windows. Unidentified callers share the
+# anonymous policy globally; identified projects use project_default unless
+# their facade-key entry supplies a complete rate_limit override.
+request_rate_limits:
+  enabled: true
+  anonymous:
+    windows:
+      - requests: 1
+        seconds: 1
+      - requests: 3
+        seconds: 10
+  project_default:
+    windows:
+      - requests: 1
+        seconds: 1
+      - requests: 3
+        seconds: 10
+
+# Project metadata is safe to keep here; facade-key secrets are stored separately.
+facade_keys:
+  project-a:
+    display_name: "Project A"
+    tags: ["team:ml", "env:dev"]
+    rate_limit:
+      windows:
+        - requests: 5
+          seconds: 1
+        - requests: 30
+          seconds: 10
+
 routes:
   # Route fast/lightweight models to GPU server
   - match:
