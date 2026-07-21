@@ -1324,6 +1324,7 @@ async def test_rate_limited_project_request_is_logged_without_request_body(
     expected_message = "Not inspected (rate limited before body)"
     assert expected_message in main_page.text
     assert expected_message in client_page.text
+    assert 'font-size: 0.75rem; color: #666;' in client_page.text
     assert expected_message in project_page.text
     assert expected_message in request_page.text
     assert "project-secret" not in str(response.headers)

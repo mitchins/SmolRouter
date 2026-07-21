@@ -203,7 +203,7 @@
 
         function formatModel(originalModel, mappedModel, observationStatus) {
             if (observationStatus === 'not_inspected_rate_limit') {
-                return '<span class="cell-secondary">Not inspected (rate limited before body)</span>';
+                return '<span style="font-size: 0.75rem; color: #666;">Not inspected (rate limited before body)</span>';
             }
             if (mappedModel && mappedModel !== originalModel) {
                 return `
