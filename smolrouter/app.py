@@ -2920,6 +2920,7 @@ REQUEST_DETAIL_RESPONSE_FIELDS = (
     "identity_display_name",
     "original_model",
     "mapped_model",
+    "model_observation_status",
     "service_type",
     "status_code",
     "duration_ms",
@@ -2933,6 +2934,21 @@ REQUEST_DETAIL_RESPONSE_FIELDS = (
 
 def _serialize_request_log_provider_metadata(log_entry: Any) -> dict[str, Any]:
     return serialize_request_metadata(log_entry, fields=REQUEST_LOG_METADATA_FIELDS)
+
+
+MODEL_OBSERVATION_NOT_INSPECTED_RATE_LIMIT = "not_inspected_rate_limit"
+
+
+def _derive_model_observation_status(log_entry: Any) -> str | None:
+    """Explain an absent model without mutating the persisted model fields."""
+
+    if (
+        getattr(log_entry, "upstream_url", None) == "rate-limiter"
+        and not getattr(log_entry, "original_model", None)
+        and not getattr(log_entry, "mapped_model", None)
+    ):
+        return MODEL_OBSERVATION_NOT_INSPECTED_RATE_LIMIT
+    return None
 
 
 def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
@@ -2955,6 +2971,7 @@ def _serialize_request_log_summary(log_entry: Any) -> dict[str, Any]:
         "service_type": getattr(log_entry, "service_type", None),
         "original_model": getattr(log_entry, "original_model", None),
         "mapped_model": getattr(log_entry, "mapped_model", None),
+        "model_observation_status": _derive_model_observation_status(log_entry),
         "duration_ms": duration_ms,
         "request_size": getattr(log_entry, "request_size", 0) or 0,
         "response_size": getattr(log_entry, "response_size", 0) or 0,
@@ -4070,6 +4087,7 @@ async def request_detail(request_id: str, request: Request):
             "request_detail.html",
             {
                 "log": log_entry,
+                "model_observation_status": _derive_model_observation_status(log_entry),
                 "request_identity": _get_request_identity(log_entry),
                 "elapsed_ms": elapsed_ms,
                 "request_body_str": getattr(log_entry, "request_body", b"").decode("utf-8")

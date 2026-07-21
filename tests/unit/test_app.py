@@ -981,7 +981,7 @@ async def test_proxy_backed_routes_enforce_rate_limit_before_body_parsing(
     monkeypatch.setattr(app_module, "_parse_openai_request_payload", parse_payload)
     monkeypatch.setattr(app_module, "_route_openai_request", route_upstream)
 
-    response = await async_client.post(path, content=b'{"secret":"must-not-be-read"}')
+    response = await async_client.post(path, content=b'{"model":"must-not-be-inspected","secret":"must-not-be-read"}')
 
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "anonymous_rate_limit_exceeded"
@@ -1031,6 +1031,35 @@ async def test_rate_limiter_failure_returns_stable_503_before_parse_or_upstream(
     assert "secret" not in outcome_log
     parse_payload.assert_not_awaited()
     route_upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_503_log_derives_model_status_without_reading_body(
+    async_client, isolated_db, monkeypatch
+):
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    limiter = SimpleNamespace(check=AsyncMock(side_effect=ConnectionError("redis unavailable")))
+    parse_payload = AsyncMock(side_effect=AssertionError("body must not be parsed"))
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "_parse_openai_request_payload", parse_payload)
+
+    response = await async_client.post(
+        "/v1/responses",
+        content=b'{"model":"private-model","input":"must-not-be-read"}',
+    )
+
+    assert response.status_code == 503
+    records = await app_module.RequestLog.get_recent(1)
+    assert records[0].status_code == 503
+    assert not records[0].original_model
+    assert not records[0].mapped_model
+    assert getattr(records[0], "request_body", None) is None
+    assert getattr(records[0], "request_body_key", None) is None
+    assert getattr(records[0], "request_body_hash", None) is None
+    assert app_module._serialize_request_log(records[0])["model_observation_status"] == (
+        "not_inspected_rate_limit"
+    )
+    parse_payload.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1266,7 +1295,7 @@ async def test_rate_limited_project_request_is_logged_without_request_body(
 
     response = await async_client.post(
         "/v1/embeddings",
-        content=b'{"api_key":"never-store-this"}',
+        content=b'{"model":"text-embedding-private","api_key":"never-store-this"}',
         headers={app_module.FACADE_KEY_HEADER: "srk-project-secret"},
     )
 
@@ -1275,6 +1304,29 @@ async def test_rate_limited_project_request_is_logged_without_request_body(
     assert records[0].status_code == 429
     assert records[0].identity_subject_id == "project-a"
     assert records[0].request_size == 0
+    assert not records[0].original_model
+    assert not records[0].mapped_model
+    assert getattr(records[0], "request_body", None) is None
+    assert getattr(records[0], "request_body_key", None) is None
+    assert getattr(records[0], "request_body_hash", None) is None
+    serialized = app_module._serialize_request_log(records[0])
+    assert serialized["model_observation_status"] == "not_inspected_rate_limit"
+    assert serialized["original_model"] in (None, "")
+    assert serialized["mapped_model"] in (None, "")
+    main_page = await async_client.get("/")
+    client_page = await async_client.get(f"/clients/{records[0].source_ip}")
+    project_page = await async_client.get("/projects/project-a")
+    request_page = await async_client.get(f"/request/{records[0].id}")
+    assert main_page.status_code == 200
+    assert client_page.status_code == 200
+    assert project_page.status_code == 200
+    assert request_page.status_code == 200
+    expected_message = "Not inspected (rate limited before body)"
+    assert expected_message in main_page.text
+    assert expected_message in client_page.text
+    assert 'font-size: 0.75rem; color: #666;' in client_page.text
+    assert expected_message in project_page.text
+    assert expected_message in request_page.text
     assert "project-secret" not in str(response.headers)
     fake_container.route_request.assert_not_awaited()
 
@@ -2831,6 +2883,76 @@ def test_body_status_preserves_write_failed_when_archival_failed():
     log_entry = SimpleNamespace(request_body=None, request_body_key=None, request_body_status="write_failed")
 
     assert app_module._body_status(log_entry, "request_body") == "write_failed"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_message"),
+    [(429, "anonymous_rate_limit_exceeded"), (503, "rate_limiter_unavailable")],
+)
+def test_request_log_summary_derives_uninspected_model_status_for_limiter_terminal_logs(
+    status_code, error_message
+):
+    log_entry = SimpleNamespace(
+        id="limited-request",
+        timestamp=app_module.datetime.now(),
+        source_ip="127.0.0.1",
+        path="/v1/chat/completions",
+        service_type="openai",
+        upstream_url="rate-limiter",
+        original_model="",
+        mapped_model=None,
+        status_code=status_code,
+        error_message=error_message,
+    )
+
+    summary = app_module._serialize_request_log_summary(log_entry)
+    detail = app_module._serialize_request_detail_response(
+        log_entry,
+        {"is_duplicate": False, "duplicate_count": 0, "request_body_hash": None, "duplicates": []},
+    )
+
+    assert summary["model_observation_status"] == "not_inspected_rate_limit"
+    assert detail["model_observation_status"] == "not_inspected_rate_limit"
+    assert summary["original_model"] == ""
+    assert summary["mapped_model"] is None
+
+
+@pytest.mark.parametrize(
+    "log_entry",
+    [
+        SimpleNamespace(upstream_url="provider:openai", original_model="", mapped_model=None),
+        SimpleNamespace(upstream_url="rate-limiter", original_model="gpt-4o", mapped_model=None),
+        SimpleNamespace(upstream_url="rate-limiter", original_model=None, mapped_model="routed-model"),
+    ],
+)
+def test_model_observation_status_does_not_relabel_other_missing_or_known_models(log_entry):
+    assert app_module._derive_model_observation_status(log_entry) is None
+
+
+def test_model_observation_status_does_not_enter_performance_or_model_filter_fields():
+    log_entry = SimpleNamespace(
+        id="limited-request",
+        timestamp=app_module.datetime.now(),
+        upstream_url="rate-limiter",
+        original_model=None,
+        mapped_model=None,
+        service_type="openai",
+        path="/v1/chat/completions",
+        status_code=429,
+        duration_ms=5,
+        request_size=0,
+        response_size=0,
+        prompt_tokens=None,
+        completion_tokens=None,
+        total_tokens=None,
+    )
+
+    point = app_module._serialize_performance_point(log_entry)
+
+    assert point["model"] is None
+    assert point["original_model"] is None
+    assert point["mapped_model"] is None
+    assert app_module._matches_performance_filters(log_entry, "not_inspected_rate_limit", None) is False
 
 
 def test_serialize_request_detail_response_reuses_summary_and_provider_metadata():
