@@ -109,7 +109,7 @@ def run_create(args: argparse.Namespace) -> int:
         existing = load_facade_key_secrets_from_path(secret_file_path)
     else:
         existing = {}
-    updated, added = append_facade_key_secret(project_id, generated, existing)
+    _, added = append_facade_key_secret(project_id, generated, existing)
     if not added:
         print(f"Secret already present for project {project_id}; no update required.")
         return 0
