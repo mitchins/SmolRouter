@@ -48,6 +48,14 @@ from smolrouter.security import init_webui_security, get_webui_security
 from smolrouter.container import initialize_container
 from smolrouter.config_paths import normalize_provider_file_references, resolve_routes_config_path
 from smolrouter.facade_keys import RequestIdentity
+from smolrouter.redis_config import is_fake_redis
+from smolrouter.request_rate_limits import (
+    RateLimitDecision,
+    RedisRequestRateLimiter,
+    RequestRateLimitConfig,
+    RequestRateLimitConfigError,
+    RequestRateLimitPolicy,
+)
 from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
 from smolrouter.task_utils import create_logged_task, drain_background_tasks
 
@@ -109,6 +117,10 @@ def configure_logging() -> None:
 # configure_logging() is called by the CLI entrypoint (`smolrouter/cli.py`) so
 # logging handlers/levels are installed before uvicorn configures its own logging.
 logger = logging.getLogger("model-rerouter")
+
+# A single process-wide limiter deliberately shares Redis buckets with every
+# worker and instance. Tests patch this seam when exercising unrelated routes.
+REQUEST_RATE_LIMITER = RedisRequestRateLimiter()
 
 FACADE_KEY_HEADER = "X-SmolRouter-Key"
 FACADE_KEY_PREFIX = "srk-"
@@ -206,9 +218,9 @@ async def app_lifespan(app: FastAPI):
     try:
         await _initialize_request_logging_system()
         _initialize_blob_storage_strict()
-
         # Initialize new architecture container
         await init_new_architecture()
+        await _verify_request_rate_limiter_startup()
     except Exception:
         await _shutdown_proxy_health_monitors(container)
         _stop_logging_cleanup_if_enabled()
@@ -575,6 +587,11 @@ async def init_new_architecture():
                         f"Failed to start proxy health monitor for {provider.get_provider_id()}: {provider_error}"
                     )
         logger.info("New SmolRouter architecture initialized successfully")
+    except RequestRateLimitConfigError:
+        # Request admission cannot safely fall back: malformed limiter policy
+        # must prevent startup instead of silently disabling enforcement.
+        container = None
+        raise
     except Exception as e:
         logger.exception(f"Failed to initialize new architecture: {e}")
         logger.warning("Falling back to legacy architecture only")
@@ -778,6 +795,28 @@ class ProxyRequestContext:
     active_container: Any = None
     client_context: Optional[Any] = None
     identity: Optional[RequestIdentity] = None
+
+
+def _default_request_rate_limit_config() -> RequestRateLimitConfig:
+    return RequestRateLimitConfig()
+
+
+def _request_rate_limit_config(active_container: Any = None) -> RequestRateLimitConfig:
+    if active_container is None:
+        return _default_request_rate_limit_config()
+    config = active_container.get_request_rate_limit_config()
+    return config if isinstance(config, RequestRateLimitConfig) else _default_request_rate_limit_config()
+
+
+async def _verify_request_rate_limiter_startup() -> None:
+    """Fail startup when enabled request limiting cannot be enforced safely."""
+
+    config = _request_rate_limit_config(container)
+    if not config.enabled:
+        return
+    if os.getenv("APP_ENV", "dev").lower() == "prod" and is_fake_redis():
+        raise RuntimeError("FakeRedis cannot enforce request rate limits in production")
+    await REQUEST_RATE_LIMITER.verify()
 
 
 def _extract_model_from_provider_url(model_name: str) -> str:
@@ -1404,7 +1443,13 @@ def _build_request_client_context(
     )
 
 
-def _build_project_inventory_entry(project_id: str, config: Any = None, secret_count: int = 0) -> dict[str, Any]:
+def _build_project_inventory_entry(
+    project_id: str,
+    config: Any = None,
+    secret_count: int = 0,
+    effective_rate_limit: Any = None,
+    rate_limits_enabled: Optional[bool] = None,
+) -> dict[str, Any]:
     if config is None:
         display_name = None
         enabled = False
@@ -1418,6 +1463,11 @@ def _build_project_inventory_entry(project_id: str, config: Any = None, secret_c
         default_class = config.default_class
         quota_policy = getattr(config, "quota", None)
         quota_payload = quota_policy.to_dict() if quota_policy is not None else None
+
+    rate_limit_payload = effective_rate_limit.to_dict() if effective_rate_limit is not None else None
+    rate_limit_source = None
+    if config is not None and effective_rate_limit is not None:
+        rate_limit_source = "project_override" if getattr(config, "rate_limit", None) is not None else "project_default"
 
     return {
         "id": project_id,
@@ -1433,6 +1483,11 @@ def _build_project_inventory_entry(project_id: str, config: Any = None, secret_c
         "default_class": default_class,
         "tags": list(tags),
         "quota": quota_payload,
+        "request_rate_limit": {
+            "enabled": rate_limits_enabled,
+            "source": rate_limit_source,
+            "policy": rate_limit_payload,
+        },
         "configured": config is not None,
     }
 
@@ -1443,11 +1498,14 @@ async def _get_facade_key_registry_data() -> dict[str, Any]:
         return {}
 
     registry = active_container.get_facade_key_registry()
+    rate_limit_config = _request_rate_limit_config(active_container)
 
     return {
         key_id: {
             "config": config,
             "secret_count": len(registry.get_secrets(key_id)),
+            "effective_rate_limit": config.rate_limit or rate_limit_config.project_default,
+            "rate_limits_enabled": rate_limit_config.enabled,
         }
         for key_id, config in registry.configs.items()
     }
@@ -1463,6 +1521,8 @@ async def _load_facade_key_inventory() -> dict[str, dict[str, Any]]:
             project_id=project_id,
             config=entry["config"],
             secret_count=entry["secret_count"],
+            effective_rate_limit=entry["effective_rate_limit"],
+            rate_limits_enabled=entry["rate_limits_enabled"],
         )
         for project_id, entry in sorted(registry_data.items(), key=lambda item: item[0])
     }
@@ -1701,6 +1761,17 @@ async def _prepare_proxy_request_context(
             auth_payload,
             "nonlocal_bearer_token" if presented_bearer_token else "missing_local_facade_key",
         )
+        if response is None:
+            # Lifespan initializes the global container even when request
+            # routing is explicitly kept on the legacy path. Reuse only its
+            # validated admission configuration here; do not route through it.
+            context.active_container = container if legacy_proxy else await _get_active_container(False)
+            if context.active_container is not None:
+                context.client_context = _build_request_client_context(
+                    context.active_container,
+                    source_ip,
+                    context.headers,
+                )
         return response, context
 
     if legacy_proxy:
@@ -1752,6 +1823,165 @@ async def _prepare_proxy_request_context(
         )
 
     return None, context
+
+
+def _rate_limit_response_payload(status_code: int, bucket_class: str) -> Dict[str, Any]:
+    if status_code == 429:
+        return {
+            "error": {
+                "message": (
+                    "The request rate limit for this project was exceeded."
+                    if bucket_class == "project"
+                    else "The anonymous request rate limit was exceeded."
+                ),
+                "type": "rate_limit_error",
+                "param": None,
+                "code": "project_rate_limit_exceeded",
+            }
+        }
+    return {
+        "error": {
+            "message": "Request rate limiting is temporarily unavailable.",
+            "type": "service_unavailable_error",
+            "param": None,
+            "code": "rate_limiter_unavailable",
+        }
+    }
+
+
+def _rate_limit_headers(decision: RateLimitDecision) -> Dict[str, str]:
+    windows = ", ".join(
+        f"{window.requests};w={window.seconds}" for window in decision.policy.windows
+    )
+    headers = {
+        "X-SmolRouter-RateLimit-Bucket": decision.bucket_class,
+        "X-SmolRouter-RateLimit-Policy": windows,
+    }
+    if not decision.allowed:
+        headers["Retry-After"] = str(decision.retry_after_seconds)
+    return headers
+
+
+def _rate_limit_identity_log_suffix(identity: Optional[RequestIdentity]) -> tuple[str, tuple[str, ...]]:
+    if identity is None:
+        return "", ()
+    return " identity_kind=%s identity_subject_id=%s", (identity.kind, identity.subject_id)
+
+
+async def _log_rate_limit_outcome(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+    identity: Optional[RequestIdentity],
+    status_code: int,
+    error_code: str,
+) -> None:
+    """Best-effort terminal request logging without reading or retaining a body."""
+
+    try:
+        log_entry = await start_request_log(
+            request,
+            "openai",
+            "rate-limiter",
+            None,
+            None,
+            auth_payload,
+            None,
+            identity,
+        )
+        complete_request_log(
+            log_entry,
+            start_time,
+            {"status_code": status_code, "error_message": error_code},
+        )
+    except Exception:
+        logger.warning("Failed to persist request rate-limit outcome")
+
+
+async def _apply_request_rate_limit(
+    request: Request,
+    start_time: float,
+    auth_payload: Optional[Dict[str, Any]],
+    context: ProxyRequestContext,
+) -> Optional[JSONResponse]:
+    config = _request_rate_limit_config(context.active_container)
+    bucket_class = "project" if context.identity else "anonymous"
+    identity_suffix, identity_args = _rate_limit_identity_log_suffix(context.identity)
+    if not config.enabled:
+        logger.info(
+            "request_rate_limit outcome=skipped status=disabled status_code=none bucket_class=%s "
+            "effective_policy=disabled violated_windows=[] retry_after_ms=0" + identity_suffix,
+            bucket_class,
+            *identity_args,
+        )
+        return None
+
+    policy = config.anonymous
+    if context.active_container is not None:
+        effective_policy = context.active_container.get_effective_request_rate_limit_policy(context.identity)
+        if isinstance(effective_policy, RequestRateLimitPolicy):
+            policy = effective_policy
+        elif context.identity is not None:
+            policy = context.identity.rate_limit_policy or config.project_default
+    identity_kwargs: Dict[str, str] = {}
+    if context.identity is not None:
+        identity_kwargs = {
+            "identity_kind": context.identity.kind,
+            "identity_subject_id": context.identity.subject_id,
+        }
+
+    try:
+        decision = await REQUEST_RATE_LIMITER.check(
+            bucket_class,
+            policy,
+            **identity_kwargs,
+        )
+    except Exception:
+        logger.error(
+            "request_rate_limit outcome=unavailable status=error status_code=503 bucket_class=%s "
+            "effective_policy=%s violated_windows=unknown retry_after_ms=unknown" + identity_suffix,
+            bucket_class,
+            policy.to_dict(),
+            *identity_args,
+        )
+        await _log_rate_limit_outcome(
+            request,
+            start_time,
+            auth_payload,
+            context.identity,
+            503,
+            "rate_limiter_unavailable",
+        )
+        return JSONResponse(content=_rate_limit_response_payload(503, bucket_class), status_code=503)
+
+    logger.info(
+        "request_rate_limit outcome=%s status=%s status_code=%s bucket_class=%s effective_policy=%s "
+        "violated_windows=%s retry_after_ms=%d" + identity_suffix,
+        "admitted" if decision.allowed else "rejected",
+        "allowed" if decision.allowed else "denied",
+        "pending" if decision.allowed else 429,
+        decision.bucket_class,
+        decision.policy.to_dict(),
+        [window.to_dict() for window in decision.violated_windows],
+        decision.retry_after_ms,
+        *identity_args,
+    )
+    if decision.allowed:
+        return None
+
+    await _log_rate_limit_outcome(
+        request,
+        start_time,
+        auth_payload,
+        context.identity,
+        429,
+        "project_rate_limit_exceeded",
+    )
+    return JSONResponse(
+        content=_rate_limit_response_payload(429, bucket_class),
+        status_code=429,
+        headers=_rate_limit_headers(decision),
+    )
 
 
 async def _execute_openai_route_with_logging(
@@ -1862,6 +2092,15 @@ async def proxy_request(path: str, request: Request):
     )
     if early_response is not None:
         return early_response
+
+    rate_limit_response = await _apply_request_rate_limit(
+        request,
+        start_time,
+        auth_payload,
+        context,
+    )
+    if rate_limit_response is not None:
+        return rate_limit_response
 
     payload, request_body_bytes, error_response = await _parse_openai_request_payload(
         request, start_time, auth_payload, context.identity
@@ -2261,7 +2500,8 @@ async def proxy_ollama_request(path: str, request: Request) -> JSONResponse | St
 OPENAI_PROXY_ROUTE_RESPONSES = {
     400: {"description": "Invalid request payload"},
     401: {"description": "Invalid or mismatched local facade key"},
-    503: {"description": "Routing unavailable"},
+    429: {"description": "Project or anonymous request rate limit exceeded"},
+    503: {"description": "Routing or request rate limiter unavailable"},
 }
 
 IMAGE_GENERATION_PROXY_ROUTE_RESPONSES = OPENAI_PROXY_ROUTE_RESPONSES

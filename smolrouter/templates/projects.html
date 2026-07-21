@@ -102,7 +102,7 @@
             </div>
 
             <div class="filter-help dashboard-filter-help" style="padding: 0 1.5rem 1rem;">
-                This inventory lists configured facade-key identities only. Quota values shown here are configured policy, not live accounting or enforcement. Historical traffic for identities with no current config is reachable from request or project drilldown links, but is not listed in this inventory.
+                This inventory lists configured facade-key identities and their effective two-window request limits. The values are policy, not live counters; request history is limited to the retained request-log window.
             </div>
 
             <div class="table-scroll">
@@ -113,6 +113,7 @@
                             <th>Identity</th>
                             <th>Tags</th>
                             <th>Quota</th>
+                            <th>Request limit</th>
                             <th>Secrets</th>
                             <th>Status</th>
                         </tr>
@@ -151,6 +152,16 @@
                                 <span style="color:#999;">default</span>
                                 {% endif %}
                             </td>
+                            <td data-label="Request limit">
+                                {% if project.request_rate_limit.enabled and project.request_rate_limit.policy %}
+                                    {% for window in project.request_rate_limit.policy.windows %}
+                                    <div class="quota-value">{{ window.requests }} request{{ "s" if window.requests != 1 else "" }} / {{ window.seconds }}s</div>
+                                    {% endfor %}
+                                    <div class="quota-value">{{ project.request_rate_limit.source | replace('_', ' ') }}</div>
+                                {% else %}
+                                <span style="color:#999;">disabled</span>
+                                {% endif %}
+                            </td>
                             <td data-label="Secrets">{{ project.secret_count }}</td>
                             <td data-label="Status">
                                 {% if project.configured %}
@@ -166,7 +177,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="6" class="no-data">No projects are configured</td>
+                            <td colspan="7" class="no-data">No projects are configured</td>
                         </tr>
                         {% endfor %}
                     </tbody>

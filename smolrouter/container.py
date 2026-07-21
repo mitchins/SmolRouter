@@ -12,11 +12,16 @@ import logging
 import asyncio
 import time
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from .interfaces import ClientContext
 from .facade_keys import FacadeKeyRegistry, RequestIdentity, load_facade_key_registry
+from .request_rate_limits import (
+    RequestRateLimitConfig,
+    RequestRateLimitPolicy,
+    parse_request_rate_limit_config,
+)
 from .providers import ProviderFactory, IModelProvider
 from .mediator import ModelMediatorFactory, ModelMediator
 from .caching import InMemoryModelCache, NoOpModelCache, IModelCache
@@ -62,6 +67,8 @@ class SmolRouterConfig:
     aliases: Optional[Dict[str, Any]] = None
     facade_keys: Optional[Dict[str, Any]] = None
     facade_key_registry: Optional[FacadeKeyRegistry] = None
+    request_rate_limits: Optional[Dict[str, Any]] = None
+    request_rate_limit_config: RequestRateLimitConfig = field(init=False)
 
     def __post_init__(self):
         if self.model_map is None:
@@ -78,6 +85,9 @@ class SmolRouterConfig:
             self.aliases = {}
         if self.facade_keys is None:
             self.facade_keys = {}
+        if self.request_rate_limits is None:
+            self.request_rate_limits = {}
+        self.request_rate_limit_config = parse_request_rate_limit_config(self.request_rate_limits)
 
 
 class SmolRouterContainer:
@@ -141,6 +151,7 @@ class SmolRouterContainer:
             servers=routes_data.get("servers", {}),
             aliases=routes_data.get("aliases", {}),
             facade_keys=routes_data.get("facade_keys", {}),
+            request_rate_limits=routes_data.get("request_rate_limits", {}),
             enable_background_health_checks=enable_background_health_checks,
             health_check_interval=health_check_interval,
         )
@@ -412,6 +423,20 @@ class SmolRouterContainer:
 
     def get_facade_key_registry(self) -> FacadeKeyRegistry:
         return self.config.facade_key_registry or load_facade_key_registry(self.config.facade_keys)
+
+    def get_request_rate_limit_config(self) -> RequestRateLimitConfig:
+        """Return the validated global request-rate-limit configuration."""
+        return self.config.request_rate_limit_config
+
+    def get_effective_request_rate_limit_policy(
+        self,
+        identity: Optional[RequestIdentity],
+    ) -> RequestRateLimitPolicy:
+        """Resolve anonymous, project-default, or project-specific request limits."""
+        config = self.get_request_rate_limit_config()
+        if identity is None:
+            return config.anonymous
+        return identity.rate_limit_policy or config.project_default
 
     async def route_request(
         self,

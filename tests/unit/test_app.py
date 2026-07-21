@@ -6,6 +6,7 @@ import uuid
 from urllib.parse import quote
 from types import SimpleNamespace
 import smolrouter.database as database
+import smolrouter.container as container_module
 from pydantic import BaseModel
 import smolrouter.app as app_module
 from smolrouter.app import (
@@ -35,6 +36,13 @@ from smolrouter.interfaces import ClientContext
 from smolrouter.google_genai_provider import GoogleGenAIConfig, GoogleGenAIProvider
 from smolrouter.interfaces import ProxyConfig
 from smolrouter.request_metadata import RequestMetadata, apply_request_metadata
+from smolrouter.request_rate_limits import (
+    RateLimitDecision,
+    RateLimitWindow,
+    RequestRateLimitConfig,
+    RequestRateLimitConfigError,
+    RequestRateLimitPolicy,
+)
 from smolrouter.task_utils import create_logged_task
 from smolrouter.providers import OpenAIProvider, ProviderConfig
 from starlette.requests import Request
@@ -428,6 +436,7 @@ async def test_openai_proxy_request_with_nonlocal_authorization_keeps_anonymous_
 ):
     captured = {}
     fake_container = Mock()
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
 
     async def fake_route_request(*args, **kwargs):
         captured["client_context"] = kwargs.get("client_context")
@@ -454,7 +463,7 @@ async def test_openai_proxy_request_with_nonlocal_authorization_keeps_anonymous_
     )
 
     assert response.status_code == 200
-    assert captured["client_context"] is None
+    assert captured["client_context"].identity is None
     assert captured["headers"] == {"authorization": "Bearer provider-token"}
 
 
@@ -720,6 +729,7 @@ async def test_openai_proxy_request_without_facade_key_keeps_client_context_none
 ):
     captured = {}
     fake_container = Mock()
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
 
     async def fake_route_request(*args, **kwargs):
         captured["client_context"] = kwargs["client_context"]
@@ -744,7 +754,7 @@ async def test_openai_proxy_request_without_facade_key_keeps_client_context_none
     )
 
     assert response.status_code == 200
-    assert captured["client_context"] is None
+    assert captured["client_context"].identity is None
 
 
 @pytest.mark.asyncio
@@ -830,12 +840,14 @@ async def test_openai_proxy_request_rejects_unknown_facade_key_in_non_legacy_mod
     fake_container.get_facade_key_registry.return_value = registry
     fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
     fake_container.route_request = AsyncMock()
+    limiter = SimpleNamespace(check=AsyncMock())
 
     async def fake_get_active_container(_legacy_proxy: bool):
         return fake_container
 
     monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
     monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
 
     response = await async_client.post(
         "/v1/chat/completions",
@@ -845,6 +857,7 @@ async def test_openai_proxy_request_rejects_unknown_facade_key_in_non_legacy_mod
 
     assert response.status_code == 401
     assert response.json()["error"] == "facade_key_auth_failed"
+    limiter.check.assert_not_awaited()
     fake_container.route_request.assert_not_awaited()
 
 
@@ -854,6 +867,7 @@ async def test_openai_proxy_request_treats_whitespace_only_facade_key_as_absent(
 ):
     captured = {}
     fake_container = Mock()
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
 
     async def fake_route_request(*args, **kwargs):
         captured["client_context"] = kwargs["client_context"]
@@ -879,7 +893,7 @@ async def test_openai_proxy_request_treats_whitespace_only_facade_key_as_absent(
     )
 
     assert response.status_code == 200
-    assert captured["client_context"] is None
+    assert captured["client_context"].identity is None
 
 
 @pytest.mark.asyncio
@@ -930,6 +944,299 @@ async def test_openai_proxy_request_rejects_facade_key_in_legacy_mode(async_clie
     assert response.status_code == 503
     assert response.json()["error"] == "facade_key_auth_failed"
     assert response.json()["detail"] == "SmolRouter facade keys are unavailable in legacy proxy mode"
+
+
+def _rate_limit_decision(*, allowed: bool, bucket_class: str = "anonymous") -> RateLimitDecision:
+    policy = RequestRateLimitPolicy(
+        windows=(RateLimitWindow(1, 1), RateLimitWindow(3, 10)),
+    )
+    return RateLimitDecision(
+        allowed=allowed,
+        retry_after_ms=1250 if not allowed else 0,
+        violated_windows=(policy.windows[0],) if not allowed else (),
+        counts=(1, 1),
+        bucket_class=bucket_class,
+        policy=policy,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "/v1/embeddings",
+        "/v1/images/generations",
+    ],
+)
+async def test_proxy_backed_routes_enforce_rate_limit_before_body_parsing(
+    path, async_client, disable_logging, monkeypatch
+):
+    limiter = SimpleNamespace(check=AsyncMock(return_value=_rate_limit_decision(allowed=False)))
+    parse_payload = AsyncMock(side_effect=AssertionError("body must not be parsed"))
+    route_upstream = AsyncMock(side_effect=AssertionError("upstream must not be called"))
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "_parse_openai_request_payload", parse_payload)
+    monkeypatch.setattr(app_module, "_route_openai_request", route_upstream)
+
+    response = await async_client.post(path, content=b'{"secret":"must-not-be-read"}')
+
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "project_rate_limit_exceeded"
+    assert response.headers["retry-after"] == "2"
+    assert response.headers["x-smolrouter-ratelimit-bucket"] == "anonymous"
+    assert response.headers["x-smolrouter-ratelimit-policy"] == "1;w=1, 3;w=10"
+    assert "secret" not in str(response.headers)
+    parse_payload.assert_not_awaited()
+    route_upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_edits_and_variations_are_outside_request_limiter(async_client, disable_logging, monkeypatch):
+    limiter = SimpleNamespace(check=AsyncMock(side_effect=AssertionError("limiter must not run")))
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+
+    for path in ("/v1/images/edits", "/v1/images/variations"):
+        response = await async_client.post(path, content=b"not-json")
+        assert response.status_code == 501
+
+    limiter.check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_failure_returns_stable_503_before_parse_or_upstream(
+    async_client, disable_logging, monkeypatch, caplog
+):
+    limiter = SimpleNamespace(check=AsyncMock(side_effect=ConnectionError("redis password=secret")))
+    parse_payload = AsyncMock(side_effect=AssertionError("body must not be parsed"))
+    route_upstream = AsyncMock(side_effect=AssertionError("upstream must not be called"))
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "_parse_openai_request_payload", parse_payload)
+    monkeypatch.setattr(app_module, "_route_openai_request", route_upstream)
+
+    with caplog.at_level(logging.INFO, logger="model-rerouter"):
+        response = await async_client.post("/v1/responses", content=b'{"credential":"secret"}')
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "rate_limiter_unavailable"
+    assert "secret" not in response.text
+    outcome_log = next(record.message for record in caplog.records if "outcome=unavailable" in record.message)
+    assert "status=error" in outcome_log
+    assert "effective_policy=" in outcome_log
+    assert "violated_windows=unknown" in outcome_log
+    assert "retry_after_ms=unknown" in outcome_log
+    assert "identity_" not in outcome_log
+    assert "secret" not in outcome_log
+    parse_payload.assert_not_awaited()
+    route_upstream.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disabled_request_limiter_skips_check(async_client, mock_openai_upstream, disable_logging, monkeypatch):
+    limiter = SimpleNamespace(check=AsyncMock(side_effect=AssertionError("disabled limiter must not run")))
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = RequestRateLimitConfig(enabled=False)
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "container", fake_container)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+
+    assert response.status_code == 200
+    limiter.check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_anonymous_request_uses_configured_custom_policy(
+    async_client, mock_openai_upstream, disable_logging, monkeypatch
+):
+    custom_policy = RequestRateLimitPolicy(
+        windows=(RateLimitWindow(7, 2), RateLimitWindow(30, 20)),
+    )
+    config = RequestRateLimitConfig(anonymous=custom_policy)
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = config
+    fake_container.get_effective_request_rate_limit_policy.return_value = custom_policy
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    limiter = SimpleNamespace(check=AsyncMock(return_value=_rate_limit_decision(allowed=True)))
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+
+    assert response.status_code == 200
+    limiter.check.assert_awaited_once_with("anonymous", custom_policy)
+
+
+@pytest.mark.asyncio
+async def test_anonymous_bucket_is_global_across_source_ips(disable_logging, monkeypatch):
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", app_module.RedisRequestRateLimiter())
+
+    def request_from(source_ip: str):
+        request = Mock()
+        request.client = SimpleNamespace(host=source_ip)
+        request.method = "POST"
+        request.url = SimpleNamespace(path="/v1/chat/completions")
+        request.headers = {}
+        request.state = SimpleNamespace()
+        return request
+
+    first = await app_module._apply_request_rate_limit(
+        request_from("192.0.2.1"),
+        0.0,
+        None,
+        app_module.ProxyRequestContext(headers={}),
+    )
+    second = await app_module._apply_request_rate_limit(
+        request_from("198.51.100.2"),
+        0.0,
+        None,
+        app_module.ProxyRequestContext(headers={}),
+    )
+
+    assert first is None
+    assert second is not None
+    assert second.status_code == 429
+    assert b"anonymous request rate limit" in second.body
+
+
+@pytest.mark.asyncio
+async def test_project_rate_limit_buckets_are_isolated(disable_logging, monkeypatch):
+    config = RequestRateLimitConfig()
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = config
+    fake_container.get_effective_request_rate_limit_policy.return_value = config.project_default
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", app_module.RedisRequestRateLimiter())
+
+    request = Mock()
+    request.client = SimpleNamespace(host="192.0.2.1")
+    request.method = "POST"
+    request.url = SimpleNamespace(path="/v1/chat/completions")
+    request.headers = {}
+    request.state = SimpleNamespace()
+
+    first = await app_module._apply_request_rate_limit(
+        request,
+        0.0,
+        None,
+        app_module.ProxyRequestContext(
+            headers={},
+            active_container=fake_container,
+            identity=RequestIdentity(kind="facade_key", subject_id="project-a"),
+        ),
+    )
+    second = await app_module._apply_request_rate_limit(
+        request,
+        0.0,
+        None,
+        app_module.ProxyRequestContext(
+            headers={},
+            active_container=fake_container,
+            identity=RequestIdentity(kind="facade_key", subject_id="project-b"),
+        ),
+    )
+
+    assert first is None
+    assert second is None
+
+
+@pytest.mark.asyncio
+async def test_project_override_policy_and_identity_bucket_are_passed_to_limiter(
+    async_client, disable_logging, monkeypatch
+):
+    override = RequestRateLimitPolicy(
+        windows=(RateLimitWindow(5, 2), RateLimitWindow(20, 30)),
+    )
+    default = RequestRateLimitPolicy(
+        windows=(RateLimitWindow(2, 1), RateLimitWindow(8, 10)),
+    )
+    config = RequestRateLimitConfig(project_default=default)
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={
+            "project-a": {
+                "rate_limit": {"windows": [{"requests": 5, "seconds": 2}, {"requests": 20, "seconds": 30}]}
+            }
+        },
+        facade_key_secrets={"project-a": ["srk-project-secret"]},
+    )
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.get_request_rate_limit_config.return_value = config
+    fake_container.get_effective_request_rate_limit_policy.side_effect = lambda identity: (
+        identity.rate_limit_policy or default
+    )
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock(return_value=({"choices": []}, 200, "provider:test", None))
+    limiter = SimpleNamespace(check=AsyncMock(return_value=_rate_limit_decision(allowed=True, bucket_class="project")))
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": []},
+        headers={app_module.FACADE_KEY_HEADER: "srk-project-secret"},
+    )
+
+    assert response.status_code == 200
+    limiter.check.assert_awaited_once_with(
+        "project",
+        override,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_project_request_is_logged_without_request_body(
+    async_client, isolated_db, monkeypatch
+):
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", True)
+    registry = FacadeKeyRegistry.from_sources(
+        facade_key_configs={"project-a": {}},
+        facade_key_secrets={"project-a": ["srk-project-secret"]},
+    )
+    config = RequestRateLimitConfig()
+    fake_container = Mock()
+    fake_container.get_facade_key_registry.return_value = registry
+    fake_container.get_request_rate_limit_config.return_value = config
+    fake_container.get_effective_request_rate_limit_policy.return_value = config.project_default
+    fake_container.create_client_context.side_effect = lambda **kwargs: ClientContext(**kwargs)
+    fake_container.route_request = AsyncMock()
+    limiter = SimpleNamespace(check=AsyncMock(return_value=_rate_limit_decision(allowed=False, bucket_class="project")))
+
+    async def fake_get_active_container(_legacy_proxy: bool):
+        return fake_container
+
+    monkeypatch.setattr(app_module, "_is_legacy_proxy_mode", lambda: False)
+    monkeypatch.setattr(app_module, "_get_active_container", fake_get_active_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        content=b'{"api_key":"never-store-this"}',
+        headers={app_module.FACADE_KEY_HEADER: "srk-project-secret"},
+    )
+
+    assert response.status_code == 429
+    records = await app_module.RequestLog.get_recent(1)
+    assert records[0].status_code == 429
+    assert records[0].identity_subject_id == "project-a"
+    assert records[0].request_size == 0
+    assert "project-secret" not in str(response.headers)
+    fake_container.route_request.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1483,8 +1790,8 @@ async def test_projects_pages_and_api_are_facade_key_read_only_and_do_not_leak_s
     projects_body = projects_response.text
     assert "Project A" in projects_body
     assert "project-a" in projects_body
-    assert "configured facade-key identities only" in projects_body
-    assert "not live accounting or enforcement" in projects_body
+    assert "configured facade-key identities" in projects_body
+    assert "effective two-window request limits" in projects_body
     assert "srk-project-a-1" not in projects_body
     assert "srk-project-a-2" not in projects_body
 
@@ -1497,6 +1804,17 @@ async def test_projects_pages_and_api_are_facade_key_read_only_and_do_not_leak_s
     assert project["identity"]["kind"] == "facade_key"
     assert project["identity"]["canonical"] == "facade_key:project-a"
     assert project["secret_count"] == 2
+    assert project["request_rate_limit"] == {
+        "enabled": True,
+        "source": "project_default",
+        "policy": {
+            "windows": [
+                {"requests": 1, "seconds": 1},
+                {"requests": 3, "seconds": 10},
+            ]
+        },
+    }
+    assert "1 request / 1s" in projects_body
     assert "srk-project-a" not in str(api_payload)
 
 
@@ -1565,7 +1883,7 @@ async def test_project_drilldown_api_uses_identity_index_and_honor_no_config_his
     assert page.status_code == 200
     assert "legacy-project" in page.text
     assert "No current config" in page.text
-    assert "does not provide quota accounting or enforcement yet" in page.text
+    assert "not a live Redis counter" in page.text
 
 
 def test_openapi_documents_proxy_and_project_api_error_responses():
@@ -1575,12 +1893,14 @@ def test_openapi_documents_proxy_and_project_api_error_responses():
     chat_responses = schema["paths"]["/v1/chat/completions"]["post"]["responses"]
     assert chat_responses["400"]["description"] == "Invalid request payload"
     assert chat_responses["401"]["description"] == "Invalid or mismatched local facade key"
-    assert chat_responses["503"]["description"] == "Routing unavailable"
+    assert chat_responses["429"]["description"] == "Project or anonymous request rate limit exceeded"
+    assert chat_responses["503"]["description"] == "Routing or request rate limiter unavailable"
     assert "/v1/embeddings" in schema["paths"]
     embeddings_responses = schema["paths"]["/v1/embeddings"]["post"]["responses"]
     assert embeddings_responses["400"]["description"] == "Invalid request payload"
     assert embeddings_responses["401"]["description"] == "Invalid or mismatched local facade key"
-    assert embeddings_responses["503"]["description"] == "Routing unavailable"
+    assert embeddings_responses["429"]["description"] == "Project or anonymous request rate limit exceeded"
+    assert embeddings_responses["503"]["description"] == "Routing or request rate limiter unavailable"
 
     projects_responses = schema["paths"]["/api/projects"]["get"]["responses"]
     assert projects_responses["500"]["description"] == "Failed to load project inventory"
@@ -1591,7 +1911,8 @@ def test_openapi_documents_proxy_and_project_api_error_responses():
     image_generations_responses = schema["paths"]["/v1/images/generations"]["post"]["responses"]
     assert image_generations_responses["400"]["description"] == "Invalid request payload"
     assert image_generations_responses["401"]["description"] == "Invalid or mismatched local facade key"
-    assert image_generations_responses["503"]["description"] == "Routing unavailable"
+    assert image_generations_responses["429"]["description"] == "Project or anonymous request rate limit exceeded"
+    assert image_generations_responses["503"]["description"] == "Routing or request rate limiter unavailable"
 
     image_edits_responses = schema["paths"]["/v1/images/edits"]["post"]["responses"]
     assert image_edits_responses["501"]["description"] == "Image edits and variations are not implemented"
@@ -1783,6 +2104,117 @@ async def test_app_lifespan_rolls_back_logging_cleanup_when_startup_fails(monkey
     assert stop_calls == ["stopped"]
     assert shutdown_calls == ["shutdown"]
     assert drain_calls == ["drained"]
+
+
+@pytest.mark.asyncio
+async def test_request_rate_limiter_startup_verifies_when_enabled(monkeypatch):
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = RequestRateLimitConfig(enabled=True)
+    limiter = SimpleNamespace(verify=AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "is_fake_redis", lambda: False)
+
+    await app_module._verify_request_rate_limiter_startup()
+
+    limiter.verify.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_request_rate_limiter_startup_skips_verify_when_disabled(monkeypatch):
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = RequestRateLimitConfig(enabled=False)
+    limiter = SimpleNamespace(verify=AsyncMock())
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+
+    await app_module._verify_request_rate_limiter_startup()
+
+    limiter.verify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_rate_limiter_startup_rejects_fake_redis_in_production(monkeypatch):
+    fake_container = Mock()
+    fake_container.get_request_rate_limit_config.return_value = RequestRateLimitConfig(enabled=True)
+    limiter = SimpleNamespace(verify=AsyncMock())
+    monkeypatch.setattr(app_module, "container", fake_container)
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "is_fake_redis", lambda: True)
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(RuntimeError, match="FakeRedis cannot enforce"):
+        await app_module._verify_request_rate_limiter_startup()
+
+    limiter.verify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_app_lifespan_aborts_when_request_limiter_verification_fails(monkeypatch):
+    monkeypatch.setattr(app_module, "container", None)
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    monkeypatch.setattr(app_module, "_initialize_lua_scripting", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_request_logging_system", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_blob_storage_strict", Mock(return_value=None))
+    monkeypatch.setattr(app_module, "init_new_architecture", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        app_module,
+        "_verify_request_rate_limiter_startup",
+        AsyncMock(side_effect=ConnectionError("redis unavailable")),
+    )
+
+    with pytest.raises(ConnectionError, match="redis unavailable"):
+        async with app_module.app_lifespan(app):
+            pytest.fail("lifespan must not yield")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_text", "error_match"),
+    [
+        (
+            """routes: []
+request_rate_limits:
+  anonymous:
+    windows:
+      - requests: 1
+        seconds: 1
+""",
+            "anonymous.windows must contain exactly 2 windows",
+        ),
+        (
+            """routes: []
+facade_keys:
+  broken-project:
+    rate_limit:
+      windows:
+        - requests: 2
+          seconds: 10
+        - requests: 1
+          seconds: 20
+""",
+            "broken-project.rate_limit.windows request capacities must be monotonic",
+        ),
+    ],
+)
+async def test_app_lifespan_aborts_for_malformed_request_rate_limit_config(
+    tmp_path, monkeypatch, config_text, error_match
+):
+    routes_path = tmp_path / "routes.yaml"
+    routes_path.write_text(config_text)
+    monkeypatch.setenv("ROUTES_CONFIG", str(routes_path))
+    monkeypatch.setattr(app_module, "container", None)
+    monkeypatch.setattr(container_module, "_container", None)
+    monkeypatch.setattr(app_module, "ENABLE_LOGGING", False)
+    monkeypatch.setattr(app_module, "_initialize_lua_scripting", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_request_logging_system", AsyncMock(return_value=None))
+    monkeypatch.setattr(app_module, "_initialize_blob_storage_strict", Mock(return_value=None))
+
+    with pytest.raises(RequestRateLimitConfigError, match=error_match):
+        async with app_module.app_lifespan(app):
+            pytest.fail("lifespan must not yield for malformed limiter config")
+
+    assert app_module.container is None
 
 
 def test_rewrite_model_exact_match():

@@ -33,7 +33,7 @@ dependencies = [
     "pytz>=2025.2",
     "aiohttp>=3.12.15",
     "redis>=5.0.0",
-    "fakeredis>=2.31.3",
+    "fakeredis[lua]>=2.31.3",
 ]
 
 [project.optional-dependencies]

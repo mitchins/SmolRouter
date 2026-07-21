@@ -6,6 +6,7 @@ import pytest
 import smolrouter.container as container_module
 from smolrouter.container import SmolRouterConfig, SmolRouterContainer
 from smolrouter.facade_keys import RequestIdentity
+from smolrouter.request_rate_limits import parse_request_rate_limit_policy
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +61,8 @@ def test_container_builds_facade_key_registry_from_config(monkeypatch):
 
     monkeypatch.setattr(
         "smolrouter.container.load_facade_key_registry",
-        lambda facade_key_configs: captured.append(dict(facade_key_configs or {})) or container_module.FacadeKeyRegistry.from_sources(
+        lambda facade_key_configs: captured.append(dict(facade_key_configs or {}))
+        or container_module.FacadeKeyRegistry.from_sources(
             facade_key_configs=facade_key_configs,
             facade_key_secrets={"project-a": ["srk-a"]} if facade_key_configs else {},
         ),
@@ -84,7 +86,8 @@ def test_container_uses_shared_facade_key_loader_for_empty_config(monkeypatch):
 
     monkeypatch.setattr(
         "smolrouter.container.load_facade_key_registry",
-        lambda facade_key_configs: captured.append(dict(facade_key_configs or {})) or container_module.FacadeKeyRegistry.from_sources(),
+        lambda facade_key_configs: captured.append(dict(facade_key_configs or {}))
+        or container_module.FacadeKeyRegistry.from_sources(),
     )
 
     container = SmolRouterContainer(SmolRouterConfig(providers=[], facade_keys={}))
@@ -115,3 +118,119 @@ async def test_container_route_request_forwards_client_context_to_mediator():
 
     assert result == ({"ok": True}, 200, "provider:test", None)
     assert container._mediator.route_request.await_args.kwargs["client_context"] == client_context
+
+
+def test_config_defaults_to_enabled_two_window_request_limits():
+    config = SmolRouterConfig(providers=[])
+
+    assert config.request_rate_limits == {}
+    assert config.request_rate_limit_config.enabled is True
+    assert config.request_rate_limit_config.anonymous.to_dict() == {
+        "windows": [
+            {"requests": 1, "seconds": 1},
+            {"requests": 3, "seconds": 10},
+        ]
+    }
+    assert config.request_rate_limit_config.project_default == config.request_rate_limit_config.anonymous
+
+
+def test_config_parses_request_rate_limit_overrides_and_preserves_raw_config():
+    raw = {
+        "enabled": False,
+        "anonymous": {
+            "windows": [
+                {"requests": 2, "seconds": 1},
+                {"requests": 8, "seconds": 10},
+            ]
+        },
+        "project_default": {
+            "windows": [
+                {"requests": 10, "seconds": 1},
+                {"requests": 50, "seconds": 10},
+            ]
+        },
+    }
+
+    config = SmolRouterConfig(providers=[], request_rate_limits=raw)
+
+    assert config.request_rate_limits is raw
+    assert config.request_rate_limit_config.enabled is False
+    assert config.request_rate_limit_config.anonymous.to_dict() == raw["anonymous"]
+    assert config.request_rate_limit_config.project_default.to_dict() == raw["project_default"]
+
+
+def test_config_fails_fast_on_malformed_request_rate_limits():
+    with pytest.raises(ValueError, match="request_rate_limits.anonymous"):
+        SmolRouterConfig(
+            providers=[],
+            request_rate_limits={
+                "anonymous": {"windows": [{"requests": 1, "seconds": 1}]},
+            },
+        )
+
+
+def test_default_config_loads_top_level_request_rate_limits(monkeypatch):
+    raw = {
+        "enabled": True,
+        "anonymous": {
+            "windows": [
+                {"requests": 2, "seconds": 1},
+                {"requests": 7, "seconds": 10},
+            ]
+        },
+    }
+    monkeypatch.setattr(SmolRouterContainer, "_load_routes_config", lambda self, path: {"request_rate_limits": raw})
+
+    config = SmolRouterContainer.__new__(SmolRouterContainer)._create_default_config()
+
+    assert config.request_rate_limits is raw
+    assert config.request_rate_limit_config.anonymous.to_dict() == raw["anonymous"]
+
+
+def test_container_resolves_anonymous_default_and_project_override_policies():
+    container = SmolRouterContainer(
+        SmolRouterConfig(
+            providers=[],
+            request_rate_limits={
+                "anonymous": {
+                    "windows": [
+                        {"requests": 1, "seconds": 1},
+                        {"requests": 3, "seconds": 10},
+                    ]
+                },
+                "project_default": {
+                    "windows": [
+                        {"requests": 4, "seconds": 1},
+                        {"requests": 20, "seconds": 10},
+                    ]
+                },
+            },
+        )
+    )
+    override = parse_request_rate_limit_policy(
+        {
+            "windows": [
+                {"requests": 8, "seconds": 1},
+                {"requests": 40, "seconds": 10},
+            ]
+        },
+        field_name="test.override",
+    )
+
+    assert container.get_effective_request_rate_limit_policy(None).to_dict()["windows"][0]["requests"] == 1
+    assert (
+        container.get_effective_request_rate_limit_policy(
+            RequestIdentity(kind="facade_key", subject_id="project-a")
+        ).to_dict()["windows"][0]["requests"]
+        == 4
+    )
+    assert (
+        container.get_effective_request_rate_limit_policy(
+            RequestIdentity(
+                kind="facade_key",
+                subject_id="project-b",
+                rate_limit_policy=override,
+            )
+        )
+        == override
+    )
