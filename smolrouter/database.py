@@ -1047,6 +1047,16 @@ class ApiKeyQuota:
         return await RedisApiKeyQuota.increment_usage(api_key, provider_id, model_name, request_count, token_count)
 
     @staticmethod
+    async def select_google_api_key(
+        provider_id: str,
+        model_name: str,
+        api_keys: list[str],
+        model_limit: int,
+    ):
+        """Select the next eligible Google API key using Redis-backed serial rotary state."""
+        return await RedisApiKeyQuota.select_google_api_key(provider_id, model_name, api_keys, model_limit)
+
+    @staticmethod
     async def get_provider_usage(provider_id: str):
         """Get all quota entries for a provider"""
         return await RedisApiKeyQuota.get_provider_usage(provider_id)

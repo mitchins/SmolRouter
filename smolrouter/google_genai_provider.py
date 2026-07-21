@@ -27,7 +27,7 @@ from google.api_core.exceptions import ResourceExhausted, PermissionDenied, Inva
 
 from .config_loading import load_config_entries
 from .interfaces import IModelProvider, ModelInfo, ProviderConfig, ProxyConfig
-from .secret_store import redact_secret, resolve_config_file, secrets_search_paths
+from .secret_store import redact_secret, resolve_config_file, secret_suffix, secrets_search_paths
 from .database import ApiKeyQuota
 from .redis_backend import QuotaRecord
 from .rate_limiter import GoogleGenAIRequestFunnel
@@ -259,7 +259,8 @@ class GoogleGenAIConfig(ProviderConfig):
     proxy_pool: Optional[List[Optional["ProxyConfig"]]] = None
     proxy_pool_enabled: bool = False  # Master switch for proxy pooling
 
-    # Predictive 429 configuration (defaults to disabled)
+    # Deprecated compatibility flag. Rotary selection no longer preempts keys from
+    # dead-reckoned usage; runtime handling is driven by observed cooldown/exhaustion.
     predictive_429_enabled: bool = False
 
     def __post_init__(self):
@@ -358,7 +359,7 @@ class GoogleGenAIProvider(IModelProvider):
             enabled=self.config.rate_limiting_enabled,
         )
 
-        # Proxy pool round-robin counter (thread-safe via atomicity of +=)
+        # Proxy pool round-robin counter
         self._proxy_pool_index = 0
         self._proxy_health: Dict[str, ProxyHealthStatus] = {}
         self._proxy_health_task: Optional[asyncio.Task] = None
@@ -367,7 +368,7 @@ class GoogleGenAIProvider(IModelProvider):
 
         logger.info(f"Initialized GoogleGenAI provider with {len(self.config.api_keys)} API keys")
         logger.info(f"Rate limiting: {'enabled' if self.config.rate_limiting_enabled else 'disabled'}")
-        logger.info(f"Predictive 429: {'enabled' if self.config.predictive_429_enabled else 'disabled'}")
+        logger.info("Predictive 429 config: deprecated/ignored; rotary selection uses observed cooldown/exhaustion only")
         if self.config.proxy_pool_enabled and self.config.proxy_pool:
             pool_size = len(self.config.proxy_pool)
             direct_count = sum(1 for p in self.config.proxy_pool if p is None)
@@ -909,207 +910,65 @@ class GoogleGenAIProvider(IModelProvider):
         return quota
 
     async def _select_best_api_key(self, model_name: str) -> str:
-        """
-        Select the API key with lowest usage for the given model.
+        """Select the next eligible API key in serial rotary order for this model."""
+        selection = await ApiKeyQuota.select_google_api_key(
+            provider_id=self.config.name,
+            model_name=model_name,
+            api_keys=self.config.api_keys,
+            model_limit=self.get_model_daily_limit(model_name),
+        )
 
-        Returns the first key from the set of keys with the lowest request count FOR THIS MODEL.
-        Order among equals doesn't matter - just consistent selection.
-        """
-        # Group keys by their request count for THIS MODEL, excluding exhausted/error keys
-        available_keys = []
-        exhausted_keys = []
-        error_prone_keys = []
-        cooling_down_keys: List[tuple[str, datetime]] = []
-        pacific_date = _current_pacific_date()
+        if selection["status"] == "ok":
+            selected_index = selection.get("selected_index")
+            if selected_index is None or not (0 <= selected_index < len(self.config.api_keys)):
+                raise RuntimeError(
+                    f"Redis returned invalid Google key index for {self.config.name}/{model_name}: {selected_index}"
+                )
 
-        for key in self.config.api_keys:
-            quota = await self._get_quota_record(key, model_name)
-            model_limit = self.get_model_daily_limit(model_name)
-            actual_requests_today = self._classify_api_key_for_model(
-                quota,
-                key,
+            best_key = self.config.api_keys[selected_index]
+            logger.debug(
+                "Selected API key %s for %s via Redis rotary slot %s/%s",
+                redact_secret(best_key),
                 model_name,
-                pacific_date,
-                model_limit,
-                exhausted_keys,
-                error_prone_keys,
-                cooling_down_keys,
+                selected_index + 1,
+                len(self.config.api_keys),
+            )
+            return best_key
+
+        # Under rotary selection, request-path exclusion should stay narrow: explicit invalid keys,
+        # active per-minute cooldowns, and observed same-day exhaustion. Favor availability over
+        # aggressive predictive benching from dead-reckoned counters.
+        if selection["status"] in {"no_keys", "all_invalid"}:
+            raise RuntimeError(
+                f"No usable Google API keys available for provider {self.config.name} / model {model_name} "
+                f"(status={selection['status']}, invalid={int(selection.get('invalid_count') or 0)})"
             )
 
-            if actual_requests_today is None:
-                continue
+        total_keys = len(self.config.api_keys)
+        invalid_count = int(selection.get("invalid_count") or 0)
+        cooling_down_count = int(selection.get("cooling_down_count") or 0)
+        exhausted_count = int(selection.get("exhausted_count") or 0)
+        retry_after = int(selection.get("retry_after_seconds") or 0)
 
-            available_keys.append((key, actual_requests_today))
+        logger.error(f"🚫 ALL {total_keys} API KEYS UNAVAILABLE FOR MODEL {model_name}:")
+        logger.error(f"   - Invalid: {invalid_count} keys")
+        logger.error(f"   - Quota exhausted: {exhausted_count} keys")
+        logger.error(f"   - Cooling down (per-minute): {cooling_down_count} keys")
 
-        if not available_keys:
-            # All keys exhausted for this model - provide detailed status
-            total_keys = len(self.config.api_keys)
-            logger.error(f"🚫 ALL {total_keys} API KEYS EXHAUSTED FOR MODEL {model_name}:")
-            logger.error(f"   - Quota exhausted: {len(exhausted_keys)} keys")
-            logger.error(f"   - Error-prone: {len(error_prone_keys)} keys")
-            logger.error(f"   - Cooling down (per-minute): {len(cooling_down_keys)} keys")
-
-            # Calculate seconds until quota reset (midnight Pacific time)
-            now_pacific = datetime.now(PACIFIC_TZ)
-            tomorrow_pacific = (now_pacific + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            seconds_until_reset = int((tomorrow_pacific - now_pacific).total_seconds())
-
-            # If keys are only cooling down (transient per-minute limits), the soonest-expiring
-            # one is usable again far sooner than midnight. Prefer it over a midnight reset so we
-            # report an accurate retry hint and, in the fallback, don't hammer api_keys[0].
-            soonest_cooldown_key, soonest_cooldown_until = self._soonest_cooldown(cooling_down_keys)
-            cooldown_remaining = None
-
-            if soonest_cooldown_until is not None:
-                cooldown_remaining = max(int((soonest_cooldown_until - self._utc_now()).total_seconds()), 0)
-                logger.warning(
-                    "⏳ All keys busy for %s; soonest key recovers in ~%ss (per-minute cooldown)",
-                    model_name,
-                    cooldown_remaining,
-                )
-            else:
-                logger.error(f"⏰ All API keys exhausted. Quota resets in {seconds_until_reset}s at midnight Pacific")
-
-            # Only raise predictive 429 if enabled
-            if self.config.predictive_429_enabled:
-                # Raise a specific exception that the container can catch and convert to 429
-                from google.api_core.exceptions import ResourceExhausted
-
-                retry_after = (
-                    cooldown_remaining if cooldown_remaining is not None else seconds_until_reset
-                )
-                raise ResourceExhausted(
-                    f"All {total_keys} API keys exhausted for model {model_name}. "
-                    f"Retry in {retry_after} seconds.",
-                    errors=[{"reason": "QUOTA_EXHAUSTED", "retry_after_seconds": retry_after}],
-                )
-
-            # Predictive 429 disabled - fall back and let the API handle the error. Prefer the
-            # key whose per-minute cooldown expires soonest (least-bad option) rather than always
-            # api_keys[0], which is what caused every request to pile onto key #1.
-            if soonest_cooldown_key is not None:
-                logger.warning(
-                    "⚠️ Predictive 429 disabled - falling back to soonest-recovering key %s for %s",
-                    redact_secret(soonest_cooldown_key),
-                    model_name,
-                )
-                return soonest_cooldown_key
-
+        if cooling_down_count > 0:
             logger.warning(
-                "⚠️ Predictive 429 disabled - using first API key despite quota tracking showing exhaustion"
+                "⏳ All keys busy for %s; soonest key recovers in ~%ss (per-minute cooldown)",
+                model_name,
+                retry_after,
             )
-            return self.config.api_keys[0]
+        else:
+            logger.error(f"⏰ All API keys exhausted. Quota resets in {retry_after}s at midnight Pacific")
 
-        # Sort by request count, then by key name for consistent ordering
-        available_keys.sort(key=lambda x: (x[1], x[0]))
-
-        # Find all keys with the lowest usage count
-        lowest_count = available_keys[0][1]
-        lowest_usage_keys = [key for key, count in available_keys if count == lowest_count]
-
-        # Random selection amongst equals (mitigation for when quota tracking is broken)
-        best_key = secrets.choice(lowest_usage_keys)
-
-        logger.debug(
-            f"Selected API key {redact_secret(best_key)} for {model_name} with {lowest_count} requests today "
-            f"({len(lowest_usage_keys)} keys at this usage level)"
+        raise ResourceExhausted(
+            f"All {total_keys} API keys exhausted for model {model_name}. "
+            f"Retry in {retry_after} seconds.",
+            errors=[{"reason": "QUOTA_EXHAUSTED", "retry_after_seconds": retry_after}],
         )
-
-        return best_key
-
-    def _classify_api_key_for_model(
-        self,
-        quota: QuotaRecord,
-        key: str,
-        model_name: str,
-        pacific_date: str,
-        model_limit: int,
-        exhausted_keys: List[str],
-        error_prone_keys: List[str],
-        cooling_down_keys: Optional[List[tuple[str, datetime]]] = None,
-    ) -> Optional[int]:
-        """Return the effective daily request count for a quota record, or None if it should be skipped."""
-        # Skip permanently invalid keys first.
-        if quota.invalid_key:
-            logger.debug(f"API key {redact_secret(key)} marked as invalid, skipping")
-            return None
-
-        actual_requests_today = quota.requests_today if quota.last_reset_date == pacific_date else 0
-
-        if actual_requests_today >= model_limit:
-            exhausted_keys.append(key)
-            logger.debug(
-                f"API key {redact_secret(key)} exhausted for {model_name} ({actual_requests_today}/{model_limit}) reset_date={quota.last_reset_date} today={pacific_date}"
-            )
-            return None
-
-        if quota.error_count > 20:  # Increased threshold
-            error_prone_keys.append(key)
-            logger.debug(f"API key {redact_secret(key)} too many errors for {model_name} ({quota.error_count})")
-            return None
-
-        # Transient per-minute cooldown: skip until the window passes, but record it so the
-        # caller can fall back to the soonest-recovering key instead of always api_keys[0].
-        cooldown_until = self._active_cooldown_until(quota)
-        if cooldown_until is not None:
-            if cooling_down_keys is not None:
-                cooling_down_keys.append((key, cooldown_until))
-            logger.debug(
-                f"API key {redact_secret(key)} cooling down for {model_name} until {cooldown_until.isoformat()}, skipping"
-            )
-            return None
-
-        if self._is_recent_quota_exhaustion(quota, key, model_name, pacific_date):
-            return None
-
-        return actual_requests_today
-
-    def _active_cooldown_until(self, quota: QuotaRecord) -> Optional[datetime]:
-        """Return the cooldown expiry if the key is still within a per-minute cooldown, else None.
-
-        ``quota_cooldown_until`` is always an aware-UTC datetime (or None): persisted values
-        pass through ``_normalize_datetime`` and in-memory values are set from ``_utc_now()``,
-        so we can compare directly in UTC without a timezone conversion.
-        """
-        cooldown_until = getattr(quota, "quota_cooldown_until", None)
-        if not cooldown_until:
-            return None
-        if cooldown_until > self._utc_now():
-            return cooldown_until
-        return None
-
-    @staticmethod
-    def _soonest_cooldown(
-        cooling_down_keys: List[tuple[str, datetime]],
-    ) -> tuple[Optional[str], Optional[datetime]]:
-        """Return the (key, cooldown_until) pair that recovers soonest, or (None, None)."""
-        if not cooling_down_keys:
-            return None, None
-        key, until = min(cooling_down_keys, key=lambda item: item[1])
-        return key, until
-
-    def _is_recent_quota_exhaustion(self, quota: QuotaRecord, key: str, model_name: str, pacific_date: str) -> bool:
-        """Check whether a quota exhaustion timestamp is still current for the Pacific day."""
-        if not quota.quota_exhausted_at:
-            return False
-
-        try:
-            quota_exhausted_pacific = _to_pacific_datetime(quota.quota_exhausted_at, assume_utc=True)
-        except (ValueError, TypeError, AttributeError):
-            logger.warning("API key %s has malformed quota_exhausted_at, allowing", redact_secret(key))
-            return False
-
-        exhausted_date = quota_exhausted_pacific.strftime("%Y-%m-%d")
-        if exhausted_date == pacific_date:
-            logger.debug(
-                f"API key {redact_secret(key)} exhausted TODAY for {model_name} at {quota_exhausted_pacific.strftime('%H:%M')}, skipping"
-            )
-            return True
-
-        logger.debug(
-            f"API key {redact_secret(key)} exhaustion from {exhausted_date} is stale (today is {pacific_date}), allowing"
-        )
-        return False
 
     async def _update_api_key_stats(
         self,
@@ -1147,15 +1006,15 @@ class GoogleGenAIProvider(IModelProvider):
 
             # Check if this is a quota exhaustion error
             elif self._is_quota_exhausted_error(error_message):
-                cooldown_seconds = self._quota_cooldown_seconds(error_message)
-                if cooldown_seconds is not None:
-                    # Transient per-minute (RPM) limit: short cooldown, not an all-day bench.
+                if self._is_per_day_quota_error(error_message):
+                    # Only explicit per-day (RPD) signals should hard-bench a key.
+                    await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
+                else:
+                    # Explicit RPM and ambiguous quota 429s are treated as transient cooldowns.
+                    cooldown_seconds = self._quota_cooldown_seconds(error_message)
                     await self._record_rate_limit_cooldown(
                         ApiKeyQuota, quota, api_key, model_name, error_message, cooldown_seconds
                     )
-                else:
-                    # Per-day (RPD) / unrecognized quota exhaustion: bench until midnight Pacific.
-                    await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
             else:
                 await self._record_regular_error(ApiKeyQuota, quota, api_key, model_name, error_message, status_code)
 
@@ -1220,12 +1079,12 @@ class GoogleGenAIProvider(IModelProvider):
         error_message: str,
         cooldown_seconds: float,
     ) -> None:
-        """Handle a transient per-minute (RPM) 429.
+        """Handle a transient quota 429.
 
-        Sets a short cooldown window (driven by Google's RetryInfo) after which the key
-        returns to the selection pool, instead of benching it until midnight Pacific the
-        way genuine per-day (RPD) exhaustion does. This is the fix for RPM 429s cascading
-        into "all keys exhausted" and pinning every request onto api_keys[0].
+        Sets a short cooldown window after which the key returns to the selection pool,
+        instead of benching it until midnight Pacific. Explicit RPM uses Google's
+        RetryInfo when available; ambiguous quota 429s also land here because they are
+        too weak a signal to justify all-day exclusion.
         """
         cooldown_until = self._utc_now() + timedelta(seconds=cooldown_seconds)
         quota.mark_rate_limited(cooldown_until, error=error_message)
@@ -1238,7 +1097,7 @@ class GoogleGenAIProvider(IModelProvider):
             logger.exception("Failed to persist quota cooldown to Redis")
 
         logger.warning(
-            "🕒 API key %s rate limited (per-minute) for %s: cooling down %.0fs (until %s)",
+            "🕒 API key %s rate limited for %s: cooling down %.0fs (until %s)",
             redact_secret(api_key),
             model_name,
             cooldown_seconds,
@@ -1296,9 +1155,19 @@ class GoogleGenAIProvider(IModelProvider):
             return
 
         quota_percentage = (quota.requests_today / model_limit) * 100
-        if quota.requests_today >= model_limit:
+        if quota.quota_exhausted_at is not None:
             logger.error(
                 f"🚫 API key {redact_secret(api_key)} / {model_name} DAILY LIMIT REACHED: {quota.requests_today}/{model_limit}"
+            )
+        elif quota.requests_today >= model_limit:
+            logger.warning(
+                "API key %s / %s exceeded configured daily estimate after a successful request: %s/%s (%.1f%%). "
+                "Not treating this as confirmed exhaustion without a provider 429.",
+                redact_secret(api_key),
+                model_name,
+                quota.requests_today,
+                model_limit,
+                quota_percentage,
             )
         elif quota.requests_today >= (model_limit * 0.8):
             logger.warning(
@@ -1374,19 +1243,14 @@ class GoogleGenAIProvider(IModelProvider):
         error_lower = error_msg.lower()
         return "perday" in error_lower or "per day" in error_lower or "requests per day" in error_lower
 
-    def _quota_cooldown_seconds(self, error_msg: Optional[str] = None) -> Optional[float]:
-        """Return a transient cooldown (seconds) for a quota 429, or None for all-day exhaustion.
+    def _quota_cooldown_seconds(self, error_msg: Optional[str] = None) -> float:
+        """Return a transient cooldown (seconds) for a quota 429.
 
         - Explicit per-minute (RPM) → cooldown driven by Google's retryDelay (or default).
-        - Everything else (explicit per-day, or no PerMinute quotaId) → None, i.e. the
-          caller treats it as all-day exhaustion. Real Google free-tier 429s always carry
-          a quotaId, so RPM is reliably detectable; we stay conservative for anything else.
+        - Ambiguous quota 429s → also transient cooldown, because they are not strong
+          enough evidence for all-day exhaustion.
+        - Explicit per-day (RPD) is handled by the caller before reaching this helper.
         """
-        if not self._is_per_minute_quota_error(error_msg):
-            return None
-        if self._is_per_day_quota_error(error_msg):
-            return None
-
         retry_delay = self._extract_retry_delay(error_msg)
         base = retry_delay if retry_delay is not None else self.DEFAULT_RPM_COOLDOWN_SECONDS
         return base + self.RPM_COOLDOWN_BUFFER_SECONDS
@@ -2641,7 +2505,7 @@ class GoogleGenAIProvider(IModelProvider):
         context.endpoint = endpoint
         context.model_name = self._normalize_model_name(openai_request.get("model", ""))
         context.api_key = await self._select_best_api_key(context.model_name)
-        context.api_key_suffix = redact_secret(context.api_key)
+        context.api_key_suffix = secret_suffix(context.api_key)
         context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
         context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
             context.model_name
@@ -2918,6 +2782,9 @@ class GoogleGenAIProvider(IModelProvider):
         if endpoint != OPENAI_IMAGES_ENDPOINT:
             raise ValueError(f"Unsupported endpoint for image generation: {endpoint}")
 
+        # Validate request contract first so malformed image requests get
+        # deterministic input validation errors before transport/key/proxy
+        # selection can fail for reasons unrelated to the image payload.
         context = GoogleGenAICompletionContext(
             original_model=openai_request.get("model", ""),
             observation_id=f"obs_{uuid.uuid4().hex[:12]}",
@@ -2925,10 +2792,6 @@ class GoogleGenAIProvider(IModelProvider):
             request_kind="generate_images",
         )
         context.model_name = self._normalize_model_name(openai_request.get("model", ""))
-
-        # Validate request contract first so malformed image requests get
-        # deterministic input validation errors before transport/key/proxy
-        # selection can fail for reasons unrelated to the image payload.
         self._validate_image_generation_request(openai_request, context)
 
         try:
@@ -2982,7 +2845,7 @@ class GoogleGenAIProvider(IModelProvider):
         context.tts_audio_format = self._get_tts_audio_format(openai_request) if context.tts_request else "pcm"
         context.model_name, context.genai_request = self._convert_openai_to_genai_request(openai_request, endpoint)
         context.api_key = await self._select_best_api_key(context.model_name)
-        context.api_key_suffix = redact_secret(context.api_key)
+        context.api_key_suffix = secret_suffix(context.api_key)
         context.api_key_index, context.api_key_total = self._resolve_api_key_position(context.api_key)
         context.proxy_config, context.proxy_pool_index, context.pool_info = self._select_proxy_configuration(
             context.model_name
@@ -3375,7 +3238,11 @@ class GoogleGenAIProvider(IModelProvider):
 
             model_limit = self.get_model_daily_limit(model)
             quota_percentage = (quota.requests_today / model_limit) * 100
-            is_exhausted = quota.requests_today >= model_limit or quota.quota_exhausted_at is not None
+            # Requests can legitimately exceed our configured estimate if Google's
+            # live limit changed or our heuristic is conservative. Only a provider-
+            # confirmed exhaustion marker should surface as "exhausted".
+            is_exhausted = quota.quota_exhausted_at is not None
+            daily_limit_estimate_exceeded = quota.requests_today >= model_limit
             last_request = _format_optional_datetime(quota.updated_at)
             quota_exhausted_at = _format_optional_datetime(quota.quota_exhausted_at)
 
@@ -3388,6 +3255,7 @@ class GoogleGenAIProvider(IModelProvider):
                 "quota_percentage": quota_percentage,
                 "quota_exhausted": is_exhausted,
                 "quota_exhausted_at": quota_exhausted_at,
+                "daily_limit_estimate_exceeded": daily_limit_estimate_exceeded,
                 "status": _quota_status(quota.invalid_key, is_exhausted),
             }
 

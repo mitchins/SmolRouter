@@ -913,9 +913,14 @@ def test_quota_cooldown_seconds_per_minute_without_retry_delay(provider):
 
 
 def test_quota_cooldown_seconds_per_day_is_all_day(provider):
-    # RPD and ambiguous quota errors return None -> caller benches until midnight Pacific.
-    assert provider._quota_cooldown_seconds(RPD_429) is None
-    assert provider._quota_cooldown_seconds("429 quota exceeded retry in 12s") is None
+    # Explicit RPD is handled outside the cooldown helper.
+    assert provider._is_per_day_quota_error(RPD_429) is True
+
+
+def test_quota_cooldown_seconds_ambiguous_quota_is_transient(provider):
+    assert provider._quota_cooldown_seconds("429 quota exceeded retry in 12s") == pytest.approx(
+        12 + provider.RPM_COOLDOWN_BUFFER_SECONDS
+    )
 
 
 def test_is_invalid_key_error(provider):
