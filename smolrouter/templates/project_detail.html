@@ -162,7 +162,7 @@
         <section class="management-panel" aria-labelledby="delete-project-heading">
             <h2 id="delete-project-heading">Delete project</h2>
             <p>Type <strong>{{ project.id }}</strong> to confirm. Active API keys will be revoked first.</p>
-            <div class="management-row"><input id="delete-confirmation" autocomplete="off"><button id="delete-project" class="action-btn danger" type="button">Delete project</button></div>
+            <div class="management-row"><label for="delete-confirmation">Project ID</label><input id="delete-confirmation" autocomplete="off"><button id="delete-project" class="action-btn danger" type="button">Delete project</button></div>
             <div id="delete-message" class="management-message" role="alert"></div>
         </section>
         {% endif %}

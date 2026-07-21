@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -33,6 +34,12 @@ else:
 
 
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+PROJECT_NOT_FOUND_MESSAGE = "Project not found"
+_DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS = {
+    errno.EINVAL,
+    getattr(errno, "ENOTSUP", errno.EINVAL),
+    getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+}
 _PROCESS_LOCK = threading.RLock()
 
 
@@ -138,17 +145,19 @@ def _atomic_replace(
 
 def _fsync_directory(path: Path) -> None:
     """Persist a directory entry where the platform supports directory fsync."""
+    if os.name == "nt":
+        return
     try:
         directory_fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        if os.name == "nt":
+    except OSError as exc:
+        if exc.errno in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
             return
         raise
     try:
         try:
             os.fsync(directory_fd)
-        except OSError:
-            if os.name != "nt":
+        except OSError as exc:
+            if exc.errno not in _DIRECTORY_FSYNC_UNSUPPORTED_ERRNOS:
                 raise
     finally:
         os.close(directory_fd)
@@ -173,18 +182,24 @@ def _unlock_file(lock_fd: int) -> None:
     msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
 
 
-def _validate_project_id(project_id: Any) -> str:
-    raw_value = str(project_id or "")
-    value = raw_value.strip()
+def _has_invalid_project_path(value: str) -> bool:
     segments = value.split("/")
-    if (
-        raw_value != value
-        or not PROJECT_ID_RE.fullmatch(value)
-        or value.startswith("/")
+    return (
+        value.startswith("/")
         or value.endswith("/")
         or "//" in value
         or any(segment in {".", ".."} for segment in segments)
-    ):
+    )
+
+
+def _is_valid_new_project_id(raw_value: str, value: str) -> bool:
+    return raw_value == value and PROJECT_ID_RE.fullmatch(value) is not None and not _has_invalid_project_path(value)
+
+
+def _validate_project_id(project_id: Any) -> str:
+    raw_value = str(project_id or "")
+    value = raw_value.strip()
+    if not _is_valid_new_project_id(raw_value, value):
         raise ProjectKeyValidationError(
             "project_id must be 1-128 characters, start with an alphanumeric character, "
             "and contain only letters, numbers, '.', '_', '-', and well-formed '/' segments"
@@ -374,7 +389,7 @@ class ProjectKeyManager:
             routes, keys = self._read_sources()
             projects = routes.get("facade_keys", {})
             if project_id not in projects:
-                raise ProjectKeyNotFoundError("Project not found")
+                raise ProjectKeyNotFoundError(PROJECT_NOT_FOUND_MESSAGE)
             old_keys = copy.deepcopy(keys)
             projects.pop(project_id)
             keys.pop(project_id, None)
@@ -398,7 +413,7 @@ class ProjectKeyManager:
             routes, keys = self._read_sources()
             projects = routes.get("facade_keys", {})
             if project_id not in projects:
-                raise ProjectKeyNotFoundError("Project not found")
+                raise ProjectKeyNotFoundError(PROJECT_NOT_FOUND_MESSAGE)
             secret = secret or generate_facade_key_secret()
             if any(secret in existing for existing in keys.values()):
                 raise ProjectKeyConflictError("Generated key already exists")
@@ -420,7 +435,7 @@ class ProjectKeyManager:
             routes, keys = self._read_sources()
             projects = routes.get("facade_keys", {})
             if project_id not in projects:
-                raise ProjectKeyNotFoundError("Project not found")
+                raise ProjectKeyNotFoundError(PROJECT_NOT_FOUND_MESSAGE)
             matches = [value for value in keys.get(project_id, []) if secrets.compare_digest(facade_key_id(value), key_id)]
             if not matches:
                 raise ProjectKeyNotFoundError("Key not found")

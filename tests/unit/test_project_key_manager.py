@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import yaml
+from fastapi import HTTPException
 
 import smolrouter.app as app_module
 import smolrouter.project_key_manager as manager_module
@@ -57,6 +59,59 @@ def test_new_project_ids_are_strictly_validated(tmp_path, project_id):
     manager, _ = _manager(tmp_path)
     with pytest.raises(ProjectKeyValidationError):
         manager.create_project(project_id)
+
+
+@pytest.mark.parametrize(
+    "project_id",
+    ["a", "Project_01", "team/project", "team.alpha/project-2", "0/child.name"],
+)
+def test_new_project_ids_accept_supported_corpus(tmp_path, project_id):
+    manager, _ = _manager(tmp_path)
+    assert manager.create_project(project_id)["project_id"] == project_id
+
+
+@pytest.mark.parametrize("phase", ["open", "fsync"])
+def test_directory_fsync_ignores_only_supported_platform_errors(tmp_path, phase):
+    open_mock = Mock(return_value=42)
+    fsync_mock = Mock()
+    close_mock = Mock()
+    if phase == "open":
+        open_mock.side_effect = OSError(errno.ENOTSUP, "unsupported")
+    else:
+        fsync_mock.side_effect = OSError(errno.EOPNOTSUPP, "unsupported")
+    with patch.object(manager_module.os, "open", open_mock), patch.object(
+        manager_module.os, "fsync", fsync_mock
+    ), patch.object(manager_module.os, "close", close_mock):
+        manager_module._fsync_directory(tmp_path)
+    if phase == "open":
+        fsync_mock.assert_not_called()
+        close_mock.assert_not_called()
+    else:
+        close_mock.assert_called_once_with(42)
+
+
+@pytest.mark.parametrize("phase", ["open", "fsync"])
+def test_directory_fsync_reraises_unexpected_errors(tmp_path, phase):
+    open_mock = Mock(return_value=42)
+    fsync_mock = Mock()
+    close_mock = Mock()
+    if phase == "open":
+        open_mock.side_effect = OSError(errno.EACCES, "denied")
+    else:
+        fsync_mock.side_effect = OSError(errno.EIO, "failed")
+    with patch.object(manager_module.os, "open", open_mock), patch.object(
+        manager_module.os, "fsync", fsync_mock
+    ), patch.object(manager_module.os, "close", close_mock), pytest.raises(OSError):
+        manager_module._fsync_directory(tmp_path)
+    if phase == "fsync":
+        close_mock.assert_called_once_with(42)
+
+
+def test_directory_fsync_on_windows_returns_before_open(tmp_path):
+    open_mock = Mock(side_effect=AssertionError("directory open must not run on Windows"))
+    with patch.object(manager_module.os, "name", "nt"), patch.object(manager_module.os, "open", open_mock):
+        manager_module._fsync_directory(tmp_path)
+    open_mock.assert_not_called()
 
 
 def test_manager_rejects_symlinked_managed_file(tmp_path):
@@ -344,6 +399,52 @@ async def test_management_api_requires_same_origin_json_and_secret_is_no_store(a
 
 
 @pytest.mark.asyncio
+async def test_management_api_returns_500_when_manager_dependency_is_unavailable(async_client):
+    async def unavailable(_legacy):
+        return None
+
+    security = Mock()
+    security.check_webui_access.return_value = None
+    with patch("smolrouter.app._get_active_container", unavailable), patch(
+        "smolrouter.app.get_webui_security", return_value=security
+    ):
+        response = await async_client.post(
+            "/api/project-management/projects",
+            json={"project_id": "project-a"},
+            headers={"Origin": "http://test"},
+        )
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Project/key management is unavailable"
+
+
+@pytest.mark.asyncio
+async def test_management_api_preserves_webui_authentication_401(async_client):
+    security = Mock()
+    security.check_webui_access.side_effect = HTTPException(status_code=401, detail="authentication required")
+    with patch("smolrouter.app.get_webui_security", return_value=security):
+        response = await async_client.post(
+            "/api/project-management/projects",
+            json={"project_id": "project-a"},
+            headers={"Origin": "http://test"},
+        )
+    assert response.status_code == 401
+
+
+def test_management_openapi_declares_mutation_error_responses():
+    app_module.app.openapi_schema = None
+    schema = app_module.app.openapi()["paths"]
+    expected_base = {"401", "403", "415", "422", "500"}
+    expected_by_operation = {
+        ("/api/project-management/projects", "post"): {"409"},
+        ("/api/project-management/projects", "delete"): {"404", "409"},
+        ("/api/project-management/keys", "post"): {"404", "409"},
+        ("/api/project-management/keys", "delete"): {"404", "409"},
+    }
+    for (path, method), extra in expected_by_operation.items():
+        assert expected_base | extra <= set(schema[path][method]["responses"])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "headers",
     [
@@ -549,6 +650,7 @@ async def test_project_ui_has_management_controls_but_never_secret_values(async_
         detail = await async_client.get("/projects/project-a")
     assert listing.status_code == 200 and "Create project" in listing.text
     assert detail.status_code == 200 and "Create API key" in detail.text and "Delete project" in detail.text
+    assert 'for="delete-confirmation"' in detail.text
     assert "Copy key" in detail.text
     assert "navigator.clipboard.writeText" in detail.text
     assert "Copy failed. Select and copy the key manually" in detail.text

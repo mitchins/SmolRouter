@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Annotated, Any, AsyncIterator, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from urllib.parse import quote, urlparse
 
@@ -2528,6 +2528,33 @@ PROJECT_DETAIL_API_RESPONSES = {
     404: {"description": PROJECT_NOT_FOUND_DETAIL},
 }
 
+PROJECT_MANAGEMENT_BASE_RESPONSES = {
+    401: {"description": "Web UI authentication required"},
+    403: {"description": "Web UI access denied or request origin rejected"},
+    415: {"description": "Content-Type must be application/json"},
+    422: {"description": "Invalid mutation request"},
+    500: {"description": "Project/key management unavailable or durable mutation failed"},
+}
+CREATE_PROJECT_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    409: {"description": "Project already exists or configuration changed concurrently"},
+}
+DELETE_PROJECT_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": PROJECT_NOT_FOUND_DETAIL},
+    409: {"description": "Historical-only project or configuration conflict"},
+}
+CREATE_KEY_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": PROJECT_NOT_FOUND_DETAIL},
+    409: {"description": "Configuration conflict"},
+}
+DELETE_KEY_RESPONSES = {
+    **PROJECT_MANAGEMENT_BASE_RESPONSES,
+    404: {"description": "Project or key not found"},
+    409: {"description": "Ambiguous key fingerprint or configuration conflict"},
+}
+
 
 class _StrictMutationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -2935,7 +2962,7 @@ def _check_project_mutation_request(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Origin must exactly match the request origin")
 
 
-async def _project_key_manager(request: Request):
+async def _project_key_manager():
     active_container = await _get_active_container(False)
     if active_container is None:
         raise HTTPException(status_code=500, detail="Project/key management is unavailable")
@@ -2953,6 +2980,9 @@ def _project_mutation_guard(request: Request) -> None:
     _check_project_mutation_request(request)
 
 
+ProjectMutationGuard = Annotated[None, Depends(_project_mutation_guard)]
+
+
 def _mutation_response(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
     return JSONResponse(
         payload,
@@ -2961,13 +2991,16 @@ def _mutation_response(payload: dict[str, Any], status_code: int = 200) -> JSONR
     )
 
 
-@app.post("/api/project-management/projects", status_code=201)
+@app.post(
+    "/api/project-management/projects",
+    status_code=201,
+    responses=CREATE_PROJECT_RESPONSES,
+)
 async def create_managed_project(
-    request: Request,
     body: ProjectCreateBody,
-    _guard: None = Depends(_project_mutation_guard),
+    _guard: ProjectMutationGuard,
 ):
-    manager = await _project_key_manager(request)
+    manager = await _project_key_manager()
     try:
         project = await asyncio.to_thread(manager.create_project, body.project_id, body.display_name, body.tags)
         return _mutation_response({"project": project}, 201)
@@ -2975,13 +3008,12 @@ async def create_managed_project(
         raise _management_error(exc)
 
 
-@app.delete("/api/project-management/projects")
+@app.delete("/api/project-management/projects", responses=DELETE_PROJECT_RESPONSES)
 async def delete_managed_project(
-    request: Request,
     body: ProjectDeleteBody,
-    _guard: None = Depends(_project_mutation_guard),
+    _guard: ProjectMutationGuard,
 ):
-    manager = await _project_key_manager(request)
+    manager = await _project_key_manager()
     try:
         registry = await asyncio.to_thread(manager.get_registry)
         if not registry.has_key(body.project_id):
@@ -2994,13 +3026,16 @@ async def delete_managed_project(
         raise _management_error(exc)
 
 
-@app.post("/api/project-management/keys", status_code=201)
+@app.post(
+    "/api/project-management/keys",
+    status_code=201,
+    responses=CREATE_KEY_RESPONSES,
+)
 async def create_managed_key(
-    request: Request,
     body: ProjectKeyCreateBody,
-    _guard: None = Depends(_project_mutation_guard),
+    _guard: ProjectMutationGuard,
 ):
-    manager = await _project_key_manager(request)
+    manager = await _project_key_manager()
     try:
         secret, key_id = await asyncio.to_thread(manager.create_key, body.project_id)
         return _mutation_response(
@@ -3011,13 +3046,12 @@ async def create_managed_key(
         raise _management_error(exc)
 
 
-@app.delete("/api/project-management/keys")
+@app.delete("/api/project-management/keys", responses=DELETE_KEY_RESPONSES)
 async def delete_managed_key(
-    request: Request,
     body: ProjectKeyDeleteBody,
-    _guard: None = Depends(_project_mutation_guard),
+    _guard: ProjectMutationGuard,
 ):
-    manager = await _project_key_manager(request)
+    manager = await _project_key_manager()
     try:
         await asyncio.to_thread(manager.revoke_key, body.project_id, body.key_id)
         return _mutation_response({"deleted": True, "project_id": body.project_id, "key_id": body.key_id})
