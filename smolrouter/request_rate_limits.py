@@ -213,19 +213,34 @@ local long_violated = long_count >= long_limit
 
 local retry_after_ms = 0
 
+-- Redis returns WITHSCORES as {member, score} inside Lua. Newer FakeRedis
+-- versions model the RESP3 shape as {{member, score}} instead. Accept both so
+-- development and CI exercise the same admission semantics as real Redis.
+local function ranked_event_score(event)
+    if #event == 2 then
+        return tonumber(event[2])
+    end
+    if #event == 1 and type(event[1]) == "table" and #event[1] >= 2 then
+        return tonumber(event[1][2])
+    end
+    return nil
+end
+
 if short_violated then
     local rank = short_count - short_limit
     local event = redis.call("ZRANGEBYSCORE", bucket_key, "(" .. short_cutoff, "+inf", "WITHSCORES", "LIMIT", rank, 1)
-    if #event == 2 then
-        retry_after_ms = math.max(retry_after_ms, tonumber(event[2]) + short_window_ms - now_ms)
+    local score = ranked_event_score(event)
+    if score then
+        retry_after_ms = math.max(retry_after_ms, score + short_window_ms - now_ms)
     end
 end
 
 if long_violated then
     local rank = long_count - long_limit
     local event = redis.call("ZRANGEBYSCORE", bucket_key, "(" .. long_cutoff, "+inf", "WITHSCORES", "LIMIT", rank, 1)
-    if #event == 2 then
-        retry_after_ms = math.max(retry_after_ms, tonumber(event[2]) + long_window_ms - now_ms)
+    local score = ranked_event_score(event)
+    if score then
+        retry_after_ms = math.max(retry_after_ms, score + long_window_ms - now_ms)
     end
 end
 
