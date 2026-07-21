@@ -359,6 +359,23 @@ async def test_verify_exercises_production_lua_and_cleans_up(fake_redis):
     assert await fake_redis.keys("*") == []
 
 
+@pytest.mark.asyncio
+async def test_verify_cleanup_does_not_mask_primary_error(fake_redis, monkeypatch):
+    limiter = RedisRequestRateLimiter(fake_redis)
+
+    async def broken_eval(*_args, **_kwargs):
+        raise RuntimeError("primary verification failure")
+
+    async def broken_delete(*_args, **_kwargs):
+        raise ConnectionError("cleanup failure")
+
+    monkeypatch.setattr(fake_redis, "eval", broken_eval)
+    monkeypatch.setattr(fake_redis, "delete", broken_delete)
+
+    with pytest.raises(RuntimeError, match="primary verification failure"):
+        await limiter.verify()
+
+
 class _RealRedisWithoutAggregateStats:
     """Delegate Redis semantics while keeping an optional shared test DB free of stats changes."""
 

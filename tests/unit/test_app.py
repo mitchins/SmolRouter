@@ -984,7 +984,7 @@ async def test_proxy_backed_routes_enforce_rate_limit_before_body_parsing(
     response = await async_client.post(path, content=b'{"secret":"must-not-be-read"}')
 
     assert response.status_code == 429
-    assert response.json()["error"]["code"] == "project_rate_limit_exceeded"
+    assert response.json()["error"]["code"] == "anonymous_rate_limit_exceeded"
     assert response.headers["retry-after"] == "2"
     assert response.headers["x-smolrouter-ratelimit-bucket"] == "anonymous"
     assert response.headers["x-smolrouter-ratelimit-policy"] == "1;w=1, 3;w=10"
@@ -1049,6 +1049,46 @@ async def test_disabled_request_limiter_skips_check(async_client, mock_openai_up
 
     assert response.status_code == 200
     limiter.check.assert_not_awaited()
+
+
+def test_request_rate_limit_config_preserves_disabled_setting_without_container(monkeypatch):
+    monkeypatch.setattr(app_module, "ROUTES_CONFIG_DATA", {"routes": [], "request_rate_limits": {"enabled": False}})
+
+    assert app_module._request_rate_limit_config().enabled is False
+
+
+@pytest.mark.asyncio
+async def test_identified_request_without_container_uses_project_default(monkeypatch):
+    project_default = RequestRateLimitPolicy(
+        windows=(RateLimitWindow(4, 2), RateLimitWindow(12, 20)),
+    )
+    config = RequestRateLimitConfig(project_default=project_default)
+    limiter = SimpleNamespace(check=AsyncMock(return_value=_rate_limit_decision(allowed=True, bucket_class="project")))
+    request = Mock()
+    request.method = "POST"
+    request.url = SimpleNamespace(path="/v1/chat/completions")
+    request.headers = {}
+    request.state = SimpleNamespace()
+    monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
+    monkeypatch.setattr(app_module, "_request_rate_limit_config", lambda _container=None: config)
+
+    response = await app_module._apply_request_rate_limit(
+        request,
+        0.0,
+        None,
+        app_module.ProxyRequestContext(
+            headers={},
+            identity=RequestIdentity(kind="facade_key", subject_id="project-a"),
+        ),
+    )
+
+    assert response is None
+    limiter.check.assert_awaited_once_with(
+        "project",
+        project_default,
+        identity_kind="facade_key",
+        identity_subject_id="project-a",
+    )
 
 
 @pytest.mark.asyncio
@@ -2134,14 +2174,15 @@ async def test_request_rate_limiter_startup_skips_verify_when_disabled(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_request_rate_limiter_startup_rejects_fake_redis_in_production(monkeypatch):
+@pytest.mark.parametrize("app_env", ["prod", "production"])
+async def test_request_rate_limiter_startup_rejects_fake_redis_in_production(monkeypatch, app_env):
     fake_container = Mock()
     fake_container.get_request_rate_limit_config.return_value = RequestRateLimitConfig(enabled=True)
     limiter = SimpleNamespace(verify=AsyncMock())
     monkeypatch.setattr(app_module, "container", fake_container)
     monkeypatch.setattr(app_module, "REQUEST_RATE_LIMITER", limiter)
     monkeypatch.setattr(app_module, "is_fake_redis", lambda: True)
-    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("APP_ENV", app_env)
 
     with pytest.raises(RuntimeError, match="FakeRedis cannot enforce"):
         await app_module._verify_request_rate_limiter_startup()
@@ -2163,9 +2204,9 @@ async def test_app_lifespan_aborts_when_request_limiter_verification_fails(monke
         AsyncMock(side_effect=ConnectionError("redis unavailable")),
     )
 
+    lifespan = app_module.app_lifespan(app)
     with pytest.raises(ConnectionError, match="redis unavailable"):
-        async with app_module.app_lifespan(app):
-            pytest.fail("lifespan must not yield")
+        await lifespan.__aenter__()
 
 
 @pytest.mark.asyncio
@@ -2210,9 +2251,9 @@ async def test_app_lifespan_aborts_for_malformed_request_rate_limit_config(
     monkeypatch.setattr(app_module, "_initialize_request_logging_system", AsyncMock(return_value=None))
     monkeypatch.setattr(app_module, "_initialize_blob_storage_strict", Mock(return_value=None))
 
+    lifespan = app_module.app_lifespan(app)
     with pytest.raises(RequestRateLimitConfigError, match=error_match):
-        async with app_module.app_lifespan(app):
-            pytest.fail("lifespan must not yield for malformed limiter config")
+        await lifespan.__aenter__()
 
     assert app_module.container is None
 

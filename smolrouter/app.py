@@ -55,6 +55,7 @@ from smolrouter.request_rate_limits import (
     RequestRateLimitConfig,
     RequestRateLimitConfigError,
     RequestRateLimitPolicy,
+    parse_request_rate_limit_config,
 )
 from smolrouter.request_metadata import REQUEST_LOG_METADATA_FIELDS, apply_request_metadata, serialize_request_metadata
 from smolrouter.task_utils import create_logged_task, drain_background_tasks
@@ -803,7 +804,7 @@ def _default_request_rate_limit_config() -> RequestRateLimitConfig:
 
 def _request_rate_limit_config(active_container: Any = None) -> RequestRateLimitConfig:
     if active_container is None:
-        return _default_request_rate_limit_config()
+        return parse_request_rate_limit_config(ROUTES_CONFIG_DATA.get("request_rate_limits"))
     config = active_container.get_request_rate_limit_config()
     return config if isinstance(config, RequestRateLimitConfig) else _default_request_rate_limit_config()
 
@@ -814,7 +815,7 @@ async def _verify_request_rate_limiter_startup() -> None:
     config = _request_rate_limit_config(container)
     if not config.enabled:
         return
-    if os.getenv("APP_ENV", "dev").lower() == "prod" and is_fake_redis():
+    if os.getenv("APP_ENV", "dev").lower() in ("prod", "production") and is_fake_redis():
         raise RuntimeError("FakeRedis cannot enforce request rate limits in production")
     await REQUEST_RATE_LIMITER.verify()
 
@@ -1836,7 +1837,7 @@ def _rate_limit_response_payload(status_code: int, bucket_class: str) -> Dict[st
                 ),
                 "type": "rate_limit_error",
                 "param": None,
-                "code": "project_rate_limit_exceeded",
+                "code": _rate_limit_error_code(bucket_class),
             }
         }
     return {
@@ -1847,6 +1848,10 @@ def _rate_limit_response_payload(status_code: int, bucket_class: str) -> Dict[st
             "code": "rate_limiter_unavailable",
         }
     }
+
+
+def _rate_limit_error_code(bucket_class: str) -> str:
+    return "project_rate_limit_exceeded" if bucket_class == "project" else "anonymous_rate_limit_exceeded"
 
 
 def _rate_limit_headers(decision: RateLimitDecision) -> Dict[str, str]:
@@ -1916,13 +1921,11 @@ async def _apply_request_rate_limit(
         )
         return None
 
-    policy = config.anonymous
+    policy = context.identity.rate_limit_policy or config.project_default if context.identity else config.anonymous
     if context.active_container is not None:
         effective_policy = context.active_container.get_effective_request_rate_limit_policy(context.identity)
         if isinstance(effective_policy, RequestRateLimitPolicy):
             policy = effective_policy
-        elif context.identity is not None:
-            policy = context.identity.rate_limit_policy or config.project_default
     identity_kwargs: Dict[str, str] = {}
     if context.identity is not None:
         identity_kwargs = {
@@ -1975,7 +1978,7 @@ async def _apply_request_rate_limit(
         auth_payload,
         context.identity,
         429,
-        "project_rate_limit_exceeded",
+        _rate_limit_error_code(bucket_class),
     )
     return JSONResponse(
         content=_rate_limit_response_payload(429, bucket_class),

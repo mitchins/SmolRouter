@@ -85,6 +85,22 @@ def _reject_unknown_keys(raw: Mapping[str, Any], allowed: frozenset[str], field_
         raise RequestRateLimitConfigError(f"{field_name} contains unknown keys: {rendered}")
 
 
+def _parse_request_rate_limit_window(raw: Any, field_name: str) -> RateLimitWindow:
+    window = _require_mapping(raw, field_name)
+    _reject_unknown_keys(window, _WINDOW_KEYS, field_name)
+    missing = sorted(_WINDOW_KEYS - set(window))
+    if missing:
+        raise RequestRateLimitConfigError(f"{field_name} is missing required keys: {', '.join(missing)}")
+
+    requests = window["requests"]
+    seconds = window["seconds"]
+    if type(requests) is not int or requests <= 0:
+        raise RequestRateLimitConfigError(f"{field_name}.requests must be a positive integer")
+    if type(seconds) is not int or seconds <= 0:
+        raise RequestRateLimitConfigError(f"{field_name}.seconds must be a positive integer")
+    return RateLimitWindow(requests=requests, seconds=seconds)
+
+
 def parse_request_rate_limit_policy(
     raw: Any,
     field_name: str,
@@ -108,22 +124,10 @@ def parse_request_rate_limit_policy(
     if len(windows_raw) != 2:
         raise RequestRateLimitConfigError(f"{field_name}.windows must contain exactly 2 windows")
 
-    windows: list[RateLimitWindow] = []
-    for index, window_raw in enumerate(windows_raw):
-        window_name = f"{field_name}.windows[{index}]"
-        window = _require_mapping(window_raw, window_name)
-        _reject_unknown_keys(window, _WINDOW_KEYS, window_name)
-        missing = sorted(_WINDOW_KEYS - set(window))
-        if missing:
-            raise RequestRateLimitConfigError(f"{window_name} is missing required keys: {', '.join(missing)}")
-
-        requests = window["requests"]
-        seconds = window["seconds"]
-        if type(requests) is not int or requests <= 0:
-            raise RequestRateLimitConfigError(f"{window_name}.requests must be a positive integer")
-        if type(seconds) is not int or seconds <= 0:
-            raise RequestRateLimitConfigError(f"{window_name}.seconds must be a positive integer")
-        windows.append(RateLimitWindow(requests=requests, seconds=seconds))
+    windows = [
+        _parse_request_rate_limit_window(window_raw, f"{field_name}.windows[{index}]")
+        for index, window_raw in enumerate(windows_raw)
+    ]
 
     short, long = windows
     if short.seconds >= long.seconds:
@@ -300,7 +304,13 @@ class RedisRequestRateLimiter:
             expected_pttl = long.seconds * 1000 + 1000
             if not 0 < pttl <= expected_pttl:
                 raise RuntimeError("request rate limiter verification did not set a TTL")
-        finally:
+        except BaseException:
+            try:
+                await self._client.delete(verification_key)
+            except Exception:
+                logger.warning("Request rate-limit verification cleanup failed after verification error")
+            raise
+        else:
             await self._client.delete(verification_key)
 
     async def check(

@@ -157,7 +157,7 @@
                                     {% for window in project.request_rate_limit.policy.windows %}
                                     <div class="quota-value">{{ window.requests }} request{{ "s" if window.requests != 1 else "" }} / {{ window.seconds }}s</div>
                                     {% endfor %}
-                                    <div class="quota-value">{{ project.request_rate_limit.source | replace('_', ' ') }}</div>
+                                    <div class="quota-value">{{ (project.request_rate_limit.source or "") | replace('_', ' ') }}</div>
                                 {% else %}
                                 <span style="color:#999;">disabled</span>
                                 {% endif %}
