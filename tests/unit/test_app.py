@@ -2146,6 +2146,7 @@ async def test_request_detail_renders_unknown_identity_as_unlinked_canonical_ide
     assert response.status_code == 200
     assert "Identity:" in response.text
     assert "service_account:ops/&lt;admin&gt;" in response.text
+    assert 'title="Identity"' not in response.text
     assert "Should not replace canonical" not in response.text
     assert "/projects/" not in response.text
 
