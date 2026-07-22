@@ -115,7 +115,7 @@
         .dismiss-secret { position:absolute; right:.55rem; top:.55rem; border:0; background:transparent; color:#475569; border-radius:5px; cursor:pointer; }
         .dismiss-secret:hover { background:#fef3c7; color:#0f172a; }
         .icon-button:focus-visible, .dismiss-secret:focus-visible, .secret-value:focus-visible { outline:3px solid #2563eb; outline-offset:2px; }
-        .copy-status { min-height:1.2rem; margin-top:.4rem; color:#475569; font-size:.9rem; }
+        .copy-status { display:block; min-height:1.2rem; margin-top:.4rem; color:#475569; font-size:.9rem; }
         .copy-status.success { color:#166534; }
         .copy-status.warning { color:#b45309; }
         .danger { background:#b91c1c !important; color:#fff !important; }
@@ -161,7 +161,7 @@
                     <input id="secret-value" class="secret-value" type="text" readonly aria-label="Generated API key">
                     <button id="copy-secret" class="action-btn icon-button" type="button" aria-label="Copy API key" title="Copy API key"><span id="copy-secret-icon" class="material-icons" aria-hidden="true">content_copy</span></button>
                 </div>
-                <div id="copy-status" class="copy-status" role="status" aria-live="polite"></div>
+                <output id="copy-status" class="copy-status" aria-live="polite"></output>
             </div>
             <div id="key-message" class="management-message" role="alert"></div>
             <table>

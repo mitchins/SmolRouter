@@ -722,6 +722,9 @@ async def test_project_ui_has_management_controls_but_never_secret_values(async_
     assert 'aria-label="Copy API key"' in detail.text
     assert 'aria-label="Dismiss generated key"' in detail.text
     assert 'aria-live="polite"' in detail.text
+    assert '<output id="copy-status" class="copy-status" aria-live="polite"></output>' in detail.text
+    assert 'id="copy-status" class="copy-status" role="status"' not in detail.text
+    assert '.copy-status { display:block;' in detail.text
     assert "content_copy" in detail.text
     assert "/static/vendor/api-key-copy.js" in detail.text
     assert "sha256:" in detail.text
