@@ -94,6 +94,12 @@
             color: #666;
         }
 
+        .project-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
         .token-button {
             padding: 0;
             border: none;
@@ -123,6 +129,17 @@
 
         .icon-link:hover {
             color: #007bff;
+        }
+
+        .icon-link:focus-visible {
+            outline: 2px solid #2563eb;
+            outline-offset: 2px;
+            border-radius: 3px;
+        }
+
+        .identity-cue {
+            color: #6c757d;
+            font-size: 0.72rem;
         }
 
         .provider-primary {
@@ -242,7 +259,7 @@
                         class="filter-input"
                         id="dashboard-query"
                         type="search"
-                        placeholder="host:192.168.1.14 provider:google-gen-ai model:gemma3-12b project:project-a identity:facade_key:project-a"
+                        placeholder="host:192.168.1.14 provider:google-gen-ai model:gemma3-12b project:project-a"
                         autocomplete="off"
                     >
                 </div>
@@ -251,7 +268,7 @@
             </form>
 
             <div class="filter-help dashboard-filter-help">
-                Space-separated clauses are ANDed. Supported fields: <strong>host</strong>, <strong>provider</strong>, <strong>model</strong>, <strong>project</strong>, and <strong>identity</strong>. Bare words also search across the visible request fields.
+                Space-separated clauses are ANDed. Supported fields: <strong>host</strong>, <strong>provider</strong>, <strong>model</strong>, and <strong>project</strong>. Bare words also search across the visible request fields.
             </div>
 
             <div id="error-container"></div>
@@ -263,7 +280,7 @@
                         <th></th>
                         <th>Time</th>
                         <th>Source</th>
-                        <th>Project Identity</th>
+                        <th>Project</th>
                         <th>Provider</th>
                         <th>Path</th>
                         <th>Model</th>
@@ -367,6 +384,10 @@
             return div.innerHTML;
         }
 
+        function escapeAttribute(text) {
+            return escapeHtml(text).replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+        }
+
         function escapeClassName(text) {
             return String(text || 'unknown').toLowerCase().replaceAll(/[^a-z0-9_-]+/g, '-');
         }
@@ -430,19 +451,35 @@
         function renderProjectCell(log) {
             const identityKind = log.identity_kind;
             const identitySubject = log.identity_subject_id;
-            const identityDisplayName = log.identity_display_name;
-
             if (!identityKind || !identitySubject) {
                 return '<span style="color:#999;">-</span>';
             }
 
             const canonical = `${identityKind}:${identitySubject}`;
-            const label = log.identity_display_name ? `${canonical} (${identityDisplayName})` : canonical;
+            if (identityKind !== 'facade_key') {
+                return `
+                    <div class="cell-stack">
+                        <span>${escapeHtml(canonical)}</span>
+                        <span class="identity-cue">Identity</span>
+                    </div>
+                `;
+            }
+
+            const displayName = log.identity_display_name;
+            const label = displayName || identitySubject;
+            const secondaryId = displayName && displayName !== identitySubject
+                ? `<div class="cell-secondary">${renderFilterButton('project', identitySubject, identitySubject, 'secondary')}</div>`
+                : '';
 
             return `
                 <div class="cell-stack">
-                    <div>${renderFilterButton('project', identitySubject, canonical)}</div>
-                    <div class="cell-secondary">${renderFilterButton('identity', canonical, label, 'secondary')}</div>
+                    <div class="project-primary">
+                        ${renderFilterButton('project', identitySubject, label)}
+                        <a class="icon-link project-detail-link" href="/projects/${encodeURIComponent(identitySubject)}" aria-label="Open project ${escapeAttribute(label)}" title="Open project ${escapeAttribute(label)}">
+                            <span class="material-icons" aria-hidden="true" style="font-size: 0.95rem;">folder_open</span>
+                        </a>
+                    </div>
+                    ${secondaryId}
                 </div>
             `;
         }
@@ -527,7 +564,7 @@
                     </td>
                     <td data-label="Time" class="timestamp">${formatTimestamp(log.timestamp)}</td>
                     <td data-label="Source">${renderSourceCell(log)}</td>
-                    <td data-label="Project Identity">${renderProjectCell(log)}</td>
+                    <td data-label="Project">${renderProjectCell(log)}</td>
                     <td data-label="Provider">${renderProviderCell(log)}</td>
                     <td data-label="Path">${escapeHtml(log.path || '-')}</td>
                     <td data-label="Model">${formatModel(log.original_model, log.mapped_model, log.model_observation_status)}</td>
@@ -730,8 +767,8 @@
                 return;
             }
 
-            const clientLink = event.target.closest('.client-dashboard-link');
-            if (clientLink) {
+            const navigationLink = event.target.closest('.client-dashboard-link, .project-detail-link');
+            if (navigationLink) {
                 event.stopPropagation();
             }
         }

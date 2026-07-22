@@ -58,6 +58,9 @@
             text-decoration: underline;
         }
 
+        .project-cell { display:flex; flex-direction:column; gap:.2rem; }
+        .project-cell-secondary, .identity-cue { color:#666; font-size:.8rem; }
+
         @media (max-width: 768px) {
             .stats {
                 grid-template-columns: repeat(2, 1fr);
@@ -148,7 +151,7 @@
                         <th></th>
                         <th>Time</th>
                         <th>Service</th>
-                        <th>Project Identity</th>
+                        <th>Project</th>
                         <th>Path</th>
                         <th>Model</th>
                         <th>Size</th>
@@ -230,13 +233,15 @@
 
             const canonical = `${identityKind}:${identitySubject}`;
             const displayName = log.identity_display_name;
-            const label = displayName ? `${canonical} (${displayName})` : canonical;
-
             if (identityKind === 'facade_key') {
-                return `<a href="/projects/${encodeURIComponent(identitySubject)}" class="token-button secondary">${escapeHtml(label)}</a>`;
+                const label = displayName || identitySubject;
+                const secondaryId = displayName && displayName !== identitySubject
+                    ? `<span class="project-cell-secondary">${escapeHtml(identitySubject)}</span>`
+                    : '';
+                return `<div class="project-cell"><a href="/projects/${encodeURIComponent(identitySubject)}" class="project-detail-link" onclick="event.stopPropagation()">${escapeHtml(label)}</a>${secondaryId}</div>`;
             }
 
-            return escapeHtml(label);
+            return `<div class="project-cell"><span>${escapeHtml(canonical)}</span><span class="identity-cue">Identity</span></div>`;
         }
 
         // JSON formatting functions (same as main dashboard)
@@ -401,7 +406,7 @@
                             ${log.service_type || 'unknown'}
                         </span>
                     </td>
-                    <td data-label="Project Identity">${renderProjectCell(log)}</td>
+                    <td data-label="Project">${renderProjectCell(log)}</td>
                     <td data-label="Path">${log.path || '-'}</td>
                     <td data-label="Model">${formatModel(log.original_model, log.mapped_model, log.model_observation_status)}</td>
                     <td data-label="Size">${formatSize(log.request_size)}</td>
@@ -549,7 +554,7 @@
                         ${request.service_type || 'unknown'}
                     </span>
                 </td>
-                <td data-label="Project Identity">${renderProjectCell(request)}</td>
+                <td data-label="Project">${renderProjectCell(request)}</td>
                 <td data-label="Path">${request.path || '-'}</td>
                 <td data-label="Model">${formatModel(request.original_model, request.mapped_model, request.model_observation_status)}</td>
                 <td data-label="Size">${formatSize(request.request_size)}</td>
@@ -583,7 +588,7 @@
                                 ${request.service_type || 'unknown'}
                             </span>
                         </td>
-                        <td data-label="Project Identity">${renderProjectCell(request)}</td>
+                        <td data-label="Project">${renderProjectCell(request)}</td>
                         <td data-label="Path">${request.path || '-'}</td>
                         <td data-label="Model">${formatModel(request.original_model, request.mapped_model, request.model_observation_status)}</td>
                         <td data-label="Size">${formatSize(request.request_size)}</td>

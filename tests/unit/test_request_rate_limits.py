@@ -1,5 +1,7 @@
 import asyncio
+import math
 import os
+import time
 from types import SimpleNamespace
 import uuid
 
@@ -37,6 +39,13 @@ def policy(short_requests=1, short_seconds=1, long_requests=3, long_seconds=10):
             RateLimitWindow(long_requests, long_seconds),
         )
     )
+
+
+def _assert_wall_clock_ttl(observed_ms, expected_ms, started_at):
+    elapsed_ms = math.ceil((time.monotonic() - started_at) * 1000)
+    allowance_ms = 50
+    lower_bound = max(1, expected_ms - elapsed_ms - allowance_ms)
+    assert lower_bound <= observed_ms <= expected_ms
 
 
 def test_default_configuration_is_enabled_with_safe_two_window_limits():
@@ -252,11 +261,15 @@ async def test_admission_prunes_cardinality_and_sets_max_window_ttl(fake_redis):
     limiter = RedisRequestRateLimiter(fake_redis)
     limits = policy(2, 1, 3, 10)
     bucket = request_rate_limit_bucket_key("anonymous")
-    for timestamp in (1_000, 2_000, 3_000):
+    for timestamp in (1_000, 2_000):
         assert (await limiter._check_at_ms("anonymous", limits, timestamp)).allowed
+    # Event timestamps are deterministic, while Redis expiry advances on the wall clock.
+    started_at = time.monotonic()
+    assert (await limiter._check_at_ms("anonymous", limits, 3_000)).allowed
 
     assert await fake_redis.zcard(bucket) == 3
-    assert 10_900 <= await fake_redis.pttl(bucket) <= 11_000
+    observed_ttl = await fake_redis.pttl(bucket)
+    _assert_wall_clock_ttl(observed_ttl, 11_000, started_at)
 
     assert (await limiter._check_at_ms("anonymous", limits, 11_000)).allowed
     assert await fake_redis.zcard(bucket) == 3
@@ -441,10 +454,14 @@ async def test_semantic_suite_against_real_redis_when_explicitly_configured():
         kind, subject = identities["cardinality"]
         cardinality_policy = policy(2, 1, 3, 10)
         cardinality_key = request_rate_limit_bucket_key("project", identity_kind=kind, identity_subject_id=subject)
-        for timestamp in (1_000, 2_000, 3_000):
+        for timestamp in (1_000, 2_000):
             assert (await limiter._check_at_ms("project", cardinality_policy, timestamp, kind, subject)).allowed
+        # Event timestamps are deterministic, while Redis expiry advances on the wall clock.
+        started_at = time.monotonic()
+        assert (await limiter._check_at_ms("project", cardinality_policy, 3_000, kind, subject)).allowed
         assert await raw_client.zcard(cardinality_key) == 3
-        assert 10_900 <= await raw_client.pttl(cardinality_key) <= 11_000
+        observed_ttl = await raw_client.pttl(cardinality_key)
+        _assert_wall_clock_ttl(observed_ttl, 11_000, started_at)
         assert (await limiter._check_at_ms("project", cardinality_policy, 11_000, kind, subject)).allowed
         assert await raw_client.zcard(cardinality_key) == 3
     finally:
