@@ -84,6 +84,7 @@ GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES = {
 }
 GOOGLE_IMAGE_RESPONSE_FORMATS = {"url", "b64_json"}
 OPENAI_IMAGE_REQUEST_FIELDS = {"model", "prompt", "n", "size", "response_format", "extra_body", "user"}
+GOOGLE_ERROR_DETAIL_TYPE_FIELD = "@type"
 # Permanent key invalidation has a fleet-wide blast radius. Generic status codes
 # and Google request-validation failures are deliberately not evidence of a bad key.
 GOOGLE_INVALID_KEY_REASON_PATTERNS = (
@@ -2523,13 +2524,13 @@ class GoogleGenAIProvider(IModelProvider):
     @staticmethod
     def _google_error_reason(detail: Dict[str, Any]) -> str:
         reason = detail.get("reason")
-        if str(detail.get("@type", "")).endswith("ErrorInfo") and isinstance(reason, str):
+        if str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("ErrorInfo") and isinstance(reason, str):
             return reason
         return ""
 
     @staticmethod
     def _google_quota_id(detail: Dict[str, Any]) -> str:
-        if not str(detail.get("@type", "")).endswith("QuotaFailure"):
+        if not str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("QuotaFailure"):
             return ""
         violations = detail.get("violations")
         if not isinstance(violations, list):
@@ -2553,7 +2554,7 @@ class GoogleGenAIProvider(IModelProvider):
                 continue
             reason = cls._google_error_reason(detail) or reason
             quota_id = cls._google_quota_id(detail) or quota_id
-            if str(detail.get("@type", "")).endswith("RetryInfo"):
+            if str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("RetryInfo"):
                 retry_delay_seconds = cls._parse_google_duration(detail.get("retryDelay"))
         return reason, quota_id, retry_delay_seconds
 
