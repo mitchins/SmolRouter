@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -528,6 +529,55 @@ async def test_api_key_quota_round_trip_and_usage_markers(monkeypatch):
     )
     assert len(provider_b_usage) == 1
     assert provider_b_usage[0].invalid_key is False
+
+
+@pytest.mark.asyncio
+async def test_invalid_key_recovery_is_provider_scoped_and_preserves_quota_state(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_initialized", False)
+    monkeypatch.setattr(RedisApiKeyQuota, "_script_sha", None)
+    monkeypatch.setattr(RedisApiKeyQuota, "_lua_disabled", True)
+
+    await RedisApiKeyQuota.get_or_create_quota("sk-recover", "provider-a", "model-a")
+    await RedisApiKeyQuota.get_or_create_quota("sk-recover", "provider-a", "model-b")
+    await RedisApiKeyQuota.get_or_create_quota("sk-recover", "provider-b", "model-a")
+    await RedisApiKeyQuota.increment_usage("sk-recover", "provider-a", "model-a", request_count=2)
+    key_hash = RedisApiKeyQuota.hash_api_key("sk-recover")
+
+    assert await RedisApiKeyQuota.mark_invalid(
+        key_hash, "provider-a", reason="api_key_invalid", status_code=400, request_id="request-1"
+    ) == 2
+    assert await RedisApiKeyQuota.mark_invalid(
+        key_hash, "provider-a", reason="api_key_revoked", status_code=401, request_id="request-2"
+    ) == 2
+
+    metadata_key = RedisApiKeyQuota.google_invalid_key_metadata_key("provider-a", key_hash)
+    metadata = await redis_client.hgetall(metadata_key)
+    assert metadata["first_reason"] == "api_key_invalid"
+    assert metadata["first_status_code"] == "400"
+    assert metadata["first_request_id"] == "request-1"
+    assert metadata["occurrence_count"] == "2"
+    assert metadata["latest_reason"] == "api_key_revoked"
+    assert metadata["latest_status_code"] == "401"
+    assert metadata["latest_request_id"] == "request-2"
+
+    assert await RedisApiKeyQuota.recover_invalid(
+        key_hash, "provider-a", actor="operator@example.test", reason="false positive"
+    ) == 2
+
+    provider_a_usage = await RedisApiKeyQuota.get_provider_usage("provider-a")
+    provider_b_usage = await RedisApiKeyQuota.get_provider_usage("provider-b")
+    assert {quota.model_name for quota in provider_a_usage if quota.invalid_key} == set()
+    assert next(quota for quota in provider_a_usage if quota.model_name == "model-a").requests_today == 2
+    assert provider_b_usage[0].invalid_key is False
+    assert await redis_client.sismember(RedisApiKeyQuota.google_invalid_keys_key("provider-a"), key_hash) == 0
+    assert await redis_client.exists(metadata_key) == 0
+
+    audit = json.loads(await redis_client.lindex("google_invalid_key_recovery_audit:provider-a", 0))
+    assert audit["actor"] == "operator@example.test"
+    assert audit["reason"] == "false positive"
+    assert audit["prior_metadata"]["occurrence_count"] == "2"
 
 
 @pytest.mark.asyncio

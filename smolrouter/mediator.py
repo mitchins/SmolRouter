@@ -14,7 +14,7 @@ from datetime import datetime
 from .interfaces import IModelStrategy, IAccessControl, ModelInfo, ClientContext
 from .caching import ModelAggregator, IModelCache
 from .providers import IModelProvider
-from .google_genai_provider import GOOGLE_GENAI_IMAGE_ENDPOINT, GoogleGenAIProvider
+from .google_genai_provider import GOOGLE_GENAI_IMAGE_ENDPOINT, GoogleGenAIProvider, GoogleGenAIRequestError
 from .dummy_provider import DummyProvider
 from .load_balancer import model_load_balancer
 from .request_metadata import RequestMetadata
@@ -401,10 +401,11 @@ class ModelMediator:
                 self._attach_lb_instance(lb_instance, metadata),
             )
         except Exception as e:
-            error_msg = str(e)
-            error_type = "api_error"
-            status_code = self._google_error_status_code(error_msg)
-            if status_code == 400:
+            is_provider_error = isinstance(e, GoogleGenAIRequestError)
+            error_msg = str(e) if is_provider_error else "Google GenAI request failed."
+            status_code = getattr(e, "status_code", None) or self._google_error_status_code(error_msg)
+            error_type = getattr(e, "error_type", "api_error")
+            if status_code == 400 and error_type == "api_error":
                 error_type = "invalid_request_error"
 
             error_metadata = RequestMetadata(

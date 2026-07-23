@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from google.genai import errors as google_genai_errors
 
 from smolrouter import google_genai_provider as ggp
 from smolrouter.google_genai_provider import (
@@ -924,12 +925,66 @@ def test_quota_cooldown_seconds_ambiguous_quota_is_transient(provider):
 
 
 def test_is_invalid_key_error(provider):
-    assert provider._is_invalid_key_error(status_code=403) is True
-    assert provider._is_invalid_key_error("403 upgrade your account to a paid plan", status_code=403) is False
+    assert provider._is_invalid_key_error(status_code=403) is False
+    assert provider._is_invalid_key_error("400 INVALID_ARGUMENT: Request contains an invalid argument.") is False
     assert provider._is_invalid_key_error("API key not valid") is True
-    assert provider._is_invalid_key_error("PERMISSION_DENIED") is True
+    assert provider._is_invalid_key_error("invalid API key") is True
+    assert provider._is_invalid_key_error("PERMISSION_DENIED") is False
     assert provider._is_invalid_key_error("transient network blip") is False
     assert provider._is_invalid_key_error(None) is False
+
+
+def test_google_error_evidence_requires_explicit_key_specific_signal(provider):
+    generic_invalid_argument = {
+        "error": {
+            "code": 400,
+            "message": "Request contains an invalid argument.",
+            "status": "INVALID_ARGUMENT",
+        }
+    }
+    explicit_invalid_key = {
+        "error": {
+            "code": 400,
+            "message": "API key not valid.",
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}
+            ],
+        }
+    }
+
+    generic_evidence = provider._google_error_evidence_from_payload(generic_invalid_argument)
+    explicit_evidence = provider._google_error_evidence_from_payload(explicit_invalid_key)
+
+    assert provider._invalid_key_reason(generic_evidence) is None
+    assert provider._invalid_key_reason(explicit_evidence) == "api_key_invalid"
+
+
+def test_google_sdk_error_evidence_preserves_explicit_daily_quota_id(provider):
+    error = google_genai_errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "message": "You exceeded your current quota.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    evidence = provider._extract_google_error_evidence(error)
+
+    assert evidence.status_code == 429
+    assert evidence.quota_id == "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+    assert provider._is_per_day_quota_error(evidence=evidence) is True
 
 
 def test_extract_retry_delay(provider):
