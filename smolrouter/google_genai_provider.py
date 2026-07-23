@@ -2508,44 +2508,69 @@ class GoogleGenAIProvider(IModelProvider):
         match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value.strip())
         return float(match.group(1)) if match else None
 
+    @staticmethod
+    def _google_error_payload(payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        error_payload = payload.get("error", payload)
+        return error_payload if isinstance(error_payload, dict) else {}
+
+    @staticmethod
+    def _google_error_status_code(error_payload: Dict[str, Any], fallback_status: Optional[int]) -> Optional[int]:
+        status_code = error_payload.get("code", fallback_status)
+        return status_code if isinstance(status_code, int) else fallback_status
+
+    @staticmethod
+    def _google_error_reason(detail: Dict[str, Any]) -> str:
+        reason = detail.get("reason")
+        if str(detail.get("@type", "")).endswith("ErrorInfo") and isinstance(reason, str):
+            return reason
+        return ""
+
+    @staticmethod
+    def _google_quota_id(detail: Dict[str, Any]) -> str:
+        if not str(detail.get("@type", "")).endswith("QuotaFailure"):
+            return ""
+        violations = detail.get("violations")
+        if not isinstance(violations, list):
+            return ""
+        for violation in violations:
+            quota_id = violation.get("quotaId") if isinstance(violation, dict) else None
+            if isinstance(quota_id, str):
+                return quota_id
+        return ""
+
+    @classmethod
+    def _google_error_detail_evidence(cls, details: Any) -> tuple[str, str, Optional[float]]:
+        if not isinstance(details, list):
+            return "", "", None
+
+        reason = ""
+        quota_id = ""
+        retry_delay_seconds = None
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            reason = cls._google_error_reason(detail) or reason
+            quota_id = cls._google_quota_id(detail) or quota_id
+            if str(detail.get("@type", "")).endswith("RetryInfo"):
+                retry_delay_seconds = cls._parse_google_duration(detail.get("retryDelay"))
+        return reason, quota_id, retry_delay_seconds
+
     @classmethod
     def _google_error_evidence_from_payload(
         cls, payload: Any, fallback_status: Optional[int] = None
     ) -> GoogleErrorEvidence:
-        error_payload = payload.get("error", payload) if isinstance(payload, dict) else {}
-        if not isinstance(error_payload, dict):
+        error_payload = cls._google_error_payload(payload)
+        if not error_payload:
             return GoogleErrorEvidence(status_code=fallback_status)
 
-        status_code = error_payload.get("code", fallback_status)
-        if not isinstance(status_code, int):
-            status_code = fallback_status
         status = error_payload.get("status")
         message = error_payload.get("message")
-        reason = ""
-        quota_id = ""
-        retry_delay_seconds = None
-        details = error_payload.get("details")
-        if not isinstance(details, list):
-            details = []
-
-        for detail in details:
-            if not isinstance(detail, dict):
-                continue
-            detail_type = str(detail.get("@type", ""))
-            if detail_type.endswith("ErrorInfo") and isinstance(detail.get("reason"), str):
-                reason = detail["reason"]
-            if detail_type.endswith("QuotaFailure"):
-                violations = detail.get("violations")
-                if isinstance(violations, list):
-                    for violation in violations:
-                        if isinstance(violation, dict) and isinstance(violation.get("quotaId"), str):
-                            quota_id = violation["quotaId"]
-                            break
-            if detail_type.endswith("RetryInfo"):
-                retry_delay_seconds = cls._parse_google_duration(detail.get("retryDelay"))
+        reason, quota_id, retry_delay_seconds = cls._google_error_detail_evidence(error_payload.get("details"))
 
         return GoogleErrorEvidence(
-            status_code=status_code,
+            status_code=cls._google_error_status_code(error_payload, fallback_status),
             status=status if isinstance(status, str) else "",
             message=message if isinstance(message, str) else "",
             reason=reason,
@@ -2553,38 +2578,52 @@ class GoogleGenAIProvider(IModelProvider):
             retry_delay_seconds=retry_delay_seconds,
         )
 
-    def _extract_google_error_evidence(self, error: Exception) -> GoogleErrorEvidence:
-        if isinstance(error, GoogleGenAIUpstreamError):
-            return error.evidence
+    @staticmethod
+    def _google_exception_response(error: Exception) -> Any:
+        return getattr(error, "response", None) or getattr(error, "_response", None)
 
-        fallback_status = None
+    @staticmethod
+    def _google_exception_status_code(error: Exception, response: Any) -> Optional[int]:
         if isinstance(error, ResourceExhausted):
             fallback_status = 429
         elif isinstance(error, PermissionDenied):
             fallback_status = 403
         elif isinstance(error, InvalidArgument):
             fallback_status = 400
+        else:
+            fallback_status = None
 
         error_code = getattr(error, "code", None)
         if isinstance(error_code, int):
             fallback_status = error_code
-
-        response = getattr(error, "response", None) or getattr(error, "_response", None)
         response_status = getattr(response, "status_code", None)
-        if isinstance(response_status, int):
-            fallback_status = response_status
+        return response_status if isinstance(response_status, int) else fallback_status
+
+    @staticmethod
+    def _google_exception_payload(error: Exception, response: Any) -> Any:
         payload = getattr(error, "details", None)
+        if payload:
+            return payload
         if response is not None and callable(getattr(response, "json", None)):
             try:
-                payload = payload or response.json()
+                return response.json()
             except (TypeError, ValueError):
                 pass
-        if payload is None:
-            errors = getattr(error, "errors", None) or getattr(error, "_errors", None)
-            if isinstance(errors, dict):
-                payload = errors
-            elif isinstance(errors, (list, tuple)):
-                payload = next((item for item in errors if isinstance(item, dict)), None)
+
+        errors = getattr(error, "errors", None) or getattr(error, "_errors", None)
+        if isinstance(errors, dict):
+            return errors
+        if isinstance(errors, (list, tuple)):
+            return next((item for item in errors if isinstance(item, dict)), None)
+        return None
+
+    def _extract_google_error_evidence(self, error: Exception) -> GoogleErrorEvidence:
+        if isinstance(error, GoogleGenAIUpstreamError):
+            return error.evidence
+
+        response = self._google_exception_response(error)
+        fallback_status = self._google_exception_status_code(error, response)
+        payload = self._google_exception_payload(error, response)
         evidence = self._google_error_evidence_from_payload(payload, fallback_status)
         if evidence.message or evidence.reason or evidence.quota_id:
             return evidence

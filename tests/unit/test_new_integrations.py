@@ -804,6 +804,26 @@ async def test_google_genai_generic_invalid_argument_is_safe_and_non_terminal():
 
 
 @pytest.mark.asyncio
+async def test_google_failure_recording_uses_bounded_evidence_fields():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(original_model="original", observation_id="obs-no-key", model_name="gemini")
+    provider._update_api_key_stats = AsyncMock()
+    evidence = GoogleErrorEvidence(
+        status_code=429,
+        status="RESOURCE_EXHAUSTED",
+        reason="RATE_LIMITED",
+        quota_id="GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+    )
+
+    assert provider._quota_error_record(evidence) == (
+        "google_upstream status=429 google_status=RESOURCE_EXHAUSTED reason=RATE_LIMITED "
+        "quota_id=GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+    )
+    await provider._record_completion_failure(context, evidence, 429)
+    provider._update_api_key_stats.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_google_genai_proxy_health_and_transport_helpers():
     provider = _make_google_provider(proxy_pool_enabled=True, proxy_pool=[ProxyConfig(https_proxy="http://127.0.0.1:8888")])
 

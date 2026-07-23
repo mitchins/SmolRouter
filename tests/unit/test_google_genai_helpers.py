@@ -960,6 +960,65 @@ def test_google_error_evidence_requires_explicit_key_specific_signal(provider):
     assert provider._invalid_key_reason(explicit_evidence) == "api_key_invalid"
 
 
+def test_google_error_evidence_parses_detail_types_and_rejects_malformed_fields(provider):
+    payload = {
+        "error": {
+            "code": 429,
+            "message": "quota exhausted",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+                None,
+                {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "RATE_LIMITED"},
+                {
+                    "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                    "violations": [None, {"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}],
+                },
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "12.5s"},
+            ],
+        }
+    }
+    malformed_payload = {
+        "error": {
+            "code": "not-a-status",
+            "message": None,
+            "status": None,
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": "invalid"}],
+        }
+    }
+
+    evidence = provider._google_error_evidence_from_payload(payload)
+    malformed = provider._google_error_evidence_from_payload(malformed_payload, fallback_status=502)
+
+    assert evidence.reason == "RATE_LIMITED"
+    assert evidence.quota_id == "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+    assert evidence.retry_delay_seconds == 12.5
+    assert provider._is_per_minute_quota_error(evidence=evidence) is True
+    assert (
+        provider._is_quota_exhausted_error(
+            evidence=ggp.GoogleErrorEvidence(status_code=None, status="RESOURCE_EXHAUSTED")
+        )
+        is True
+    )
+    assert malformed == ggp.GoogleErrorEvidence(status_code=502)
+    assert provider._google_error_evidence_from_payload(None, fallback_status=503) == ggp.GoogleErrorEvidence(
+        status_code=503
+    )
+    assert provider._google_error_evidence_from_payload({"error": []}, fallback_status=504) == ggp.GoogleErrorEvidence(
+        status_code=504
+    )
+    assert provider._google_quota_id(
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": []}
+    ) == ""
+
+
+def test_google_duration_parser_handles_numeric_invalid_and_non_string_values(provider):
+    assert provider._parse_google_duration(4) == 4.0
+    assert provider._parse_google_duration(1.5) == 1.5
+    assert provider._parse_google_duration(" 2.25s ") == 2.25
+    assert provider._parse_google_duration("bad") is None
+    assert provider._parse_google_duration(None) is None
+
+
 def test_google_sdk_error_evidence_preserves_explicit_daily_quota_id(provider):
     error = google_genai_errors.ClientError(
         429,
@@ -987,6 +1046,50 @@ def test_google_sdk_error_evidence_preserves_explicit_daily_quota_id(provider):
     assert provider._is_per_day_quota_error(evidence=evidence) is True
 
 
+def test_google_error_evidence_uses_response_and_legacy_exception_fields(provider):
+    response_payload = {"error": {"code": 418, "message": "response payload", "status": "TEAPOT"}}
+    response_error = RuntimeError("ignored")
+    response_error.details = {}
+    response_error.response = SimpleNamespace(status_code=503, json=lambda: response_payload)
+
+    legacy_error = RuntimeError("ignored")
+    legacy_error.errors = [{"error": {"code": 401, "message": "legacy payload", "status": "UNAUTHENTICATED"}}]
+
+    invalid_response_error = RuntimeError("ignored")
+    invalid_response_error.response = SimpleNamespace(
+        status_code=502,
+        json=lambda: (_ for _ in ()).throw(ValueError("invalid JSON")),
+    )
+    invalid_response_error.errors = {"error": {"code": 500, "message": "fallback payload", "status": "INTERNAL"}}
+
+    message_error = RuntimeError("ignored")
+    message_error.message = "top-level SDK message"
+
+    assert provider._extract_google_error_evidence(response_error) == ggp.GoogleErrorEvidence(
+        status_code=418, status="TEAPOT", message="response payload"
+    )
+    assert provider._extract_google_error_evidence(legacy_error) == ggp.GoogleErrorEvidence(
+        status_code=401, status="UNAUTHENTICATED", message="legacy payload"
+    )
+    assert provider._extract_google_error_evidence(invalid_response_error) == ggp.GoogleErrorEvidence(
+        status_code=500, status="INTERNAL", message="fallback payload"
+    )
+    assert provider._extract_google_error_evidence(message_error) == ggp.GoogleErrorEvidence(
+        status_code=None, message="top-level SDK message"
+    )
+
+
+def test_google_image_error_evidence_handles_invalid_json(provider):
+    class InvalidJsonResponse:
+        status_code = 502
+
+        @staticmethod
+        def json():
+            raise ValueError("invalid JSON")
+
+    assert provider._extract_image_error_evidence(InvalidJsonResponse()) == ggp.GoogleErrorEvidence(status_code=502)
+
+
 def test_extract_retry_delay(provider):
     assert provider._extract_retry_delay("Please retry in 20.5s") == 20.5  # pattern 1
     assert provider._extract_retry_delay("retryDelay': '30s'") == 30.0  # pattern 2
@@ -996,6 +1099,10 @@ def test_extract_retry_delay(provider):
 
 
 def test_extract_status_code_from_exception(provider):
+    structured_error = RuntimeError("ignored")
+    structured_error.code = 418
+
+    assert provider._extract_status_code_from_exception(structured_error) == 418
     assert provider._extract_status_code_from_exception(Exception("Got 403 permission")) == 403
     assert provider._extract_status_code_from_exception(Exception("429 quota")) == 429
     assert provider._extract_status_code_from_exception(Exception("401 unauthorized")) == 401
