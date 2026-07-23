@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import smolrouter.database as database
 from unittest.mock import AsyncMock
 
-from smolrouter.database import RequestLogEntry, estimate_tokens_from_request
+from smolrouter.database import ApiKeyQuota, RequestLogEntry, estimate_tokens_from_request
 import pytest
 
 
@@ -51,6 +51,21 @@ def test_request_log_entry_save_falls_back_to_asyncio_run(monkeypatch):
     entry.save()
 
     assert len(fallback_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_api_key_quota_mark_invalid_by_hash_forwards_audit_metadata(monkeypatch):
+    mark_invalid = AsyncMock(return_value=2)
+    monkeypatch.setattr(database.RedisApiKeyQuota, "mark_invalid", mark_invalid)
+
+    marked = await ApiKeyQuota.mark_invalid_by_hash(
+        "hashed-key", "google", reason="api_key_invalid", status_code=400, request_id="request-123"
+    )
+
+    assert marked == 2
+    mark_invalid.assert_awaited_once_with(
+        "hashed-key", "google", reason="api_key_invalid", status_code=400, request_id="request-123"
+    )
 
 
 @pytest.mark.asyncio

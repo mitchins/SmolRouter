@@ -18,6 +18,7 @@ from smolrouter.access_control import NoAccessControl
 from smolrouter.interfaces import ModelInfo, ProviderConfig, ProxyConfig, coerce_provider_proxy_settings
 from smolrouter.mediator import ModelMediator
 from smolrouter.google_genai_provider import (
+    GoogleErrorEvidence,
     GoogleGenAICompletionContext,
     GoogleGenAIConfig,
     GoogleGenAIProvider,
@@ -718,7 +719,7 @@ async def test_google_genai_generate_imagen_releases_rate_limiter_on_error(mock_
     mock_client.return_value.post = AsyncMock(return_value=mock_response)
     mock_client.return_value.aclose = AsyncMock(return_value=None)
 
-    with pytest.raises(GoogleGenAIRequestError, match="paid plans"):
+    with pytest.raises(GoogleGenAIRequestError, match="Google GenAI request failed"):
         await provider.generate_image(
             {
                 "model": "imagen-4.0-generate-001",
@@ -767,6 +768,79 @@ async def test_google_genai_handle_completion_exception_branches():
     provider._mark_proxy_health.assert_called_once_with(
         "http://127.0.0.1:8888", success=False, error="Connection refused"
     )
+
+
+@pytest.mark.asyncio
+async def test_google_genai_generic_invalid_argument_is_safe_and_non_terminal():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(
+        original_model="original",
+        observation_id="obs-400",
+        model_name="gemini-2.0-flash",
+        api_key="test-key",
+    )
+    provider._record_completion_failure = AsyncMock()
+    error = InvalidArgument(
+        "Request contains an invalid argument.",
+        errors=[
+            {
+                "error": {
+                    "code": 400,
+                    "message": "Request contains an invalid argument.",
+                    "status": "INVALID_ARGUMENT",
+                }
+            }
+        ],
+    )
+
+    public_error = await provider._handle_completion_exception(context, error)
+
+    assert public_error.status_code == 400
+    assert public_error.error_type == "invalid_request_error"
+    assert str(public_error) == "Google GenAI request is invalid."
+    evidence = provider._record_completion_failure.await_args.args[1]
+    assert provider._invalid_key_reason(evidence) is None
+    assert evidence.message == "Request contains an invalid argument."
+
+
+@pytest.mark.asyncio
+async def test_google_genai_unstructured_rate_limit_preserves_status_only():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(
+        original_model="original",
+        observation_id="obs-unstructured-429",
+        model_name="gemini-2.0-flash",
+        api_key="test-key",
+    )
+    provider._update_api_key_stats = AsyncMock()
+
+    public_error = await provider._handle_completion_exception(context, RuntimeError("429 quota exhausted"))
+
+    assert public_error.status_code == 429
+    assert str(public_error) == "Google GenAI request failed."
+    provider._update_api_key_stats.assert_awaited_once()
+    assert provider._update_api_key_stats.await_args.kwargs["error"] == "google_upstream status=429"
+    assert provider._update_api_key_stats.await_args.kwargs["error_evidence"].status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_google_failure_recording_uses_bounded_evidence_fields():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(original_model="original", observation_id="obs-no-key", model_name="gemini")
+    provider._update_api_key_stats = AsyncMock()
+    evidence = GoogleErrorEvidence(
+        status_code=429,
+        status="RESOURCE_EXHAUSTED",
+        reason="RATE_LIMITED",
+        quota_id="GenerateRequestsPerMinutePerProjectPerModel-FreeTier",
+    )
+
+    assert provider._quota_error_record(evidence) == (
+        "google_upstream status=429 google_status=RESOURCE_EXHAUSTED reason=RATE_LIMITED "
+        "quota_id=GenerateRequestsPerMinutePerProjectPerModel-FreeTier"
+    )
+    await provider._record_completion_failure(context, evidence, 429)
+    provider._update_api_key_stats.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -974,7 +1048,15 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
     )
 
     provider._get_quota_record = AsyncMock(
-        side_effect=[success_quota, invalid_quota, cooldown_quota, quota_exhausted, regular_quota, entitlement_quota]
+        side_effect=[
+            success_quota,
+            invalid_quota,
+            cooldown_quota,
+            quota_exhausted,
+            regular_quota,
+            regular_quota,
+            entitlement_quota,
+        ]
     )
 
     with patch("smolrouter.redis_backend.RedisApiKeyQuota.increment_usage", AsyncMock(return_value=None)), patch(
@@ -989,11 +1071,12 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
             "test-key",
             "gemini-2.0-flash",
             success=False,
-            error="permission denied 403",
-            status_code=403,
+            error="API key not valid",
+            status_code=400,
+            error_evidence=GoogleErrorEvidence(status_code=400, message="API key not valid"),
         )
         assert api_key_backend.mark_invalid_by_hash.await_count == 1
-        assert provider.config.api_keys == []
+        assert provider.config.api_keys == ["test-key"]
 
         provider.config.api_keys = ["test-key"]
         await provider._update_api_key_stats(
@@ -1031,6 +1114,17 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
         assert regular_quota.error_count == 1
         assert api_key_backend.mark_error.await_count == 1
 
+        await provider._update_api_key_stats(
+            "test-key",
+            "gemini-2.0-flash",
+            success=False,
+            error="400 INVALID_ARGUMENT: Request contains an invalid argument.",
+            status_code=400,
+        )
+        assert api_key_backend.mark_invalid_by_hash.await_count == 1
+        assert api_key_backend.mark_error.await_count == 2
+        assert provider.config.api_keys == ["test-key"]
+
         provider.config.api_keys = ["test-key"]
         await provider._update_api_key_stats(
             "test-key",
@@ -1041,7 +1135,7 @@ async def test_google_genai_update_api_key_stats_covers_success_and_error_branch
         )
         assert entitlement_quota.error_count == 1
         assert api_key_backend.mark_invalid_by_hash.await_count == 1
-        assert api_key_backend.mark_error.await_count == 2
+        assert api_key_backend.mark_error.await_count == 3
         assert provider.config.api_keys == ["test-key"]
 
 

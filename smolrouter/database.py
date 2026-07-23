@@ -1081,7 +1081,14 @@ class ApiKeyQuota:
             return []
 
     @staticmethod
-    async def mark_invalid_by_hash(api_key_hash: str, provider_name: str) -> int:
+    async def mark_invalid_by_hash(
+        api_key_hash: str,
+        provider_name: str,
+        *,
+        reason: str = "operator",
+        status_code: int | None = None,
+        request_id: str | None = None,
+    ) -> int:
         """Mark all quota entries for a given key hash as invalid.
 
         Args:
@@ -1091,7 +1098,13 @@ class ApiKeyQuota:
         Returns:
             Number of quota entries marked as invalid
         """
-        return await RedisApiKeyQuota.mark_invalid(api_key_hash, provider_name)
+        return await RedisApiKeyQuota.mark_invalid(
+            api_key_hash,
+            provider_name,
+            reason=reason,
+            status_code=status_code,
+            request_id=request_id,
+        )
 
     @staticmethod
     async def mark_quota_exhausted(api_key: str, provider_id: str, model_name: str, error: str = None) -> None:

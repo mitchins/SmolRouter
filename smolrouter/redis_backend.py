@@ -8,6 +8,7 @@ for high-throughput concurrent operations, replacing SQLite bottlenecks.
 import logging
 import os
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Mapping, TypedDict, Unpack
 from zoneinfo import ZoneInfo
@@ -30,6 +31,7 @@ INFLIGHT_SET_KEY = "stats:requests:inflight"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
 _BODY_STORAGE_UPDATE_UNSET = object()
+GOOGLE_INVALID_KEY_RECOVERY_AUDIT_LIMIT = 100
 _COMPLETE_ONCE_LUA_SCRIPT = """
 local inflight_key = KEYS[1]
 local completed_key = KEYS[2]
@@ -332,7 +334,7 @@ def _prepare_quota_record_data(data: Dict[str, Any]) -> Dict[str, Any]:
     quota_data = dict(data)
     last_reset = quota_data.get("last_reset", "")
 
-    if not quota_data.get("last_reset_date"):
+    if last_reset:
         quota_data["last_reset_date"] = last_reset
 
     if not quota_data.get("api_key_hash") and quota_data.get("key_hash"):
@@ -727,6 +729,7 @@ if last_reset ~= today then
     redis.call('HSET', quota_key, 'requests_today', 0)
     redis.call('HSET', quota_key, 'tokens_today', 0)
     redis.call('HSET', quota_key, 'last_reset', today)
+    redis.call('HSET', quota_key, 'last_reset_date', today)
     -- Clear quota exhaustion status on daily reset
     redis.call('HDEL', quota_key, 'quota_exhausted_at')
     redis.call('HDEL', quota_key, 'quota_cooldown_until')
@@ -1148,6 +1151,10 @@ class RedisApiKeyQuota:
         return f"google_invalid_keys:{provider_id}"
 
     @staticmethod
+    def google_invalid_key_metadata_key(provider_id: str, api_key_hash: str) -> str:
+        return f"google_invalid_key_metadata:{provider_id}:{api_key_hash}"
+
+    @staticmethod
     async def get_or_create_quota(
         api_key: str,
         provider_id: str,
@@ -1221,6 +1228,7 @@ class RedisApiKeyQuota:
                     "requests_today": 0,
                     "tokens_today": 0,
                     "last_reset": today,
+                    "last_reset_date": today,
                 },
             )
             await client.hdel(quota_key, "quota_exhausted_at")
@@ -1372,7 +1380,7 @@ class RedisApiKeyQuota:
             return "invalid", None
         if quota.quota_cooldown_until and quota.quota_cooldown_until > now_dt:
             return "cooling_down", quota.quota_cooldown_until
-        if quota.last_reset_date == today and quota.quota_exhausted_at:
+        if getattr(quota, "last_reset", quota.last_reset_date) == today and quota.quota_exhausted_at:
             return "exhausted", None
         return "available", None
 
@@ -1519,8 +1527,15 @@ class RedisApiKeyQuota:
         return quotas
 
     @staticmethod
-    async def mark_invalid(api_key_hash: str, provider_name: str) -> int:
-        """Mark all quota entries for a given key hash as invalid.
+    async def mark_invalid(
+        api_key_hash: str,
+        provider_name: str,
+        *,
+        reason: str = "operator",
+        status_code: Optional[int] = None,
+        request_id: Optional[str] = None,
+    ) -> int:
+        """Atomically mark one provider/key as invalid with bounded audit metadata.
 
         Args:
             api_key_hash: The hashed API key
@@ -1531,23 +1546,87 @@ class RedisApiKeyQuota:
         """
         client = get_redis()
 
-        # Get all quota keys for this key hash
         quota_keys = await client.smembers(f"quotas:by_key:{api_key_hash}")
-        await client.sadd(RedisApiKeyQuota.google_invalid_keys_key(provider_name), api_key_hash)
-
-        count = 0
+        provider_quota_keys = []
         for quota_key in quota_keys:
-            # quota_key format: "quota:{provider_id}:{key_hash}:{model_name}"
-            # We need to match keys that have this provider_name in the right position
-            parts = quota_key.split(":")
-            if len(parts) >= 4 and parts[0] == "quota" and parts[1] == provider_name:
-                # This quota key matches both the key_hash (already filtered) and provider_name
-                await client.hset(quota_key, "invalid_key", "true")
-                await client.hset(quota_key, "updated_at", datetime.now(timezone.utc).isoformat())
-                count += 1
+            if await client.hget(quota_key, "provider_id") == provider_name:
+                provider_quota_keys.append(quota_key)
 
-        logger.debug(f"Marked {count} quota entries as invalid for key_hash={api_key_hash}, provider={provider_name}")
-        return count
+        now = datetime.now(timezone.utc).isoformat()
+        metadata_key = RedisApiKeyQuota.google_invalid_key_metadata_key(provider_name, api_key_hash)
+        pipe = client.pipeline(transaction=True)
+        pipe.sadd(RedisApiKeyQuota.google_invalid_keys_key(provider_name), api_key_hash)
+        pipe.hsetnx(metadata_key, "first_reason", reason)
+        pipe.hsetnx(metadata_key, "first_status_code", str(status_code or ""))
+        pipe.hsetnx(metadata_key, "first_request_id", request_id or "")
+        pipe.hsetnx(metadata_key, "first_recorded_at", now)
+        pipe.hincrby(metadata_key, "occurrence_count", 1)
+        pipe.hset(
+            metadata_key,
+            mapping={
+                "latest_reason": reason,
+                "latest_status_code": str(status_code or ""),
+                "latest_request_id": request_id or "",
+                "latest_recorded_at": now,
+            },
+        )
+        for quota_key in provider_quota_keys:
+            pipe.hset(
+                quota_key,
+                mapping={
+                    "invalid_key": "true",
+                    "invalid_reason": reason,
+                    "invalid_status_code": str(status_code or ""),
+                    "invalidated_at": now,
+                    "updated_at": now,
+                },
+            )
+        await pipe.execute()
+
+        logger.debug(
+            "Marked %s quota entries invalid for key_hash=%s provider=%s reason=%s",
+            len(provider_quota_keys),
+            api_key_hash,
+            provider_name,
+            reason,
+        )
+        return len(provider_quota_keys)
+
+    @staticmethod
+    async def recover_invalid(api_key_hash: str, provider_name: str, *, actor: str, reason: str) -> int:
+        """Atomically restore a key's eligibility while retaining quota state."""
+        client = get_redis()
+        quota_keys = await client.smembers(f"quotas:by_key:{api_key_hash}")
+        provider_quota_keys = []
+        for quota_key in quota_keys:
+            if await client.hget(quota_key, "provider_id") == provider_name:
+                provider_quota_keys.append(quota_key)
+
+        metadata_key = RedisApiKeyQuota.google_invalid_key_metadata_key(provider_name, api_key_hash)
+        prior_metadata = await client.hgetall(metadata_key)
+        audit_key = f"google_invalid_key_recovery_audit:{provider_name}"
+        now = datetime.now(timezone.utc).isoformat()
+        pipe = client.pipeline(transaction=True)
+        pipe.srem(RedisApiKeyQuota.google_invalid_keys_key(provider_name), api_key_hash)
+        pipe.delete(metadata_key)
+        for quota_key in provider_quota_keys:
+            pipe.hdel(quota_key, "invalid_key", "invalid_reason", "invalid_status_code", "invalidated_at")
+        pipe.lpush(
+            audit_key,
+            json.dumps(
+                {
+                    "actor": actor,
+                    "reason": reason,
+                    "api_key_hash": api_key_hash,
+                    "recovered_at": now,
+                    "prior_metadata": prior_metadata,
+                },
+                sort_keys=True,
+            ),
+        )
+        pipe.ltrim(audit_key, 0, GOOGLE_INVALID_KEY_RECOVERY_AUDIT_LIMIT - 1)
+        await pipe.execute()
+        return len(provider_quota_keys)
 
     @staticmethod
     async def mark_quota_exhausted(

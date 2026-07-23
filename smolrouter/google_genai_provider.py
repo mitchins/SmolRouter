@@ -16,7 +16,7 @@ import wave
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 import httpx
@@ -84,29 +84,15 @@ GOOGLE_IMAGEN_ALLOWED_PARAMETER_NAMES = {
 }
 GOOGLE_IMAGE_RESPONSE_FORMATS = {"url", "b64_json"}
 OPENAI_IMAGE_REQUEST_FIELDS = {"model", "prompt", "n", "size", "response_format", "extra_body", "user"}
-GOOGLE_NON_INVALID_403_INDICATORS = (
-    "paid plan",
-    "paid plans",
-    "upgrade your account",
-    "billing",
-    "billed user",
-    "not supported for predict",
-    "forbidden for project",
-    "model is not found",
+GOOGLE_ERROR_DETAIL_TYPE_FIELD = "@type"
+# Permanent key invalidation has a fleet-wide blast radius. Generic status codes
+# and Google request-validation failures are deliberately not evidence of a bad key.
+GOOGLE_INVALID_KEY_REASON_PATTERNS = (
+    ("api_key_not_valid", re.compile(r"(?:^|[.:]\s*)api key (?:is )?not valid(?:[.!:].*)?$", re.IGNORECASE)),
+    ("api_key_invalid", re.compile(r"(?:^|[.:]\s*)invalid api key(?:[.!:].*)?$", re.IGNORECASE)),
+    ("api_key_expired", re.compile(r"(?:^|[.:]\s*)api key expired(?:[.!:].*)?$", re.IGNORECASE)),
+    ("api_key_revoked", re.compile(r"(?:^|[.:]\s*)api key revoked(?:[.!:].*)?$", re.IGNORECASE)),
 )
-GOOGLE_INVALID_KEY_INDICATORS = (
-    "permission denied",
-    "permission_denied",
-    "permissiondenied",
-    "api key not valid",
-    "invalid api key",
-    "api_key_invalid",
-    "authentication failed",
-    "unauthorized",
-    "credentials are missing or invalid",
-    "api key expired",
-)
-GOOGLE_FALLBACK_INVALID_KEY_INDICATORS = GOOGLE_INVALID_KEY_INDICATORS + ("invalid_argument",)
 AUDIO_WAV_MIME_TYPE = "audio/wav"
 AUDIO_PCM_MIME_TYPE = "audio/pcm"
 AUDIO_MPEG_MIME_TYPE = "audio/mpeg"
@@ -226,6 +212,8 @@ class GoogleGenAIRequestError(RuntimeError):
         api_key_index: Optional[int] = None,
         api_key_total: Optional[int] = None,
         proxy_used: Optional[str] = None,
+        status_code: Optional[int] = None,
+        error_type: str = "api_error",
     ):
         super().__init__(message)
         self.provider_id = provider_id
@@ -234,7 +222,33 @@ class GoogleGenAIRequestError(RuntimeError):
         self.api_key_index = api_key_index
         self.api_key_total = api_key_total
         self.proxy_used = proxy_used
+        self.status_code = status_code
+        self.error_type = error_type
         self.retry_after_seconds: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class GoogleErrorEvidence:
+    """Normalized upstream evidence used for routing state transitions.
+
+    Only the provider's top-level message is eligible for the narrow text fallback
+    used to invalidate a key. Nested details are kept for quota parsing only.
+    """
+
+    status_code: Optional[int]
+    status: str = ""
+    message: str = ""
+    reason: str = ""
+    quota_id: str = ""
+    retry_delay_seconds: Optional[float] = None
+
+
+class GoogleGenAIUpstreamError(RuntimeError):
+    """HTTP error whose parsed Google response is safe to classify internally."""
+
+    def __init__(self, evidence: GoogleErrorEvidence):
+        super().__init__(f"Google upstream HTTP {evidence.status_code or 'error'}")
+        self.evidence = evidence
 
 
 @dataclass
@@ -978,6 +992,7 @@ class GoogleGenAIProvider(IModelProvider):
         tokens: int = 0,
         error: Optional[str] = None,
         status_code: Optional[int] = None,
+        error_evidence: Optional[GoogleErrorEvidence] = None,
     ):
         """Update statistics for an API key + model combination after a request
 
@@ -999,19 +1014,18 @@ class GoogleGenAIProvider(IModelProvider):
             await self._record_api_key_success(RedisApiKeyQuota, quota, api_key, model_name, tokens)
         else:
             error_message = error or ""
-            # Check error type and handle appropriately
-            # IMPORTANT: Check both error message AND status code (403 errors may have empty error string)
-            if self._is_invalid_key_error(error_message, status_code):
-                await self._record_invalid_api_key(ApiKeyQuota, api_key, error_message, status_code)
+            invalid_reason = self._invalid_key_reason(error_evidence)
+            if invalid_reason is not None:
+                await self._record_invalid_api_key(ApiKeyQuota, api_key, status_code, invalid_reason)
 
             # Check if this is a quota exhaustion error
-            elif self._is_quota_exhausted_error(error_message):
-                if self._is_per_day_quota_error(error_message):
+            elif self._is_quota_exhausted_error(error_message, error_evidence):
+                if self._is_per_day_quota_error(error_message, error_evidence):
                     # Only explicit per-day (RPD) signals should hard-bench a key.
                     await self._record_quota_exhaustion(ApiKeyQuota, quota, api_key, model_name, error_message)
                 else:
                     # Explicit RPM and ambiguous quota 429s are treated as transient cooldowns.
-                    cooldown_seconds = self._quota_cooldown_seconds(error_message)
+                    cooldown_seconds = self._quota_cooldown_seconds(error_message, error_evidence)
                     await self._record_rate_limit_cooldown(
                         ApiKeyQuota, quota, api_key, model_name, error_message, cooldown_seconds
                     )
@@ -1053,20 +1067,21 @@ class GoogleGenAIProvider(IModelProvider):
             quota.mark_request_success(tokens=tokens)
 
     async def _record_invalid_api_key(
-        self, quota_backend: Any, api_key: str, error_message: str, status_code: Optional[int]
+        self, quota_backend: Any, api_key: str, status_code: Optional[int], invalid_reason: str
     ) -> None:
         key_hash = quota_backend.hash_api_key(api_key)
         try:
-            await quota_backend.mark_invalid_by_hash(key_hash, self.config.name)
-            logger.error(f"🚫 API key {redact_secret(api_key)} MARKED INVALID (status={status_code}, error={error_message})")
-
-            try:
-                self.config.api_keys.remove(api_key)
-                logger.warning(
-                    f"🗑️  Removed API key {redact_secret(api_key)} from selection pool ({len(self.config.api_keys)} keys remaining)"
-                )
-            except ValueError:
-                pass
+            await quota_backend.mark_invalid_by_hash(
+                key_hash, self.config.name, reason=invalid_reason, status_code=status_code
+            )
+            # Redis is the shared selector authority. Leaving the configured list
+            # intact makes an operator recovery effective without a process restart.
+            logger.error(
+                "API key %s marked invalid (reason=%s, status=%s)",
+                redact_secret(api_key),
+                invalid_reason,
+                status_code,
+            )
         except Exception:
             logger.exception("❌ Failed to mark API key as invalid")
 
@@ -1179,35 +1194,33 @@ class GoogleGenAIProvider(IModelProvider):
                 model_limit,
             )
 
+    def _invalid_key_reason(self, evidence: Optional[GoogleErrorEvidence]) -> Optional[str]:
+        """Return explicit Google key-invalid evidence, never a status-only inference."""
+        if evidence is None:
+            return None
+
+        if evidence.reason.upper() == "API_KEY_INVALID":
+            return "api_key_invalid"
+
+        normalized_message = " ".join(evidence.message.strip().split())
+        for reason, pattern in GOOGLE_INVALID_KEY_REASON_PATTERNS:
+            if pattern.search(normalized_message):
+                return reason
+        return None
+
     def _is_invalid_key_error(
         self, error_msg: Optional[str] = None, status_code: Optional[int] = None
     ) -> bool:
-        """Check if error indicates invalid/expired API key
+        """Test a direct top-level Google message without status-only inference."""
+        _ = status_code
+        return self._invalid_key_reason(GoogleErrorEvidence(status_code=None, message=error_msg or "")) is not None
 
-        Args:
-            error_msg: Error message text (may be None or empty)
-            status_code: HTTP status code
-
-        Returns:
-            True if this error indicates an invalid/expired API key
-        """
-        if status_code == 403:
-            if error_msg:
-                error_lower = error_msg.lower()
-                if any(indicator in error_lower for indicator in GOOGLE_NON_INVALID_403_INDICATORS):
-                    return False
-                return any(indicator in error_lower for indicator in GOOGLE_INVALID_KEY_INDICATORS)
-            return True
-
-        # Check error message for known invalid key indicators
-        if error_msg:
-            error_lower = error_msg.lower()
-            return any(indicator in error_lower for indicator in GOOGLE_FALLBACK_INVALID_KEY_INDICATORS)
-
-        return False
-
-    def _is_quota_exhausted_error(self, error_msg: Optional[str] = None) -> bool:
+    def _is_quota_exhausted_error(
+        self, error_msg: Optional[str] = None, evidence: Optional[GoogleErrorEvidence] = None
+    ) -> bool:
         """Check if error indicates quota exhaustion"""
+        if evidence is not None and (evidence.status_code == 429 or evidence.status.upper() == "RESOURCE_EXHAUSTED"):
+            return True
         if not error_msg:
             return False
 
@@ -1224,26 +1237,36 @@ class GoogleGenAIProvider(IModelProvider):
 
         return any(indicator in error_lower for indicator in quota_indicators)
 
-    def _is_per_minute_quota_error(self, error_msg: Optional[str] = None) -> bool:
+    def _is_per_minute_quota_error(
+        self, error_msg: Optional[str] = None, evidence: Optional[GoogleErrorEvidence] = None
+    ) -> bool:
         """Check if a quota 429 is a per-minute (RPM) limit rather than per-day (RPD).
 
         Google returns the same quotaMetric (generate_content_free_tier_requests) for
         both RPM and RPD on the free tier; the only reliable discriminator is the
         quotaId, e.g. ``GenerateRequestsPerMinutePerProjectPerModel-FreeTier``.
         """
+        if evidence is not None and "perminute" in evidence.quota_id.lower():
+            return True
         if not error_msg:
             return False
         error_lower = error_msg.lower()
         return "perminute" in error_lower or "per minute" in error_lower
 
-    def _is_per_day_quota_error(self, error_msg: Optional[str] = None) -> bool:
+    def _is_per_day_quota_error(
+        self, error_msg: Optional[str] = None, evidence: Optional[GoogleErrorEvidence] = None
+    ) -> bool:
         """Check if a quota 429 is an explicit per-day (RPD) limit."""
+        if evidence is not None and "perday" in evidence.quota_id.lower():
+            return True
         if not error_msg:
             return False
         error_lower = error_msg.lower()
         return "perday" in error_lower or "per day" in error_lower or "requests per day" in error_lower
 
-    def _quota_cooldown_seconds(self, error_msg: Optional[str] = None) -> float:
+    def _quota_cooldown_seconds(
+        self, error_msg: Optional[str] = None, evidence: Optional[GoogleErrorEvidence] = None
+    ) -> float:
         """Return a transient cooldown (seconds) for a quota 429.
 
         - Explicit per-minute (RPM) → cooldown driven by Google's retryDelay (or default).
@@ -1251,7 +1274,7 @@ class GoogleGenAIProvider(IModelProvider):
           enough evidence for all-day exhaustion.
         - Explicit per-day (RPD) is handled by the caller before reaching this helper.
         """
-        retry_delay = self._extract_retry_delay(error_msg)
+        retry_delay = evidence.retry_delay_seconds if evidence is not None else self._extract_retry_delay(error_msg)
         base = retry_delay if retry_delay is not None else self.DEFAULT_RPM_COOLDOWN_SECONDS
         return base + self.RPM_COOLDOWN_BUFFER_SECONDS
 
@@ -2478,23 +2501,148 @@ class GoogleGenAIProvider(IModelProvider):
         return openai_response
 
     @staticmethod
-    def _extract_image_error_message(response: httpx.Response) -> str:
+    def _parse_google_duration(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str):
+            return None
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)s", value.strip())
+        return float(match.group(1)) if match else None
+
+    @staticmethod
+    def _google_error_payload(payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        error_payload = payload.get("error", payload)
+        return error_payload if isinstance(error_payload, dict) else {}
+
+    @staticmethod
+    def _google_error_status_code(error_payload: Dict[str, Any], fallback_status: Optional[int]) -> Optional[int]:
+        status_code = error_payload.get("code", fallback_status)
+        return status_code if isinstance(status_code, int) else fallback_status
+
+    @staticmethod
+    def _google_error_reason(detail: Dict[str, Any]) -> str:
+        reason = detail.get("reason")
+        if str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("ErrorInfo") and isinstance(reason, str):
+            return reason
+        return ""
+
+    @staticmethod
+    def _google_quota_id(detail: Dict[str, Any]) -> str:
+        if not str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("QuotaFailure"):
+            return ""
+        violations = detail.get("violations")
+        if not isinstance(violations, list):
+            return ""
+        for violation in violations:
+            quota_id = violation.get("quotaId") if isinstance(violation, dict) else None
+            if isinstance(quota_id, str):
+                return quota_id
+        return ""
+
+    @classmethod
+    def _google_error_detail_evidence(cls, details: Any) -> tuple[str, str, Optional[float]]:
+        if not isinstance(details, list):
+            return "", "", None
+
+        reason = ""
+        quota_id = ""
+        retry_delay_seconds = None
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            reason = cls._google_error_reason(detail) or reason
+            quota_id = cls._google_quota_id(detail) or quota_id
+            if str(detail.get(GOOGLE_ERROR_DETAIL_TYPE_FIELD, "")).endswith("RetryInfo"):
+                retry_delay_seconds = cls._parse_google_duration(detail.get("retryDelay"))
+        return reason, quota_id, retry_delay_seconds
+
+    @classmethod
+    def _google_error_evidence_from_payload(
+        cls, payload: Any, fallback_status: Optional[int] = None
+    ) -> GoogleErrorEvidence:
+        error_payload = cls._google_error_payload(payload)
+        if not error_payload:
+            return GoogleErrorEvidence(status_code=fallback_status)
+
+        status = error_payload.get("status")
+        message = error_payload.get("message")
+        reason, quota_id, retry_delay_seconds = cls._google_error_detail_evidence(error_payload.get("details"))
+
+        return GoogleErrorEvidence(
+            status_code=cls._google_error_status_code(error_payload, fallback_status),
+            status=status if isinstance(status, str) else "",
+            message=message if isinstance(message, str) else "",
+            reason=reason,
+            quota_id=quota_id,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+
+    @staticmethod
+    def _google_exception_response(error: Exception) -> Any:
+        return getattr(error, "response", None) or getattr(error, "_response", None)
+
+    @staticmethod
+    def _google_exception_status_code(error: Exception, response: Any) -> Optional[int]:
+        if isinstance(error, ResourceExhausted):
+            fallback_status = 429
+        elif isinstance(error, PermissionDenied):
+            fallback_status = 403
+        elif isinstance(error, InvalidArgument):
+            fallback_status = 400
+        else:
+            fallback_status = None
+
+        error_code = getattr(error, "code", None)
+        if isinstance(error_code, int):
+            fallback_status = error_code
+        response_status = getattr(response, "status_code", None)
+        return response_status if isinstance(response_status, int) else fallback_status
+
+    @staticmethod
+    def _google_exception_payload(error: Exception, response: Any) -> Any:
+        payload = getattr(error, "details", None)
+        if payload:
+            return payload
+        if response is not None and callable(getattr(response, "json", None)):
+            try:
+                return response.json()
+            except (TypeError, ValueError):
+                pass
+
+        errors = getattr(error, "errors", None) or getattr(error, "_errors", None)
+        if isinstance(errors, dict):
+            return errors
+        if isinstance(errors, (list, tuple)):
+            return next((item for item in errors if isinstance(item, dict)), None)
+        return None
+
+    def _extract_google_error_evidence(self, error: Exception) -> GoogleErrorEvidence:
+        if isinstance(error, GoogleGenAIUpstreamError):
+            return error.evidence
+
+        response = self._google_exception_response(error)
+        fallback_status = self._google_exception_status_code(error, response)
+        payload = self._google_exception_payload(error, response)
+        evidence = self._google_error_evidence_from_payload(payload, fallback_status)
+        if evidence.message or evidence.reason or evidence.quota_id:
+            return evidence
+
+        # Google API exceptions expose the provider's top-level message separately.
+        message = getattr(error, "message", "")
+        return GoogleErrorEvidence(
+            status_code=fallback_status,
+            message=message if isinstance(message, str) else "",
+            retry_delay_seconds=self._extract_retry_after_seconds(error),
+        )
+
+    def _extract_image_error_evidence(self, response: httpx.Response) -> GoogleErrorEvidence:
         try:
             payload = response.json()
         except ValueError:
             payload = None
-
-        if isinstance(payload, dict):
-            error_payload = payload.get("error")
-            if isinstance(error_payload, dict):
-                message = error_payload.get("message")
-                if message:
-                    return f"{response.status_code} {message}"
-
-        body_text = response.text.strip()
-        if body_text:
-            return f"{response.status_code} {body_text}"
-        return f"{response.status_code} {response.reason_phrase}"
+        return self._google_error_evidence_from_payload(payload, response.status_code)
 
     async def _initialize_request_context(
         self,
@@ -2753,7 +2901,7 @@ class GoogleGenAIProvider(IModelProvider):
                 ),
             )
             if response.is_error:
-                raise RuntimeError(self._extract_image_error_message(response))
+                raise GoogleGenAIUpstreamError(self._extract_image_error_evidence(response))
             image_response = response.json()
 
             if self._is_imagen_generation_model(context.model_name):
@@ -3127,7 +3275,12 @@ class GoogleGenAIProvider(IModelProvider):
         return actual_key_suffix, actual_proxy, key_verified, proxy_verified
 
     def _build_request_error_from_context(
-        self, context: GoogleGenAICompletionContext, message: str
+        self,
+        context: GoogleGenAICompletionContext,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        error_type: str = "api_error",
     ) -> GoogleGenAIRequestError:
         return GoogleGenAIRequestError(
             message,
@@ -3137,22 +3290,38 @@ class GoogleGenAIProvider(IModelProvider):
             api_key_index=context.api_key_index,
             api_key_total=context.api_key_total,
             proxy_used=self._proxy_info_to_string(context.proxy_info),
+            status_code=status_code,
+            error_type=error_type,
         )
 
     async def _record_completion_failure(
         self,
         context: GoogleGenAICompletionContext,
-        error_message: str,
+        error_evidence: GoogleErrorEvidence,
         status_code: Optional[int],
     ) -> None:
         if context.api_key and context.model_name:
+            error_message = self._quota_error_record(error_evidence)
             await self._update_api_key_stats(
                 context.api_key,
                 context.model_name,
                 success=False,
                 error=error_message,
                 status_code=status_code,
+                error_evidence=error_evidence,
             )
+
+    @staticmethod
+    def _quota_error_record(evidence: GoogleErrorEvidence) -> str:
+        """Persist bounded classification fields instead of an upstream response body."""
+        fields = [f"status={evidence.status_code or 'unknown'}"]
+        if evidence.status:
+            fields.append(f"google_status={evidence.status}")
+        if evidence.reason:
+            fields.append(f"reason={evidence.reason}")
+        if evidence.quota_id:
+            fields.append(f"quota_id={evidence.quota_id}")
+        return "google_upstream " + " ".join(fields)
 
     def _extract_retry_after_seconds(self, error: Exception) -> Optional[float]:
         retry_after_seconds = None
@@ -3165,6 +3334,12 @@ class GoogleGenAIProvider(IModelProvider):
         return retry_after_seconds
 
     def _extract_status_code_from_exception(self, error: Exception) -> Optional[int]:
+        structured_status = self._extract_google_error_evidence(error).status_code
+        if structured_status is not None:
+            return structured_status
+
+        # Compatibility for locally generated validation errors. This helper does
+        # not decide key eligibility; selector state only consumes typed evidence.
         error_str = str(error).lower()
         if "403" in error_str or "permission" in error_str:
             return 403
@@ -3179,33 +3354,48 @@ class GoogleGenAIProvider(IModelProvider):
     async def _handle_completion_exception(
         self, context: GoogleGenAICompletionContext, error: Exception
     ) -> GoogleGenAIRequestError:
+        evidence = self._extract_google_error_evidence(error)
+        status_code = evidence.status_code
+        if status_code is None:
+            status_code = self._extract_status_code_from_exception(error)
+            if status_code is not None:
+                # The legacy fallback is status-only: never let opaque text affect
+                # key invalidation or daily-exhaustion classification.
+                evidence = replace(evidence, status_code=status_code)
         if isinstance(error, ResourceExhausted):
-            error_msg = f"Google GenAI quota exhausted: {error}"
-            await self._record_completion_failure(context, error_msg, None)
-            quota_error = self._build_request_error_from_context(context, error_msg)
-            quota_error.retry_after_seconds = self._extract_retry_after_seconds(error)
+            status_code = 429
+            evidence = GoogleErrorEvidence(
+                status_code=status_code,
+                status=evidence.status,
+                message=evidence.message,
+                reason=evidence.reason,
+                quota_id=evidence.quota_id,
+                retry_delay_seconds=evidence.retry_delay_seconds or self._extract_retry_after_seconds(error),
+            )
+            await self._record_completion_failure(context, evidence, status_code)
+            quota_error = self._build_request_error_from_context(
+                context, "Google GenAI quota exhausted.", status_code=status_code
+            )
+            quota_error.retry_after_seconds = evidence.retry_delay_seconds
             return quota_error
 
         if isinstance(error, PermissionDenied):
-            error_msg = f"Google GenAI permission denied: {error}"
-            await self._record_completion_failure(context, error_msg, 403)
-            return self._build_request_error_from_context(context, error_msg)
+            status_code = 403
+            await self._record_completion_failure(context, evidence, status_code)
+            return self._build_request_error_from_context(context, "Google GenAI request was denied.", status_code=status_code)
 
         if isinstance(error, InvalidArgument):
-            error_msg = f"Google GenAI invalid argument: {error}"
-            await self._record_completion_failure(context, error_msg, 400)
-            return self._build_request_error_from_context(context, error_msg)
+            status_code = 400
+            await self._record_completion_failure(context, evidence, status_code)
+            return self._build_request_error_from_context(
+                context, "Google GenAI request is invalid.", status_code=status_code, error_type="invalid_request_error"
+            )
 
-        error_msg = f"Google GenAI error: {error}"
         if context.proxy_url and self._is_proxy_connectivity_error(error):
             self._mark_proxy_health(context.proxy_url, success=False, error=str(error))
 
-        await self._record_completion_failure(
-            context,
-            error_msg,
-            self._extract_status_code_from_exception(error),
-        )
-        return self._build_request_error_from_context(context, error_msg)
+        await self._record_completion_failure(context, evidence, status_code)
+        return self._build_request_error_from_context(context, "Google GenAI request failed.", status_code=status_code)
 
     async def get_api_key_stats(self, include_unused_models: bool = False) -> Dict[str, Dict[str, Any]]:
         """Get current API key usage statistics (grouped by API key)
