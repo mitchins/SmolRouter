@@ -581,6 +581,22 @@ async def test_invalid_key_recovery_is_provider_scoped_and_preserves_quota_state
 
 
 @pytest.mark.asyncio
+async def test_invalid_key_recovery_audit_is_bounded(monkeypatch):
+    await redis_client.flushall()
+    monkeypatch.setattr(redis_backend_module, "GOOGLE_INVALID_KEY_RECOVERY_AUDIT_LIMIT", 1)
+    await RedisApiKeyQuota.get_or_create_quota("sk-audit", "provider-a", "model-a")
+    key_hash = RedisApiKeyQuota.hash_api_key("sk-audit")
+
+    for actor in ("first@example.test", "second@example.test"):
+        await RedisApiKeyQuota.mark_invalid(key_hash, "provider-a")
+        await RedisApiKeyQuota.recover_invalid(key_hash, "provider-a", actor=actor, reason="test")
+
+    entries = await redis_client.lrange("google_invalid_key_recovery_audit:provider-a", 0, -1)
+    assert len(entries) == 1
+    assert json.loads(entries[0])["actor"] == "second@example.test"
+
+
+@pytest.mark.asyncio
 async def test_mark_quota_cooldown_round_trips_and_clears_on_daily_reset(monkeypatch):
     await redis_client.flushall()
     monkeypatch.setattr(redis_backend_module, "_circuit_breaker", redis_backend_module.RedisCircuitBreaker())

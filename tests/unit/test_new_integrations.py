@@ -804,6 +804,26 @@ async def test_google_genai_generic_invalid_argument_is_safe_and_non_terminal():
 
 
 @pytest.mark.asyncio
+async def test_google_genai_unstructured_rate_limit_preserves_status_only():
+    provider = _make_google_provider()
+    context = GoogleGenAICompletionContext(
+        original_model="original",
+        observation_id="obs-unstructured-429",
+        model_name="gemini-2.0-flash",
+        api_key="test-key",
+    )
+    provider._update_api_key_stats = AsyncMock()
+
+    public_error = await provider._handle_completion_exception(context, RuntimeError("429 quota exhausted"))
+
+    assert public_error.status_code == 429
+    assert str(public_error) == "Google GenAI request failed."
+    provider._update_api_key_stats.assert_awaited_once()
+    assert provider._update_api_key_stats.await_args.kwargs["error"] == "google_upstream status=429"
+    assert provider._update_api_key_stats.await_args.kwargs["error_evidence"].status_code == 429
+
+
+@pytest.mark.asyncio
 async def test_google_failure_recording_uses_bounded_evidence_fields():
     provider = _make_google_provider()
     context = GoogleGenAICompletionContext(original_model="original", observation_id="obs-no-key", model_name="gemini")

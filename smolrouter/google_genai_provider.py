@@ -16,7 +16,7 @@ import wave
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 import httpx
@@ -3356,6 +3356,12 @@ class GoogleGenAIProvider(IModelProvider):
     ) -> GoogleGenAIRequestError:
         evidence = self._extract_google_error_evidence(error)
         status_code = evidence.status_code
+        if status_code is None:
+            status_code = self._extract_status_code_from_exception(error)
+            if status_code is not None:
+                # The legacy fallback is status-only: never let opaque text affect
+                # key invalidation or daily-exhaustion classification.
+                evidence = replace(evidence, status_code=status_code)
         if isinstance(error, ResourceExhausted):
             status_code = 429
             evidence = GoogleErrorEvidence(

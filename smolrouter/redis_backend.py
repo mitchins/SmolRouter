@@ -31,6 +31,7 @@ INFLIGHT_SET_KEY = "stats:requests:inflight"
 REDIS_EMPTY_VALUES = ("", "None", None)
 REDIS_STATUS_NONE_VALUES = ("", "0", "None", None)
 _BODY_STORAGE_UPDATE_UNSET = object()
+GOOGLE_INVALID_KEY_RECOVERY_AUDIT_LIMIT = 100
 _COMPLETE_ONCE_LUA_SCRIPT = """
 local inflight_key = KEYS[1]
 local completed_key = KEYS[2]
@@ -1623,6 +1624,7 @@ class RedisApiKeyQuota:
                 sort_keys=True,
             ),
         )
+        pipe.ltrim(audit_key, 0, GOOGLE_INVALID_KEY_RECOVERY_AUDIT_LIMIT - 1)
         await pipe.execute()
         return len(provider_quota_keys)
 
