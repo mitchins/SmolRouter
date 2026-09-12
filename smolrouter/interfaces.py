@@ -76,6 +76,55 @@ class ClientContext:
         return None
 
 
+@dataclass(frozen=True)
+class SystemPromptConfig:
+    """A provider/model-specific transformation for chat system messages."""
+
+    mode: str
+    content: str
+
+    SUPPORTED_MODES = frozenset({"append", "prepend", "replace"})
+
+    def __post_init__(self):
+        if not isinstance(self.mode, str) or not self.mode.strip():
+            raise ValueError("System prompt mode must be one of: append, prepend, replace")
+
+        normalized_mode = self.mode.strip().lower()
+        if normalized_mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"Unsupported system prompt mode '{self.mode}'. "
+                f"Expected one of: {', '.join(sorted(self.SUPPORTED_MODES))}"
+            )
+        object.__setattr__(self, "mode", normalized_mode)
+
+        if not isinstance(self.content, str) or not self.content.strip():
+            raise ValueError("System prompt content must be a non-empty string")
+
+
+def coerce_system_prompt_config(value: Any) -> Optional[SystemPromptConfig]:
+    """Convert a YAML-shaped system prompt policy into its validated type."""
+    if value is None or isinstance(value, SystemPromptConfig):
+        return value
+    if isinstance(value, Mapping):
+        return SystemPromptConfig(**dict(value))
+    raise TypeError("System prompt configuration must be a mapping or null")
+
+
+def coerce_per_model_system_prompt(value: Any) -> Dict[str, Optional[SystemPromptConfig]]:
+    """Convert and validate exact model-name system prompt overrides."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("per_model_system_prompt must be a mapping")
+
+    converted = {}
+    for model_name, prompt_config in value.items():
+        if not isinstance(model_name, str) or not model_name.strip() or model_name != model_name.strip():
+            raise ValueError("per_model_system_prompt keys must be non-empty model names without surrounding whitespace")
+        converted[model_name] = coerce_system_prompt_config(prompt_config)
+    return converted
+
+
 class IModelProvider(ABC):
     """Abstraction for model discovery and health checking from providers"""
 
@@ -317,6 +366,13 @@ def coerce_provider_proxy_settings(provider_config: Mapping[str, Any]) -> Dict[s
     if isinstance(proxy_pool, list):
         config["proxy_pool"] = [None if entry is None else coerce_proxy_config(entry) for entry in proxy_pool]
 
+    if "system_prompt" in config:
+        config["system_prompt"] = coerce_system_prompt_config(config["system_prompt"])
+
+    per_model_system_prompt = config.get("per_model_system_prompt")
+    if per_model_system_prompt is not None:
+        config["per_model_system_prompt"] = coerce_per_model_system_prompt(per_model_system_prompt)
+
     return config
 
 
@@ -335,6 +391,8 @@ class ProviderConfig:
     static_models: Optional[List[str]] = None
     proxy_config: Optional[ProxyConfig] = None  # Default proxy for all models
     per_model_proxy: Optional[Dict[str, ProxyConfig]] = None  # Model-specific proxy overrides
+    system_prompt: Optional[SystemPromptConfig] = None  # Default system prompt policy
+    per_model_system_prompt: Optional[Dict[str, Optional[SystemPromptConfig]]] = None
 
     def __post_init__(self):
         if self.metadata is None:
@@ -343,6 +401,8 @@ class ProviderConfig:
             self.static_models = []
         if self.per_model_proxy is None:
             self.per_model_proxy = {}
+        self.system_prompt = coerce_system_prompt_config(self.system_prompt)
+        self.per_model_system_prompt = coerce_per_model_system_prompt(self.per_model_system_prompt)
 
     def get_proxy_for_model(self, model_name: str) -> Optional[ProxyConfig]:
         """Get proxy configuration for a specific model"""
@@ -352,6 +412,13 @@ class ProviderConfig:
             return per_model_proxy[model_name]
         # Fall back to default proxy
         return self.proxy_config
+
+    def get_system_prompt_for_model(self, model_name: str) -> Optional[SystemPromptConfig]:
+        """Return the exact model override, falling back to the provider default."""
+        per_model_system_prompt = self.per_model_system_prompt or {}
+        if model_name in per_model_system_prompt:
+            return per_model_system_prompt[model_name]
+        return self.system_prompt
 
 
 @dataclass

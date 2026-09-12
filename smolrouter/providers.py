@@ -749,7 +749,13 @@ class ProviderFactory:
                 else:
                     logger.info(f"Skipping disabled provider: {config.name}")
             except Exception:
-                logger.exception("Failed to create provider from config: %s", provider_config)
+                provider_name = provider_config.get("name") if isinstance(provider_config, dict) else None
+                provider_type = provider_config.get("type") if isinstance(provider_config, dict) else None
+                logger.exception(
+                    "Failed to create provider from config: name=%r type=%r",
+                    provider_name,
+                    provider_type,
+                )
 
         # Sort providers by priority (lower numbers first)
         providers.sort(key=lambda p: p.config.priority)

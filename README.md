@@ -200,6 +200,29 @@ groq-scout: "YOUR_GROQ_KEY"
 
 For OpenAI-compatible providers, a configured provider `api_key` takes precedence over the client's `Authorization` header. Client `Authorization` is only forwarded upstream when that provider is intentionally keyless (`api_key: null` / BYOK passthrough).
 
+### Model-aware system prompt transforms
+
+OpenAI-compatible chat-completion requests can apply an optional provider-wide or exact-model system prompt policy after model resolution and before dispatch:
+
+```yaml
+providers:
+  - name: "local-qwen"
+    type: "openai"
+    url: "http://192.168.2.216:8081"
+    system_prompt:
+      mode: append
+      content: |
+        Additional instructions for every request on this provider.
+    per_model_system_prompt:
+      "qwen38-flash-next":
+        mode: append
+        content: "Pay careful attention to dark and low-contrast objects."
+```
+
+Supported modes are `append`, `prepend`, and `replace`. An exact `per_model_system_prompt` entry takes precedence over the provider default; use `null` for a model-specific opt-out. Matching uses the resolved canonical model name, so aliases are not configuration keys. Multiple ordinary string system messages are combined in their original order with a blank line. Structured system content or system messages with extra semantic fields are left unchanged and logged as a warning. Router-owned `/no_think` markers are preserved, including when using `replace`.
+
+This v1 transform applies only to `/v1/chat/completions` text requests handled by the mediator. It does not rewrite Responses `instructions`/`input`, image requests, or audio-output/TTS requests. It is a request convenience transform, not an enforcement boundary for structured content.
+
 ## Features
 
 **Intelligent routing:**

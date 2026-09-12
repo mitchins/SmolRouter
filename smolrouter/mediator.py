@@ -18,8 +18,10 @@ from .google_genai_provider import GOOGLE_GENAI_IMAGE_ENDPOINT, GoogleGenAIProvi
 from .dummy_provider import DummyProvider
 from .load_balancer import model_load_balancer
 from .request_metadata import RequestMetadata
+from .system_prompts import transform_system_prompt_messages
 
 logger = logging.getLogger(__name__)
+OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
 
 def _should_use_openai_completion_tokens(model_name: Any) -> bool:
@@ -365,6 +367,52 @@ class ModelMediator:
             request_payload["model"] = resolved_model.name
 
     @staticmethod
+    def _is_audio_output_request(request_payload: Dict[str, Any]) -> bool:
+        modalities = request_payload.get("modalities")
+        if isinstance(modalities, list) and any(str(value).strip().lower() == "audio" for value in modalities):
+            return True
+
+        response_format = request_payload.get("response_format")
+        if isinstance(response_format, dict) and str(response_format.get("type", "")).strip().lower() == "audio":
+            return True
+
+        return isinstance(request_payload.get("audio"), dict)
+
+    def _apply_system_prompt_policy(
+        self,
+        provider: IModelProvider,
+        resolved_model: ModelInfo,
+        request_payload: Dict[str, Any],
+        path: str,
+    ) -> None:
+        """Apply configured prompt policy to supported chat-completion requests."""
+        if path != OPENAI_CHAT_COMPLETIONS_PATH or self._is_audio_output_request(request_payload):
+            return
+
+        messages = request_payload.get("messages")
+        if not isinstance(messages, list):
+            return
+
+        provider_config = getattr(provider, "config", None)
+        get_policy = getattr(provider_config, "get_system_prompt_for_model", None)
+        if not callable(get_policy):
+            return
+
+        policy = get_policy(resolved_model.name)
+        if policy is None:
+            return
+
+        result = transform_system_prompt_messages(messages, policy)
+        request_payload["messages"] = result.messages
+        if result.skipped_reason:
+            logger.warning(
+                "Skipped system prompt transform for provider %s model %s: %s",
+                resolved_model.provider_id,
+                resolved_model.name,
+                result.skipped_reason,
+            )
+
+    @staticmethod
     def _google_error_status_code(error_message: str) -> int:
         error_lower = error_message.lower()
         if "quota exhausted" in error_lower or "429" in error_lower:
@@ -493,6 +541,8 @@ class ModelMediator:
                 self._attach_lb_instance(lb_instance, None),
             )
 
+        self._apply_system_prompt_policy(provider, resolved_model, request_payload, path)
+
         if isinstance(provider, GoogleGenAIProvider):
             return await self._handle_google_provider_request(provider, resolved_model, request_payload, path, lb_instance)
 
@@ -551,6 +601,9 @@ class ModelMediator:
             Tuple of (response_data, status_code, upstream_used, metadata)
         """
         client = kwargs.get("client_context") or ClientContext(ip=source_ip, headers=headers)
+        request_payload = dict(request_payload)
+        if isinstance(request_payload.get("messages"), list):
+            request_payload["messages"] = list(request_payload["messages"])
         timeout = kwargs.get("timeout")
         if timeout is None and args:
             timeout = args[0]
